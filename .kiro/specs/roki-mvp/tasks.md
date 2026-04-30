@@ -2,7 +2,7 @@
 
 - [ ] 1. Foundation: project scaffolding, configuration, and logging
 
-- [ ] 1.1 Initialize the Cargo workspace and the roki-daemon crate
+- [x] 1.1 Initialize the Cargo workspace and the roki-daemon crate
   - Create the root `Cargo.toml` as a Cargo workspace with `[workspace]` and `members = ["crates/roki-daemon"]`. Reserve the workspace layout so downstream specs can append `crates/roki-tui` and `crates/roki-api-types` as additive members without restructuring.
   - Create the `crates/roki-daemon/` member crate with `edition = "2024"`, binary name `roki`, and core runtime dependencies (tokio, clap, tracing, tracing-subscriber, serde, serde_json, thiserror, anyhow).
   - Create `crates/roki-daemon/src/main.rs` that parses CLI arguments and bootstraps a tokio multi-threaded runtime.

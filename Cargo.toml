@@ -1,0 +1,19 @@
+[workspace]
+resolver = "3"
+members = ["crates/roki-daemon"]
+
+# Downstream specs (notably roki-observability) will append additional members
+# such as `crates/roki-tui` and `crates/roki-api-types` to this list. Keep this
+# layout additive so those changes do not require restructuring the workspace.
+
+[workspace.package]
+edition = "2024"
+rust-version = "1.85"
+license = "MIT"
+repository = "https://github.com/reedom/roki"
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }
