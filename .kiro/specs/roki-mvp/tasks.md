@@ -25,7 +25,7 @@
   - Observable completion: a unit test asserts the configured token never appears in captured log output even when intentionally placed in a field value.
   - _Requirements: 1.4, 12.1, 12.2, 12.3, 12.4_
 
-- [ ] 1.4 Implement bounded shutdown handling
+- [x] 1.4 Implement bounded shutdown handling
   - Wire `SIGINT` and `SIGTERM` handling to a single `ShutdownSignal` propagated through the orchestrator and adapters.
   - Stop accepting new work on shutdown, signal active workers, and wait per worker up to a bounded shutdown window before forcing exit.
   - Observable completion: an integration test starts the daemon with a fake long-running worker, sends a shutdown signal, and asserts the daemon exits cleanly within the documented window.

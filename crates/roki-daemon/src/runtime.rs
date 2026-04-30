@@ -16,6 +16,7 @@ use tracing::info;
 
 use crate::cli::RunArgs;
 use crate::logging::{LogContext, LoggingConfig, LoggingGuard};
+use crate::shutdown::{ShutdownSignal, install_signal_handlers};
 
 /// Build the multi-threaded tokio runtime used by the daemon.
 ///
@@ -60,14 +61,27 @@ pub fn init_tracing() -> Option<LoggingGuard> {
 /// bootstrap log line we use a synthetic `daemon` repo and issue so the
 /// startup events still carry the canonical context shape).
 ///
-/// Subsequent tasks (1.4 shutdown, 1.5 multi-repo router, 2.x adapters) will
-/// build the orchestrator here and await shutdown.
+/// Subsequent tasks (1.5 multi-repo router, 2.x adapters) will build the
+/// orchestrator here and pass it the [`ShutdownSignal`]. Task 1.4 wires the
+/// signal-handling pipeline so SIGINT and SIGTERM trigger shutdown
+/// observably; the bootstrap path itself simply awaits the signal and
+/// returns.
 pub async fn run(_args: RunArgs) -> Result<()> {
     let bootstrap_ctx = LogContext::new("daemon", "bootstrap", new_correlation_id());
     let _enter = bootstrap_ctx.span("daemon.bootstrap").entered();
 
     info!(version = env!("CARGO_PKG_VERSION"), "roki daemon starting");
-    info!("roki daemon exiting cleanly (task 1.1 placeholder)");
+
+    let shutdown = ShutdownSignal::new();
+    let _signal_task = install_signal_handlers(shutdown.clone());
+
+    // Until the orchestrator is wired (task 3.x) the bootstrap simply waits
+    // for shutdown. Once tasks 1.5/3.x land, the orchestrator and adapters
+    // take their own clones of `shutdown` and the bounded shutdown loop runs
+    // their join handles through `await_workers_with_window`.
+    shutdown.wait().await;
+
+    info!("roki daemon exiting cleanly");
     Ok(())
 }
 
