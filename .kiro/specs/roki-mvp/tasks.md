@@ -39,7 +39,7 @@
 
 - [ ] 2. Core: domain types, traits, and per-component implementations
 
-- [ ] 2.1 (P) Define orchestrator state, transitions, and events
+- [x] 2.1 (P) Define orchestrator state, transitions, and events
   - Implement the `WorkerState` enum, including the `Cleaning` interim state, and the transition table (legal transitions, vetoable subset).
   - Define `TransitionEvent`, `TransitionTrigger`, and `VetoDecision` types.
   - Encode the vetoable subset: `Queued -> Active`, `AwaitingReview -> TerminalSuccess`, `TerminalSuccess -> Cleaning`. Workspace removal happens only on `Cleaning -> [*]`.
@@ -219,3 +219,9 @@
   - Capture additional recorded stream-json fixtures from real Claude Code sessions and lock the parser's mapping to the lifecycle event taxonomy.
   - Observable completion: the parser keeps the same outcome on the captured fixture set across changes; new fixtures can be added with a single helper.
   - _Requirements: 5.2_
+
+## Implementation Notes
+
+- 2.1: `legal_transition` includes `Queued -> TerminalFailure` (failure path before a worker runs, e.g. unrouteable issue) — additive supplement to design.md's lifecycle diagram; consider folding into design.md when next revised.
+- 2.1: `legal_transition` doc-comment claims compile-time exhaustiveness but the body has a `_ => false` catch-all; the `legal_transition_rejects_undocumented_pairs` matrix test enforces exhaustiveness at test time. Either remove the wildcard or correct the doc-comment in a follow-up.
+- 2.1: `TransitionEvent` carries an additional derived `vetoable: bool` field beyond the design.md sketch; it is purely derived from `(previous, next)` via `is_vetoable`. Fold into design.md's `TransitionEvent` shape when next revised.
