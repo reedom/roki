@@ -31,7 +31,7 @@
   - Observable completion: an integration test starts the daemon with a fake long-running worker, sends a shutdown signal, and asserts the daemon exits cleanly within the documented window.
   - _Requirements: 1.3_
 
-- [ ] 1.5 Implement the multi-repo router and unhealthy-repo handling
+- [x] 1.5 Implement the multi-repo router and unhealthy-repo handling
   - Build the deterministic precedence rule for routing a Linear issue to exactly one configured repository when scopes overlap, and log every routing decision.
   - On startup, verify each repository path is a Git working tree; mark missing or non-Git paths as unhealthy and refuse to schedule work for them while continuing to serve the remaining repositories.
   - Observable completion: a unit test routes the same issue against two overlapping configured scopes and asserts a single `(repo, issue)` key is produced, plus a log event names the precedence decision.

@@ -7,5 +7,6 @@
 pub mod cli;
 pub mod config;
 pub mod logging;
+pub mod routing;
 pub mod runtime;
 pub mod shutdown;
