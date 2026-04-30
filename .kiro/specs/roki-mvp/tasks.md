@@ -64,7 +64,7 @@
   - _Requirements: 4.1, 4.2, 4.5_
   - _Boundary: workspace_
 
-- [ ] 2.3 (P) Implement the WORKFLOW.md loader, schema, and hot reload
+- [x] 2.3 (P) Implement the WORKFLOW.md loader, schema, and hot reload
   - Parse YAML front matter, render the Liquid body, and validate the resulting structure against the published JSON-Schema.
   - Type `WorkflowPolicy.extension` as `serde_json::Value` so downstream specs can `serde_json::from_value` their reserved sub-slice into their own typed struct.
   - Reserve and round-trip (without interpretation) all four canonical sub-namespaces: `extension.gates.spec.*`, `extension.gates.review.*`, `extension.server.*`, `extension.distill.*`.
@@ -227,3 +227,5 @@
 - 2.1: `TransitionEvent` carries an additional derived `vetoable: bool` field beyond the design.md sketch; it is purely derived from `(previous, next)` via `is_vetoable`. Fold into design.md's `TransitionEvent` shape when next revised.
 - 2.1a: `PreCleanupHook::pre_cleanup` returns `VetoDecision` directly; design.md line 381 sketches `on_pre_cleanup(...) -> Result<VetoDecision, SubscriberError>`. Task 3.x must reconcile when the orchestrator wires hooks into the `TerminalSuccess -> Cleaning` dispatch — either widen the trait return type or wrap at orchestrator side to honor design's fail-closed-on-error stance.
 - 2.1a: `register_pre_cleanup_hook` is on `HookRegistry` returning `usize` (current count); design.md sketches it on the `Orchestrator` trait returning `SubscriptionHandle`. Acceptable for 2.1a since `Orchestrator` doesn't exist yet; 3.x must republish the API on the `Orchestrator` trait and add deregistration.
+- 2.3: `BackoffPolicy.max_seconds` default 300 is correct, but the JSON-Schema upper bound allows up to 3600 (1h). Design says "capped at 5min". Tighten the schema bound to 300 in a follow-up touch-up.
+- 2.3: `routing::tests::route_issue_emits_routed_event_with_required_fields` (crates/roki-daemon/src/routing.rs:449) intermittently fails when run in the full workspace due to `tracing::subscriber::set_default` not isolating across parallel tests. Pre-existing — observed during 2.3 review; passes in isolation. Fix in 1.5 follow-up by switching to a per-test custom subscriber via `tracing::subscriber::with_default` scoped to the test thread.
