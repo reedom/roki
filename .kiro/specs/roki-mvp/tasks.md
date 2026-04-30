@@ -73,7 +73,7 @@
   - _Requirements: 6.1, 6.2, 6.3, 6.4, 6.5, 13.5_
   - _Boundary: workflow_
 
-- [ ] 2.4 (P) Implement the agent tool registry and the `linear_graphql` proxy
+- [x] 2.4 (P) Implement the agent tool registry and the `linear_graphql` proxy
   - Define the `Tool` and `Registry` traits, their stable name and JSON-Schema input/output convention, and the catalog format passed to the engine adapter at worker launch.
   - Implement the `linear_graphql` proxy: accept exactly one GraphQL operation per call, forward to Linear with the daemon-owned token, share rate-limit state with the tracker client, and apply credential redaction to errors.
   - Observable completion: a unit test sends a multi-operation GraphQL document and receives a `MULTIPLE_OPERATIONS` error; another test injects the API token into a failure path and asserts no error field returned to the caller contains it.

@@ -11,5 +11,6 @@ pub mod orchestrator;
 pub mod routing;
 pub mod runtime;
 pub mod shutdown;
+pub mod tools;
 pub mod workflow;
 pub mod workspace;
