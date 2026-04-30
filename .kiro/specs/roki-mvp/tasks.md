@@ -57,7 +57,7 @@
   - _Requirements: 13.1, 13.2_
   - _Boundary: orchestrator/read, orchestrator/hooks_
 
-- [ ] 2.2 (P) Implement the workspace manager and path-safety invariants
+- [x] 2.2 (P) Implement the workspace manager and path-safety invariants
   - Implement identifier sanitization for repo and issue components, derive the workspace path under the configured workspace root, and refuse paths that escape the root.
   - Provide `ensure`, `remove`, and `list_existing` operations with idempotent semantics; surface filesystem errors with the offending path.
   - Observable completion: a unit test shows that crafted issue identifiers (path traversal, absolute paths, identifiers colliding after sanitization) are rejected, and that valid identifiers produce a path that canonicalizes inside the workspace root.
