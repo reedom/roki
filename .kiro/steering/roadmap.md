@@ -52,8 +52,8 @@ The architecture is symphony-aligned (openai/symphony) where it makes sense: no 
   - **Workspace path layout**: `.kiro/specs/<issue>/` lives inside the workspace; spec-gate and distill-postmerge both touch it.
 
 ## Specs (dependency order)
-- [ ] roki-mvp -- symphony-parity vertical slice: SPEC.md + Rust skeleton + Linear poll + claude session + workspace + run loop. Multi-repo from day one. Dependencies: none
-- [ ] roki-spec-gate -- daemon-enforced pre-implementation kiro-spec gate; pre-impl distill flow merging ticket EARS into project EARS. Dependencies: roki-mvp
-- [ ] roki-review-gate -- daemon-enforced pre-PR kiro-review gate; refuses In Review transition without review-pass artifact. Dependencies: roki-mvp
-- [ ] roki-observability -- optional HTTP API (axum) + ratatui TUI client; symphony /api/v1/state schema. Dependencies: roki-mvp
-- [ ] roki-distill-postmerge -- post-merge classifier for flow-type docs (design.md, tasks.md, plan outputs); routes delete / archive / distill. Dependencies: roki-mvp
+- [x] roki-mvp -- symphony-parity vertical slice: SPEC.md + Rust skeleton + Linear poll + claude session + workspace + run loop. Multi-repo from day one. Dependencies: none
+- [x] roki-spec-gate -- daemon-enforced pre-implementation kiro-spec gate; pre-impl distill flow merging ticket EARS into project EARS. Dependencies: roki-mvp
+- [x] roki-review-gate -- daemon-enforced pre-PR kiro-review gate; refuses In Review transition without review-pass artifact. Dependencies: roki-mvp
+- [x] roki-observability -- optional HTTP API (axum) + ratatui TUI client; symphony /api/v1/state schema. Dependencies: roki-mvp
+- [x] roki-distill-postmerge -- post-merge classifier for flow-type docs (design.md, tasks.md, plan outputs); routes delete / archive / distill. Dependencies: roki-mvp
