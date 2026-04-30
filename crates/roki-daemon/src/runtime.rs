@@ -1,15 +1,21 @@
 //! Runtime bootstrap helpers.
 //!
-//! Task 1.1 provides the multi-threaded tokio runtime entry point and a
-//! placeholder `run` handler that initializes tracing, emits a startup log
-//! line, and exits. Task 1.3 will replace `init_tracing` with the
-//! secret-redaction-aware tracing layer.
+//! Task 1.1 introduced the multi-threaded tokio runtime entry point. Task 1.3
+//! replaces the placeholder `tracing_subscriber::fmt::init()` with the
+//! redaction-aware tracing pipeline owned by [`crate::logging`]. The CLI shell
+//! still calls [`init_tracing`] from `main.rs`; that wrapper now delegates to
+//! the new layer with a stdout destination and the `info` filter as defaults
+//! suitable for the bootstrap path. Once the configuration loader is wired
+//! through `roki run` end-to-end (later tasks), [`run`] will rebuild the
+//! logging pipeline from the loaded `Config` and the operator-declared
+//! secrets.
 
 use anyhow::{Context, Result};
 use tokio::runtime::Builder;
 use tracing::info;
 
 use crate::cli::RunArgs;
+use crate::logging::{LogContext, LoggingConfig, LoggingGuard};
 
 /// Build the multi-threaded tokio runtime used by the daemon.
 ///
@@ -23,28 +29,58 @@ pub fn build_tokio_runtime() -> Result<tokio::runtime::Runtime> {
         .context("failed to build tokio multi-threaded runtime")
 }
 
-/// Initialize a placeholder tracing subscriber.
+/// Initialize the bootstrap tracing pipeline.
 ///
-/// This is intentionally minimal for task 1.1. Task 1.3 replaces this with the
-/// redaction layer described in design.md (`logging.rs`).
-pub fn init_tracing() {
-    // `try_init` so duplicate initialization in tests does not panic.
-    let _ = tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
-        )
-        .try_init();
+/// This is invoked from `main.rs` before the configuration loader runs, so
+/// the operator can see config-load errors. The pipeline is intentionally
+/// minimal here: stdout destination, `info` filter, and an empty secret list.
+/// Once `run` has loaded the config it can install the production pipeline
+/// with the real secret list (Linear API token + operator-declared secrets).
+///
+/// Errors are non-fatal: a missing global subscriber is logged via stderr so
+/// the binary can still boot. `try_init` allows tests in the same process to
+/// race without panicking.
+pub fn init_tracing() -> Option<LoggingGuard> {
+    let directive = std::env::var("RUST_LOG").unwrap_or_else(|_| "info".to_string());
+    let config = LoggingConfig::stdout(directive);
+    match crate::logging::init(config) {
+        Ok(guard) => Some(guard),
+        Err(error) => {
+            eprintln!("roki: tracing init failed: {error}");
+            None
+        }
+    }
 }
 
 /// Execute `roki run`.
 ///
-/// Task 1.1 scope: initialize tracing, emit a startup log line so operators
-/// see the daemon came up, and exit cleanly. Subsequent tasks fold in the
-/// orchestrator, tracker, workflow loader, and shutdown handling.
+/// The pipeline is already initialized by `main.rs`. This entry point opens a
+/// per-invocation context span (Requirement 12.2: `(repo, issue,
+/// correlation_id)` fields are part of the standard event shape; for the
+/// bootstrap log line we use a synthetic `daemon` repo and issue so the
+/// startup events still carry the canonical context shape).
+///
+/// Subsequent tasks (1.4 shutdown, 1.5 multi-repo router, 2.x adapters) will
+/// build the orchestrator here and await shutdown.
 pub async fn run(_args: RunArgs) -> Result<()> {
+    let bootstrap_ctx = LogContext::new("daemon", "bootstrap", new_correlation_id());
+    let _enter = bootstrap_ctx.span("daemon.bootstrap").entered();
+
     info!(version = env!("CARGO_PKG_VERSION"), "roki daemon starting");
-    // Placeholder: later tasks build the orchestrator here and await shutdown.
     info!("roki daemon exiting cleanly (task 1.1 placeholder)");
     Ok(())
+}
+
+/// Generate a fresh correlation identifier for a worker invocation or a
+/// daemon-level event.
+///
+/// MVP keeps this simple: monotonic process-uptime nanoseconds rendered as
+/// hex. Later tasks may swap in a UUID once we vendor a uuid crate. The
+/// shape is opaque to consumers — only uniqueness within a daemon run
+/// matters here.
+fn new_correlation_id() -> String {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+    format!("corr-{n:016x}")
 }

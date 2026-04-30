@@ -18,7 +18,7 @@
   - Observable completion: a unit test loads a valid example config and a malformed one; the malformed case returns an error whose message identifies the failing field.
   - _Requirements: 1.2, 2.1, 2.5, 9.5_
 
-- [ ] 1.3 Implement structured tracing and secret-redaction layer
+- [x] 1.3 Implement structured tracing and secret-redaction layer
   - Initialize `tracing-subscriber` with a configurable log level and destination (stdout, file, or both).
   - Add a redaction layer that scrubs the Linear API token and any operator-declared secret strings from every emitted event.
   - Standardize `(repo, issue, correlation_id)` context fields on every event that has them.

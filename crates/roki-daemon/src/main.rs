@@ -26,7 +26,11 @@ fn main() -> ExitCode {
         }
     };
 
-    init_tracing();
+    // Hold the guard for the duration of the run so any log file flushes on
+    // shutdown. Task 1.3 introduced the redaction-aware pipeline that returns
+    // this guard; previous tasks discarded the return value of the placeholder
+    // initializer.
+    let _logging_guard = init_tracing();
 
     let result = runtime.block_on(async {
         match cli.command {
