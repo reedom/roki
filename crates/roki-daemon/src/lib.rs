@@ -5,4 +5,5 @@
 //! parser and the runtime bootstrap helpers without spawning the binary.
 
 pub mod cli;
+pub mod config;
 pub mod runtime;

@@ -11,7 +11,7 @@
   - _Requirements: 1.1, 1.5_
   - _Boundary: workspace root and crates/roki-daemon_
 
-- [ ] 1.2 Build the layered configuration loader with secret handling
+- [x] 1.2 Build the layered configuration loader with secret handling
   - Define the configuration struct hierarchy (root config plus per-repo entries), including workspace root, Linear token source, polling cadence cap, max concurrent workers, and permission strategy selection.
   - Implement loading from a config file plus environment overrides, with explicit refusal when the Linear token is absent.
   - Validate configuration at startup and return a structured error that names the offending field on failure.
