@@ -48,7 +48,7 @@
   - _Requirements: 8.1, 8.2, 13.2_
   - _Boundary: orchestrator/state_
 
-- [ ] 2.1a (P) Publish the `OrchestratorRead` and `PreCleanupHook` extension traits
+- [x] 2.1a (P) Publish the `OrchestratorRead` and `PreCleanupHook` extension traits
   - Define the `OrchestratorRead` trait (`snapshot()` returning a `SnapshotResponse`, `issue(repo, issue)` returning `Option<IssueState>`) and ensure it grants no state-mutation rights.
   - Define the `PreCleanupHook` trait and the orchestrator's `register_pre_cleanup_hook` registration API; pre-cleanup hooks are dispatched as the vetoable observers of `TerminalSuccess -> Cleaning`.
   - Document both traits in the design surface so downstream specs (roki-observability, roki-distill-postmerge) can depend on them without forking the core.
@@ -225,3 +225,5 @@
 - 2.1: `legal_transition` includes `Queued -> TerminalFailure` (failure path before a worker runs, e.g. unrouteable issue) — additive supplement to design.md's lifecycle diagram; consider folding into design.md when next revised.
 - 2.1: `legal_transition` doc-comment claims compile-time exhaustiveness but the body has a `_ => false` catch-all; the `legal_transition_rejects_undocumented_pairs` matrix test enforces exhaustiveness at test time. Either remove the wildcard or correct the doc-comment in a follow-up.
 - 2.1: `TransitionEvent` carries an additional derived `vetoable: bool` field beyond the design.md sketch; it is purely derived from `(previous, next)` via `is_vetoable`. Fold into design.md's `TransitionEvent` shape when next revised.
+- 2.1a: `PreCleanupHook::pre_cleanup` returns `VetoDecision` directly; design.md line 381 sketches `on_pre_cleanup(...) -> Result<VetoDecision, SubscriberError>`. Task 3.x must reconcile when the orchestrator wires hooks into the `TerminalSuccess -> Cleaning` dispatch — either widen the trait return type or wrap at orchestrator side to honor design's fail-closed-on-error stance.
+- 2.1a: `register_pre_cleanup_hook` is on `HookRegistry` returning `usize` (current count); design.md sketches it on the `Orchestrator` trait returning `SubscriptionHandle`. Acceptable for 2.1a since `Orchestrator` doesn't exist yet; 3.x must republish the API on the `Orchestrator` trait and add deregistration.
