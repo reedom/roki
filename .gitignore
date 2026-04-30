@@ -1,0 +1,11 @@
+/.idea
+.DS_Store
+
+.env
+.envrc
+
+*.bin
+*.log
+*.out
+*.tmp
+
