@@ -11,6 +11,7 @@
 //! 3.1, 3.2, 3.5) layer additional submodules (`read`, `hooks`, `worker`,
 //! `event_bus`) on top without renaming what is published here.
 
+pub mod events;
 pub mod hooks;
 pub mod read;
 pub mod state;

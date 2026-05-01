@@ -135,7 +135,7 @@
 
 - [ ] 3. Integration: orchestrator wiring, recovery, and event bus
 
-- [ ] 3.1 Implement the transition event bus and subscription hooks
+- [x] 3.1 Implement the transition event bus and subscription hooks
   - Implement a bounded broadcast channel for non-vetoable transitions plus an explicit per-subscriber await path for vetoable transitions where a `Deny` decision blocks the transition.
   - Isolate subscriber failures so a panicking or erroring subscriber cannot stall others; log the per-subscriber error counter and any drop-counter increments.
   - Observable completion: an integration test registers two subscribers, one of which errors on every event; transitions still reach the healthy subscriber and the failure is logged with the subscriber identifier.
