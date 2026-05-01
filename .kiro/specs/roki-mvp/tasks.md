@@ -180,6 +180,20 @@
   - _Depends: 2.5, 2.6, 3.2_
   - _Requirements: 3.1, 3.5_
 
+- [ ] 3.7 Implement the retry-budget Backoff loop in the worker actor
+  - _Boundary:_ `crates/roki-daemon/src/engine/policy.rs`, `crates/roki-daemon/src/orchestrator/core.rs`, `crates/roki-daemon/src/workflow/schema.rs` (and the matching JSON-Schema asset), `SPEC.md` §3.2 + §9.5, `design.md` retry-budget paragraph (≈line 761). Tests under `crates/roki-daemon/src/engine/policy.rs` (`#[cfg(test)]`) and `crates/roki-daemon/tests/orchestrator_core.rs`.
+  - Add `EnginePolicy.max_attempts: u32` (default 3, JSON-Schema range 1..=10; `1` means one shot / no retry) and `EnginePolicy.backoff_floor: Duration` (default = the existing `BACKOFF_FLOOR` constant). Update `EnginePolicy::compute_backoff` to read the field rather than the constant; the constant becomes the documented default.
+  - Add an additive `engine.max_attempts` key to the `WORKFLOW.md` front-matter schema. Wire it through to `EnginePolicy` at policy resolution.
+  - Extend `ActorRecord` with `consecutive_failures: u32`. In `WorkerActor::try_promote_to_active`, replace the current "all failures → TerminalFailure" arm with: `CleanExit -> Active -> AwaitingReview` (unchanged); `NonCleanExit & consecutive_failures + 1 < max_attempts -> Active -> Backoff -> sleep(EnginePolicy::next_launch_delay) -> Backoff -> Active` (re-launch via the existing engine path; increment the counter); `NonCleanExit & consecutive_failures + 1 >= max_attempts -> Active -> TerminalFailure`; `TurnBudgetExhausted | Stalled -> Active -> TerminalFailure` (no retry — agent-authored failures repeat under the same prompt).
+  - Workspace is retained across the Backoff loop (no delete/recreate). Prelude / `additional_context` is re-emitted unchanged on each launch — failure-history accumulation is a downstream-spec concern, out of scope here.
+  - All retry-arc transitions (`Active → Backoff`, `Backoff → Active`, retry-exhausted `Active → TerminalFailure`) are non-vetoable, matching the existing vetoable subset.
+  - Per arc, emit one `transition` `tracing` event with `attempt`, `delay_ms`, `outcome_reason`. On retry-exhausted `Active → TerminalFailure` log `final_attempt` and `last_outcome_reason`.
+  - Update `SPEC.md` §3.2 schema table (add the `max_attempts` row) and §9.5 retry semantics paragraph (state explicitly that only `NonCleanExit` retries) in the same change set, per §16 contract-change rule. Update `design.md` line ≈761 to match.
+  - Observable completion: (a) unit test in `engine::policy` rejects `max_attempts = 0` and accepts `1..=10`; (b) integration test in `orchestrator_core.rs` with a stub `EngineLauncher` producing a configurable failure sequence asserts the exact `Active → Backoff → Active → … → TerminalFailure` transition trace for `NonCleanExit` and the immediate `Active → TerminalFailure` for `Stalled` / `TurnBudgetExhausted`, completes deterministically in well under one second using a sub-second `backoff_floor`, and confirms the workspace path on disk is retained throughout.
+  - _Depends: 3.2, 3.5_
+  - _Requirements: 4.5, 5.6, 8.1_
+  - _Design: `.kiro/specs/roki-mvp/design-retry-policy.md`_
+
 - [ ] 4. Validation: end-to-end paths, language-agnostic SPEC.md
 
 - [x] 4.1 Author the language-agnostic `SPEC.md` at the repo root
@@ -200,7 +214,7 @@
 - [ ] 4.3 End-to-end failure-path test for retry budget exhaustion
   - Drive the same harness so that the fake `claude` binary repeatedly exits non-cleanly until the configured retry budget is exhausted; assert the worker lands in `TerminalFailure` with the workspace retained and the failure logged.
   - Observable completion: the test passes deterministically and the post-run filesystem layout still contains the workspace directory while the orchestrator state for that key is `TerminalFailure`.
-  - _Depends: 4.2_
+  - _Depends: 3.7, 4.2_
   - _Requirements: 5.6, 4.5, 8.1_
   - _Blocked: production retry-budget Backoff loop is not implemented. `WorkerActor::try_promote_to_active` (orchestrator/core.rs:597-628) routes every non-`CleanExit` outcome directly to `TerminalFailure`; `EnginePolicy` (engine/policy.rs:150-161) has no `max_attempts` field; WORKFLOW.md front-matter schema (SPEC.md §3.2) has no `max_retries` key; `BACKOFF_FLOOR=10s` is unconditionally clamped. The `Active -> Backoff -> Active` driver mandated by SPEC.md §4.2 (lines 298-301) and design.md line 761 was never built. Task 3.2 shipped only the happy path; tasks.md Implementation Note dated 2.10 already foreshadowed this gap ("the orchestrator (3.x) must produce these outcomes itself"). Recommended remediation: insert a new src-level task (e.g. `3.7`) before 4.3 to (a) add `EnginePolicy.max_attempts`, (b) extend `ActorRecord` with `consecutive_failures`, (c) drive `Active -> Backoff` and `Backoff -> Active` in the actor with `EnginePolicy::next_launch_delay`, (d) parameterize `BACKOFF_FLOOR` for test override, and (e) add an additive `max_retries` key to the WORKFLOW.md schema. Per SPEC.md §16 contract-change rule, the SPEC.md §3.2 / §9.5 update must ship in the same change set._
 
