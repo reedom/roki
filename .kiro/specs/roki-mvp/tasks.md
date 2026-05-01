@@ -102,7 +102,7 @@
   - _Requirements: 3.1, 3.4_
   - _Boundary: tracker/webhook_
 
-- [ ] 2.7 (P) Implement the Claude Code stream-JSON parser
+- [x] 2.7 (P) Implement the Claude Code stream-JSON parser
   - Build a tolerant newline-delimited JSON parser that maps the documented stream-json shapes to the typed `EngineLifecycleEvent` taxonomy and skips a single bad line without aborting the worker stream.
   - Treat unknown event types as `AgentMessage` so the supervisor loop continues to record progress timestamps.
   - Observable completion: a unit test feeds a recorded stream containing one bad JSON line plus a representative event sequence and asserts the parser emits all valid events in order while logging a single parse-error event for the bad line.
