@@ -41,7 +41,7 @@
 //! Result<WorkerOutcome, LaunchError>`) so a wrapper impl can be added by 3.4
 //! without breaking core.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
 use std::time::SystemTime;
@@ -66,7 +66,7 @@ use crate::permissions::{PermissionMode, PermissionSource, ResolvedPermission};
 use crate::shutdown::ShutdownSignal;
 use crate::tracker::model::{IssueState as TrackerIssueState, NormalizedIssue};
 use crate::workflow::{ElicitationsMode, SandboxMode};
-use crate::workspace::Workspace;
+use crate::workspace::{Workspace, WorkspaceError};
 
 /// Error type re-exported for the engine launcher trait so downstream test
 /// stubs and the real `ClaudeEngineAdapter` can both surface launch failures
@@ -184,6 +184,12 @@ pub struct Orchestrator {
     shutdown: ShutdownSignal,
     tracker_inbox: mpsc::Receiver<NormalizedIssue>,
     state: Arc<RwLock<HashMap<(RepoId, IssueId), ActorRecord>>>,
+    /// Keys whose workspace lifecycle hit a hard fault (creation or deletion
+    /// error). Per Requirement 4.5, the orchestrator refuses to start
+    /// additional work for a poisoned `(repo, issue)` until an operator
+    /// intervenes. This set is append-only for the daemon's lifetime; restart
+    /// recovery (task 3.3) is the operator's intervention surface.
+    poisoned: Arc<RwLock<HashSet<(RepoId, IssueId)>>>,
 }
 
 impl Orchestrator {
@@ -207,6 +213,7 @@ impl Orchestrator {
             shutdown,
             tracker_inbox,
             state: Arc::new(RwLock::new(HashMap::new())),
+            poisoned: Arc::new(RwLock::new(HashSet::new())),
         }
     }
 
@@ -314,6 +321,28 @@ impl Orchestrator {
     /// this is the first time we see the `(repo, issue)` key.
     async fn dispatch_tracker_event(&mut self, issue: NormalizedIssue) {
         let key = (issue.repo.clone(), issue.issue.clone());
+
+        // Refuse any further work for a poisoned `(repo, issue)`: a workspace
+        // creation or deletion error already drove this key into a fault state
+        // and the operator must intervene before we resume. We log + skip here
+        // so the orchestrator never silently ignores tracker events.
+        // Requirement 4.5.
+        {
+            let guard = self
+                .poisoned
+                .read()
+                .expect("orchestrator poisoned-set RwLock poisoned; this is unrecoverable");
+            if guard.contains(&key) {
+                warn!(
+                    target: "orchestrator",
+                    repo = %key.0.as_str(),
+                    issue = %key.1.as_str(),
+                    "tracker event refused for poisoned (repo, issue); operator intervention required",
+                );
+                return;
+            }
+        }
+
         let inbox = {
             let mut guard = self
                 .state
@@ -358,6 +387,7 @@ impl Orchestrator {
             engine: Arc::clone(&self.engine),
             event_bus: Arc::clone(&self.event_bus),
             hook_registry: Arc::clone(&self.hook_registry),
+            poisoned: Arc::clone(&self.poisoned),
         };
         tokio::spawn(async move { actor.run(rx).await });
     }
@@ -378,6 +408,10 @@ struct WorkerActor {
     engine: Arc<dyn EngineLauncher>,
     event_bus: Arc<EventBus>,
     hook_registry: Arc<HookRegistry>,
+    /// Shared with [`Orchestrator`] so a workspace fault recorded inside the
+    /// actor immediately fences off subsequent tracker events for the same
+    /// `(repo, issue)`. Requirement 4.5.
+    poisoned: Arc<RwLock<HashSet<(RepoId, IssueId)>>>,
 }
 
 impl WorkerActor {
@@ -500,18 +534,30 @@ impl WorkerActor {
         }
 
         // Workspace lifecycle: ensure the directory exists before the worker
-        // launches. Failure to materialise the workspace is a hard fault for
-        // the actor — log and stay in Active without launching a worker.
+        // launches. Failure to materialise the workspace is a hard fault per
+        // Requirement 4.5 — log the offending path, drive the actor to
+        // TerminalFailure, and poison the (repo, issue) so subsequent tracker
+        // events refuse to start more work until the operator intervenes.
         let workspace_dir = match self.workspace.ensure(&self.key.0, &self.key.1).await {
             Ok(path) => path,
             Err(err) => {
+                let offending = workspace_error_path(&err);
                 warn!(
                     target: "orchestrator",
                     repo = %self.key.0.as_str(),
                     issue = %self.key.1.as_str(),
                     error = %err,
+                    offending_path = ?offending,
                     "workspace ensure failed; skipping engine launch",
                 );
+                self.mark_poisoned();
+                self.commit_transition(
+                    WorkerState::Active,
+                    WorkerState::TerminalFailure,
+                    TransitionTrigger::EngineEvent,
+                    correlation,
+                )
+                .await;
                 return;
             }
         };
@@ -631,18 +677,34 @@ impl WorkerActor {
             return;
         }
 
-        // Workspace removal happens once the actor enters Cleaning. Failure
-        // is logged but does not block actor termination — the directory
-        // will be picked up by the next recovery scan if it lingers.
+        // Workspace removal happens once the actor enters Cleaning. A failure
+        // here is a hard fault per Requirement 4.5: log the offending path,
+        // poison the (repo, issue) so subsequent tracker events for this key
+        // are refused, and stop the cleanup loop. The Cleaning state has no
+        // outgoing transition so the actor exits next loop iteration.
         if let Err(err) = self.workspace.remove(&self.key.0, &self.key.1).await {
+            let offending = workspace_error_path(&err);
             warn!(
                 target: "orchestrator",
                 repo = %self.key.0.as_str(),
                 issue = %self.key.1.as_str(),
                 error = %err,
-                "workspace remove failed during Cleaning",
+                offending_path = ?offending,
+                "workspace remove failed during Cleaning; poisoning (repo, issue)",
             );
+            self.mark_poisoned();
         }
+    }
+
+    /// Mark the actor's `(repo, issue)` as poisoned so the orchestrator
+    /// dispatch loop refuses any further tracker events for this key. See
+    /// Requirement 4.5.
+    fn mark_poisoned(&self) {
+        let mut guard = self
+            .poisoned
+            .write()
+            .expect("orchestrator poisoned-set RwLock poisoned; this is unrecoverable");
+        guard.insert(self.key.clone());
     }
 
     /// Read the actor's current state from the orchestrator state map.
@@ -739,6 +801,20 @@ impl WorkerActor {
         if let Some(record) = guard.get_mut(&self.key) {
             record.inbox = None;
         }
+    }
+}
+
+/// Extract the offending path from a [`WorkspaceError`] when one is carried.
+///
+/// Requirement 4.5 demands that workspace creation/deletion errors are logged
+/// alongside the path the daemon was operating on. Variants without an
+/// associated path return `None` and the structured log just omits the field.
+fn workspace_error_path(err: &WorkspaceError) -> Option<&PathBuf> {
+    match err {
+        WorkspaceError::Io { path, .. } => Some(path),
+        WorkspaceError::EscapesRoot { offending, .. } => Some(offending),
+        WorkspaceError::IdentifierCollision { existing_path, .. } => Some(existing_path),
+        WorkspaceError::InvalidIdentifier { .. } => None,
     }
 }
 

@@ -165,7 +165,7 @@
   - _Depends: 2.4, 2.10_
   - _Requirements: 7.1, 7.2, 7.4_
 
-- [ ] 3.5 Wire the workspace lifecycle into orchestrator transitions
+- [x] 3.5 Wire the workspace lifecycle into orchestrator transitions
   - Create the workspace on the first transition into `Active`, and set the worker subprocess cwd to that workspace.
   - On transition into `TerminalSuccess`, dispatch the registered pre-cleanup hooks against the vetoable `TerminalSuccess -> Cleaning` transition; on `Allow`, advance the state machine to `Cleaning` and remove the workspace after the worker exits; on `Deny`, block workspace removal and log the veto decision (the workspace is retained pending operator intervention, treated like `TerminalFailure` for retention purposes).
   - Retain the workspace on `TerminalFailure` for inspection; on workspace creation or deletion errors, mark the worker failed, log the offending path, and refuse to start additional work for that `(repo, issue)` until the operator intervenes.
@@ -231,3 +231,4 @@
 - 2.3: `routing::tests::route_issue_emits_routed_event_with_required_fields` (crates/roki-daemon/src/routing.rs:449) intermittently fails when run in the full workspace due to `tracing::subscriber::set_default` not isolating across parallel tests. Pre-existing — observed during 2.3 review; passes in isolation. Fix in 1.5 follow-up by switching to a per-test custom subscriber via `tracing::subscriber::with_default` scoped to the test thread.
 - 2.10: `WorkerContext` shape diverges from design.md slightly — instead of separate `policy: WorkflowPolicy`, `permission: PermissionStrategy`, `max_turns`, `stall_window` fields, the supervisor consumes already-resolved `permission: ResolvedPermission` (from 2.9) and `policy: EnginePolicy` (from 2.8). Update design.md to reflect this when next revised.
 - 2.10: `WorkerOutcome::TurnBudgetExhausted` and `Cancelled` are not produced by the single-launch supervisor — they belong to the orchestrator's continuation-prompt loop and shutdown path respectively. The orchestrator (3.x) must produce these outcomes itself.
+- 3.5: state.rs has no explicit `Cleaning -> TerminalFailure` transition; on remove-failure during Cleaning the actor exits its loop and the poisoned set fences future tracker events. Add an explicit `Cleaning -> TerminalFailure` arc in state.rs so the lifecycle is observable end-to-end.
