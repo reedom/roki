@@ -119,13 +119,16 @@ reference implementation calls it `roki run`) that:
 
 The configuration must declare:
 
-- **One or more repositories**, each with: a local working tree path, a
-  Linear team or label scope, a `WORKFLOW.md` path, and one of either
-  `webhook_secret_env` (preferred — names an environment variable holding
-  the HMAC-SHA256 secret) or `webhook_secret` (literal — discouraged; the
-  daemon emits a WARN log on load when a literal is observed).
-- **A workspace root**: the directory under which per-issue workspaces are
-  created (see §6).
+- **One or more repositories**, each with: a `repo` ghq identifier
+  (`<owner>/<repo>` or `<host>/<owner>/<repo>`), a Linear team or label
+  scope, a `WORKFLOW.md` path, and one of either `webhook_secret_env`
+  (preferred — names an environment variable holding the HMAC-SHA256
+  secret) or `webhook_secret` (literal — discouraged; the daemon emits a
+  WARN log on load when a literal is observed). The local checkout path
+  is resolved at runtime via `ghq list -p` (cloning on miss via
+  `ghq get`); workspaces are git worktrees laid out by the external `wt`
+  CLI (see §6). Operators must install both `wt` and `ghq` on `$PATH`;
+  absence of either at startup is a hard refusal.
 - **A permission strategy**: either an allowlist (the path to a Claude Code
   settings file) or the explicit dangerous-fallback flag (see §13). If
   neither is configured, the daemon refuses to start. The dangerous fallback
@@ -438,51 +441,64 @@ warn log; subsequent lines parse independently.
 
 ### 6.1 Path layout
 
-Workspaces are laid out under the configured workspace root as:
+Workspaces are real git worktrees of the configured source repository,
+not bare sandbox directories. For a repo whose ghq identifier is
+`<owner>/<repo>`, the local checkout sits at the path `ghq list -p`
+returns (typically `<ghq_root>/<host>/<owner>/<repo>`); the per-issue
+worktree is created as a sibling of that checkout:
 
 ```text
-<workspace_root>/<repo>/<issue>/
+{repo_path}/../{repo_name}.{branch_sanitized}
 ```
 
-where `<repo>` and `<issue>` are the **sanitized** repository and issue
-identifiers. Each `(repo, issue)` workspace is independent, even across
-repositories.
+The branch name is the Linear issue id verbatim. The sanitizer in §6.2
+is applied to the branch component of the path; the original issue id is
+preserved as the branch name itself wherever the underlying VCS allows
+it. Each `(repo, issue)` worktree is independent, even across
+repositories that share the same Linear scope.
 
 ### 6.2 Sanitization rules
 
-A conformant implementation sanitizes each path component (repo and issue
-separately) by the following rules. All comparisons are performed before any
-filesystem call.
+The sanitization rule lives inside the `wt` adapter and is the only
+sanitizer applied to issue identifiers when they are mapped to branch /
+worktree path components:
 
-1. **Allowed character class**: `[A-Za-z0-9._-]`. Any character outside this
-   class is replaced with `_`.
-2. **Reject empty raw input.**
-3. **Reject raw identifiers containing `/` or `\`** so a caller cannot smuggle
-   a path component through sanitization. The rule rejects the identifier
-   rather than silently splitting it.
-4. **Reject identifiers that are empty after sanitization** (e.g., all
-   characters were replaced and then trimmed).
-5. **Reject identifiers that collapse to `.` or `..`** (path traversal
-   sentinels).
-6. **Reject any resolved path that, after canonicalization, is not a
-   descendant of the workspace root.**
-7. **Reject collisions**: two distinct active workspaces with the same
-   sanitized `(repo, issue)` pair are not permitted simultaneously.
+1. **Allowed character class**: `[A-Za-z0-9_-]`. Any character outside
+   this class is replaced with `-`.
+2. **Reject collisions**: two distinct issue ids that sanitize to the
+   same worktree path under the same repo are not permitted
+   simultaneously; the second `ensure` is rejected with a typed
+   identifier-collision error.
+
+The pre-task-6.1 path-safety rules (descendant-of-workspace-root,
+canonicalization escape rejection, `.`/`..` traversal sentinels) no
+longer apply: the worktree path is computed deterministically from the
+repo path returned by `ghq` and is created only by `wt switch --create`,
+so a smuggled `..` segment in an issue id collapses to `-` via
+sanitization rather than being interpreted as a path component.
 
 ### 6.3 Lifecycle invariants
 
-- Workspace creation happens on the first transition into an active state
-  (`Discovered -> Queued -> Active`, deterministically the `Queued -> Active`
-  edge in the reference implementation).
-- The worker subprocess MUST run with the workspace as its current working
-  directory.
-- Workspace deletion happens only after `Cleaning -> [*]`, that is, only
-  after every registered pre-cleanup hook returns `Allow` and the worker has
-  exited. `TerminalFailure` retains the workspace for inspection.
-- If workspace creation or deletion fails, the daemon marks the corresponding
-  worker failed, logs the filesystem error with the offending path, and
-  refuses to start additional work for that `(repo, issue)` until operator
-  intervention.
+- Workspace creation happens on the first transition into an active
+  state via `wt switch --create <branch>` against the resolved repo
+  path (deterministically the `Queued -> Active` edge in the reference
+  implementation).
+- The worker subprocess MUST run with the worktree as its current
+  working directory.
+- Workspace deletion happens only after `Cleaning -> [*]` via
+  `wt remove <worktree_path>`, that is, only after every registered
+  pre-cleanup hook returns `Allow` and the worker has exited.
+  `wt remove` does NOT delete the underlying branch, so the operator
+  can still `git checkout <issue-id>` from the source repo to inspect
+  the agent's history if a follow-up task is required.
+- `TerminalFailure` retains BOTH the worktree directory AND the branch
+  for inspection — the daemon simply does not call `wt remove`.
+- If `ghq` cannot resolve or clone the configured identifier, the
+  daemon marks that repo unhealthy and refuses to schedule work for it
+  while continuing to serve other repos. If `wt switch --create` or
+  `wt remove` fails for a specific `(repo, issue)`, the daemon logs the
+  failure with the offending path and refuses to start additional work
+  for that `(repo, issue)` until operator intervention.
 
 ---
 

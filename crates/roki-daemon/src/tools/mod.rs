@@ -16,7 +16,12 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+pub mod ghq;
 pub mod linear_graphql;
+pub mod wt;
+
+pub use ghq::{GhqError, GhqTool, RealGhq};
+pub use wt::{RealWt, WtError, WtTool};
 
 /// Stable surface for an agent-callable tool. Implementations MUST keep
 /// `name`, `input_schema`, and `output_schema` immutable for the life of the

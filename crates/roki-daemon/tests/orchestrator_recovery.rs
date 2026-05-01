@@ -27,7 +27,9 @@
 //!    the workspace directories (Requirement 10.4).
 
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::Mutex as StdMutex;
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -44,7 +46,7 @@ use roki_daemon::orchestrator::recovery::{RecoveryDecision, RecoveryLinearReader
 use roki_daemon::orchestrator::state::{IssueId, RepoId, WorkerState};
 use roki_daemon::shutdown::ShutdownSignal;
 use roki_daemon::tracker::model::{IssueState as TrackerIssueState, NormalizedIssue};
-use roki_daemon::workspace::WorkspaceManager;
+use roki_daemon::workspace::{Workspace, WorkspaceError};
 
 /// Engine stub: counts launches and emits a single terminal event per
 /// launch. The recovery test only needs the `Active`-state path to be
@@ -97,6 +99,40 @@ fn linear_active(repo: &str, issue: &str) -> ((RepoId, IssueId), NormalizedIssue
     (key, value)
 }
 
+/// Stub workspace for the recovery test. Replaces the production
+/// `WorkspaceManager` so the test can pre-seed `list_existing` directly,
+/// independent of the new worktree model. Tracks ensure/remove invocations
+/// per `(repo, issue)` and returns synthesised paths under a tempdir.
+struct StubWorkspace {
+    root: tempfile::TempDir,
+    /// Pre-seeded `(repo, issue) -> path` returned by `list_existing`.
+    seeded: Vec<(RepoId, IssueId, PathBuf)>,
+    ensures: StdMutex<Vec<(String, String)>>,
+}
+
+#[async_trait]
+impl Workspace for StubWorkspace {
+    async fn ensure(&self, repo: &RepoId, issue: &IssueId) -> Result<PathBuf, WorkspaceError> {
+        self.ensures
+            .lock()
+            .unwrap()
+            .push((repo.as_str().to_string(), issue.as_str().to_string()));
+        let path = self.root.path().join(repo.as_str()).join(issue.as_str());
+        std::fs::create_dir_all(&path).map_err(|err| WorkspaceError::InvalidIdentifier {
+            reason: format!("stub create_dir_all: {err}"),
+        })?;
+        Ok(path)
+    }
+
+    async fn remove(&self, _repo: &RepoId, _issue: &IssueId) -> Result<(), WorkspaceError> {
+        Ok(())
+    }
+
+    async fn list_existing(&self) -> Result<Vec<(RepoId, IssueId, PathBuf)>, WorkspaceError> {
+        Ok(self.seeded.clone())
+    }
+}
+
 async fn await_state<R: OrchestratorRead>(
     read_handle: &R,
     repo: &RepoId,
@@ -118,17 +154,32 @@ async fn await_state<R: OrchestratorRead>(
 
 #[tokio::test]
 async fn recovery_reconciles_workspaces_and_linear_state_on_startup() {
-    // Pre-seed the workspace root with two directories. The third Linear
-    // active issue (ENG-3) has no workspace and must be created by the
-    // orchestrator's normal Queued -> Active path.
-    let workspace_root = tempdir().expect("tempdir for workspace root");
-    std::fs::create_dir_all(workspace_root.path().join("repo-a").join("ENG-1"))
-        .expect("seed workspace ENG-1");
-    std::fs::create_dir_all(workspace_root.path().join("repo-a").join("ENG-2"))
-        .expect("seed workspace ENG-2");
+    // Pre-seed the workspace stub's `list_existing` with two entries. The
+    // third Linear active issue (ENG-3) has no workspace and must be
+    // created by the orchestrator's normal Queued -> Active path.
+    let root = tempdir().expect("tempdir for workspace root");
+    let seed_path_1 = root.path().join("repo-a").join("ENG-1");
+    let seed_path_2 = root.path().join("repo-a").join("ENG-2");
+    std::fs::create_dir_all(&seed_path_1).expect("seed workspace ENG-1");
+    std::fs::create_dir_all(&seed_path_2).expect("seed workspace ENG-2");
+    let workspace_root_path = root.path().to_path_buf();
 
-    let workspace =
-        Arc::new(WorkspaceManager::new(workspace_root.path()).expect("workspace manager"));
+    let workspace = Arc::new(StubWorkspace {
+        root,
+        seeded: vec![
+            (
+                RepoId::new("repo-a"),
+                IssueId::new("ENG-1"),
+                seed_path_1.clone(),
+            ),
+            (
+                RepoId::new("repo-a"),
+                IssueId::new("ENG-2"),
+                seed_path_2.clone(),
+            ),
+        ],
+        ensures: StdMutex::new(Vec::new()),
+    });
 
     // Linear stub reports ENG-1 and ENG-3 active. ENG-2 is intentionally
     // absent so the matrix produces an `OrphanedWorkspace` decision.
@@ -201,7 +252,11 @@ async fn recovery_reconciles_workspaces_and_linear_state_on_startup() {
 
     // 2. Orphaned workspace directory must remain on disk (Requirement 10.2).
     assert!(
-        workspace_root.path().join("repo-a").join("ENG-2").exists(),
+        workspace_root_path
+            .as_path()
+            .join("repo-a")
+            .join("ENG-2")
+            .exists(),
         "orphaned workspace ENG-2 must be retained, not deleted",
     );
 
@@ -286,7 +341,7 @@ async fn recovery_reconciles_workspaces_and_linear_state_on_startup() {
     //    we configured. The repo dir then contains only issue dirs. This
     //    catches a regression where a future change persists a sidecar
     //    JSON / SQLite / lock file at any of these levels.
-    let root_entries: Vec<_> = std::fs::read_dir(workspace_root.path())
+    let root_entries: Vec<_> = std::fs::read_dir(workspace_root_path.as_path())
         .expect("read workspace root")
         .map(|e| e.expect("dir entry").path())
         .collect();
@@ -296,7 +351,7 @@ async fn recovery_reconciles_workspaces_and_linear_state_on_startup() {
             "workspace root must contain only directories; found non-dir entry {entry:?}",
         );
     }
-    let repo_a = workspace_root.path().join("repo-a");
+    let repo_a = workspace_root_path.as_path().join("repo-a");
     let repo_entries: Vec<_> = std::fs::read_dir(&repo_a)
         .expect("read repo dir")
         .map(|e| e.expect("dir entry").path())

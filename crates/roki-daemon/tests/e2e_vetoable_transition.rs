@@ -61,7 +61,8 @@ use roki_daemon::orchestrator::state::{
 };
 use roki_daemon::shutdown::ShutdownSignal;
 use roki_daemon::tracker::model::{IssueState as TrackerIssueState, NormalizedIssue};
-use roki_daemon::workspace::WorkspaceManager;
+mod common;
+use crate::common::build_workspace_manager;
 
 const TEST_REPO: &str = "repo-a";
 const DENIED_ISSUE: &str = "ENG-DENIED";
@@ -178,9 +179,10 @@ async fn e2e_vetoable_transition_blocks_denied_issue_and_lets_others_progress() 
     // ---- Workspace ----------------------------------------------------
     // Per-issue workspaces are created under this root. Only the unaffected
     // issue advances past `Queued`, so only that workspace is materialised.
-    let workspace_root = tempdir().expect("workspace tempdir");
-    let workspace =
-        Arc::new(WorkspaceManager::new(workspace_root.path()).expect("workspace manager"));
+    let parent = tempdir().expect("workspace tempdir");
+    let (manager, _parent_keep, _wt, _ghq) =
+        build_workspace_manager(parent, &[(TEST_REPO, "owner/repo-a", "repo-a")]);
+    let workspace = Arc::new(manager);
 
     // ---- EventBus and subscribers ------------------------------------
     let event_bus = Arc::new(EventBus::with_default_capacity());

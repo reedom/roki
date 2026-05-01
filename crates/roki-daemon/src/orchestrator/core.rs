@@ -1068,10 +1068,11 @@ impl WorkerActor {
 /// associated path return `None` and the structured log just omits the field.
 fn workspace_error_path(err: &WorkspaceError) -> Option<&PathBuf> {
     match err {
-        WorkspaceError::Io { path, .. } => Some(path),
-        WorkspaceError::EscapesRoot { offending, .. } => Some(offending),
+        WorkspaceError::Wt { path, .. } => Some(path),
         WorkspaceError::IdentifierCollision { existing_path, .. } => Some(existing_path),
         WorkspaceError::InvalidIdentifier { .. } => None,
+        WorkspaceError::UnknownRepo { .. } => None,
+        WorkspaceError::Ghq { .. } => None,
     }
 }
 
@@ -1145,12 +1146,69 @@ mod tests {
     }
 
     fn workspace_for_test() -> Arc<dyn Workspace> {
-        let dir = tempdir().expect("tempdir for workspace root");
-        // Leak the tempdir so the directory survives for the test's lifetime;
-        // an orchestrator unit test that never persists across runs is
-        // tolerant of the deliberate leak.
-        let path = dir.keep();
-        Arc::new(crate::workspace::WorkspaceManager::new(path).expect("workspace manager"))
+        // Hand-rolled stub workspace: succeeds for any (repo, issue) and
+        // returns a fresh tempdir-derived path. Production wiring uses
+        // WorkspaceManager backed by `wt` + `ghq`; the orchestrator tests
+        // here only need an `ensure`/`remove` surface that reports success.
+        use async_trait::async_trait;
+        use std::path::PathBuf;
+        use std::sync::Mutex as StdMutex;
+
+        struct StubWorkspace {
+            root: tempfile::TempDir,
+            tracked: StdMutex<std::collections::HashMap<(String, String), PathBuf>>,
+        }
+
+        #[async_trait]
+        impl Workspace for StubWorkspace {
+            async fn ensure(
+                &self,
+                repo: &RepoId,
+                issue: &IssueId,
+            ) -> Result<PathBuf, crate::workspace::WorkspaceError> {
+                let key = (repo.as_str().to_string(), issue.as_str().to_string());
+                let mut guard = self.tracked.lock().unwrap();
+                if let Some(p) = guard.get(&key) {
+                    return Ok(p.clone());
+                }
+                let path = self.root.path().join(repo.as_str()).join(issue.as_str());
+                std::fs::create_dir_all(&path).map_err(|err| {
+                    crate::workspace::WorkspaceError::InvalidIdentifier {
+                        reason: format!("stub create_dir_all failed: {err}"),
+                    }
+                })?;
+                guard.insert(key, path.clone());
+                Ok(path)
+            }
+
+            async fn remove(
+                &self,
+                repo: &RepoId,
+                issue: &IssueId,
+            ) -> Result<(), crate::workspace::WorkspaceError> {
+                let key = (repo.as_str().to_string(), issue.as_str().to_string());
+                let mut guard = self.tracked.lock().unwrap();
+                if let Some(path) = guard.remove(&key) {
+                    if path.exists() {
+                        std::fs::remove_dir_all(path).ok();
+                    }
+                }
+                Ok(())
+            }
+
+            async fn list_existing(
+                &self,
+            ) -> Result<Vec<(RepoId, IssueId, PathBuf)>, crate::workspace::WorkspaceError>
+            {
+                Ok(Vec::new())
+            }
+        }
+
+        let root = tempdir().expect("tempdir for workspace root");
+        Arc::new(StubWorkspace {
+            root,
+            tracked: StdMutex::new(std::collections::HashMap::new()),
+        })
     }
 
     fn fresh_orchestrator(

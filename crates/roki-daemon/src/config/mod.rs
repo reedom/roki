@@ -27,7 +27,7 @@ use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 
-pub use repos::{LinearScope, RepoConfig};
+pub use repos::{GhqIdentifierError, LinearScope, RepoConfig, validate_ghq_identifier};
 
 /// Default polling cadence cap (Requirement 3.2: <= 5 min per scope).
 pub const DEFAULT_POLLING_CADENCE_SECONDS: u64 = 300;
@@ -53,12 +53,13 @@ pub const DEFAULT_BIND_PORT: u16 = 7878;
 ///
 /// Field-level documentation lists the requirement each field traces to so
 /// validation errors stay anchored to the spec.
+///
+/// Per task 6.1 the per-daemon `workspace_root` was removed: workspaces are
+/// now git worktrees laid out next to the source repo
+/// (`{repo_path}/../{repo_name}.{branch_sanitized}`), and `repo_path` is
+/// resolved at runtime via `ghq` from the per-repo identifier.
 #[derive(Debug, Clone)]
 pub struct Config {
-    /// Workspace root under which per-`(repo, issue)` directories are
-    /// created. Requirement 4.1, 10.1.
-    pub workspace_root: PathBuf,
-
     /// Resolved Linear API token. Requirement 2.5.
     pub linear_token: SecretString,
 
@@ -103,9 +104,6 @@ pub struct Config {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ConfigFile {
-    #[serde(default)]
-    workspace_root: Option<PathBuf>,
-
     #[serde(default)]
     linear: Option<LinearFile>,
 
@@ -222,9 +220,6 @@ pub struct EnvOverrides {
     /// `token_file` declared in the config file.
     pub linear_token: Option<String>,
 
-    /// Override the workspace root.
-    pub workspace_root: Option<PathBuf>,
-
     /// Override the polling cadence (seconds).
     pub polling_cadence_seconds: Option<u64>,
 
@@ -236,17 +231,19 @@ impl EnvOverrides {
     /// Read overrides from the process environment. Variables:
     ///
     /// * `ROKI_LINEAR_TOKEN` — literal token (highest precedence).
-    /// * `ROKI_WORKSPACE_ROOT` — workspace root path.
     /// * `ROKI_POLLING_CADENCE_SECONDS` — polling cadence override.
     /// * `ROKI_MAX_CONCURRENT_WORKERS` — concurrency override.
+    ///
+    /// `ROKI_WORKSPACE_ROOT` was removed in task 6.1 along with the
+    /// daemon-level workspace root: workspaces are now git worktrees laid out
+    /// next to each repo. Operators upgrading from the sandbox-dir model
+    /// must drop the env var; the daemon ignores it.
     pub fn from_process_env() -> Result<Self, ConfigError> {
         let linear_token = env::var("ROKI_LINEAR_TOKEN").ok();
-        let workspace_root = env::var("ROKI_WORKSPACE_ROOT").ok().map(PathBuf::from);
         let polling_cadence_seconds = parse_env_u64("ROKI_POLLING_CADENCE_SECONDS")?;
         let max_concurrent_workers = parse_env_u32("ROKI_MAX_CONCURRENT_WORKERS")?;
         Ok(Self {
             linear_token,
-            workspace_root,
             polling_cadence_seconds,
             max_concurrent_workers,
         })
@@ -374,12 +371,6 @@ impl Config {
     }
 
     fn assemble(file: ConfigFile, env: &EnvOverrides) -> Result<Self, ConfigError> {
-        let workspace_root = env.workspace_root.clone().or(file.workspace_root).ok_or(
-            ConfigError::MissingField {
-                field: "workspace_root".to_string(),
-            },
-        )?;
-
         let linear_token = resolve_linear_token(env, file.linear.as_ref())?;
 
         let polling_cadence_seconds = env
@@ -421,7 +412,6 @@ impl Config {
         let linear_endpoint = file.linear.as_ref().and_then(|f| f.endpoint.clone());
 
         Ok(Self {
-            workspace_root,
             linear_token,
             polling_cadence: Duration::from_secs(polling_cadence_seconds),
             max_concurrent_workers,
@@ -566,10 +556,10 @@ fn validate_repos(repos: &[RepoConfig]) -> Result<(), ConfigError> {
                 reason: "must not be empty".to_string(),
             });
         }
-        if repo.path.as_os_str().is_empty() {
+        if let Err(err) = validate_ghq_identifier(&repo.repo) {
             return Err(ConfigError::InvalidField {
-                field: format!("repos[{index}].path"),
-                reason: "must not be empty".to_string(),
+                field: format!("repos[{index}].repo"),
+                reason: err.message().to_string(),
             });
         }
         if repo.workflow_path.as_os_str().is_empty() {
@@ -671,7 +661,6 @@ mod tests {
 
     fn valid_config_toml() -> &'static str {
         r#"
-workspace_root = "/var/lib/roki/workspaces"
 polling_cadence_seconds = 120
 max_concurrent_workers = 3
 
@@ -684,7 +673,7 @@ settings = "/etc/roki/claude-settings.json"
 
 [[repos]]
 id = "core"
-path = "/srv/git/core"
+repo = "owner/core"
 workflow_path = "/srv/git/core/WORKFLOW.md"
 
 [repos.scope]
@@ -705,10 +694,6 @@ key = "ENG"
         let cfg = Config::load_from_str(valid_config_toml(), &fixture_path(), &env_with_token())
             .expect("valid config must load");
 
-        assert_eq!(
-            cfg.workspace_root,
-            PathBuf::from("/var/lib/roki/workspaces")
-        );
         assert_eq!(cfg.polling_cadence, Duration::from_secs(120));
         assert_eq!(cfg.max_concurrent_workers, 3);
         assert_eq!(cfg.linear_token.expose(), "lin_api_test_secret");
@@ -718,6 +703,7 @@ key = "ENG"
         ));
         assert_eq!(cfg.repos.len(), 1);
         assert_eq!(cfg.repos[0].id, "core");
+        assert_eq!(cfg.repos[0].repo, "owner/core");
         assert_eq!(
             cfg.repos[0].scope,
             LinearScope::Team {
@@ -727,11 +713,60 @@ key = "ENG"
     }
 
     #[test]
+    fn workspace_root_in_config_file_is_refused() {
+        // Task 6.1: workspace_root was removed from the schema. An existing
+        // config that still carries it must fail to load with the offending
+        // key named (deny_unknown_fields surfaces this).
+        let body = r#"
+workspace_root = "/var/lib/roki/workspaces"
+
+[linear]
+token_env = "MY_LINEAR_TOKEN"
+
+[permissions]
+strategy = "dangerously_skip_permissions"
+"#;
+        let err = Config::load_from_str(body, &fixture_path(), &env_with_token())
+            .expect_err("legacy workspace_root must be refused");
+        match err {
+            ConfigError::Parse { ref field, .. } => {
+                assert!(
+                    field.contains("workspace_root"),
+                    "expected error to name `workspace_root`, got `{field}`",
+                );
+            }
+            other => panic!("expected Parse error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn invalid_repo_ghq_identifier_is_refused() {
+        let bad = r#"
+[linear]
+token_env = "MY_LINEAR_TOKEN"
+
+[permissions]
+strategy = "dangerously_skip_permissions"
+
+[[repos]]
+id = "core"
+repo = "/abs/path/to/local"
+workflow_path = "/srv/git/core/WORKFLOW.md"
+
+[repos.scope]
+kind = "team"
+key = "ENG"
+"#;
+        let err = Config::load_from_str(bad, &fixture_path(), &env_with_token())
+            .expect_err("absolute-path-shaped ghq identifier must be refused");
+        assert_eq!(err.field(), Some("repos[0].repo"));
+    }
+
+    #[test]
     fn malformed_config_returns_error_naming_failing_field() {
         // `polling_cadence_seconds` is typed as a u64; a string here forces a
         // typed parse error whose offending field must be surfaced verbatim.
         let malformed = r#"
-workspace_root = "/var/lib/roki/workspaces"
 polling_cadence_seconds = "not-a-number"
 
 [linear]
@@ -764,8 +799,6 @@ strategy = "dangerously_skip_permissions"
         // No env override AND no `[linear]` block: refuse to start
         // (Requirement 2.5).
         let no_token = r#"
-workspace_root = "/var/lib/roki/workspaces"
-
 [permissions]
 strategy = "dangerously_skip_permissions"
 "#;
@@ -792,8 +825,6 @@ strategy = "dangerously_skip_permissions"
         // Requirement 9.5: refuse to start when neither permission strategy
         // is configured.
         let no_perms = r#"
-workspace_root = "/var/lib/roki/workspaces"
-
 [linear]
 token_env = "MY_LINEAR_TOKEN"
 "#;
@@ -806,8 +837,6 @@ token_env = "MY_LINEAR_TOKEN"
     #[test]
     fn allowlist_without_settings_path_names_the_field() {
         let no_settings = r#"
-workspace_root = "/var/lib/roki/workspaces"
-
 [linear]
 token_env = "MY_LINEAR_TOKEN"
 
@@ -823,7 +852,6 @@ strategy = "allowlist"
     fn polling_cadence_above_cap_is_rejected_by_field_name() {
         // Requirement 3.2 caps polling at 5 minutes per scope.
         let too_slow = r#"
-workspace_root = "/var/lib/roki/workspaces"
 polling_cadence_seconds = 600
 
 [linear]
@@ -840,7 +868,6 @@ strategy = "dangerously_skip_permissions"
     #[test]
     fn unknown_field_names_the_offending_key() {
         let unknown = r#"
-workspace_root = "/var/lib/roki/workspaces"
 unexpected_top_level = true
 
 [linear]
@@ -886,8 +913,6 @@ strategy = "dangerously_skip_permissions"
         std::fs::write(&token_path, "file-token-value\n").expect("write token");
         let toml_body = format!(
             r#"
-workspace_root = "/var/lib/roki/workspaces"
-
 [linear]
 token_file = "{}"
 
@@ -915,8 +940,6 @@ strategy = "dangerously_skip_permissions"
     #[test]
     fn server_section_overrides_bind_and_port() {
         let body = r#"
-workspace_root = "/var/lib/roki/workspaces"
-
 [linear]
 token_env = "MY_LINEAR_TOKEN"
 
@@ -936,8 +959,6 @@ port = 9090
     #[test]
     fn server_section_rejects_malformed_bind_address() {
         let body = r#"
-workspace_root = "/var/lib/roki/workspaces"
-
 [linear]
 token_env = "MY_LINEAR_TOKEN"
 
@@ -955,8 +976,6 @@ bind = "not-an-ip"
     #[test]
     fn server_section_rejects_zero_port() {
         let body = r#"
-workspace_root = "/var/lib/roki/workspaces"
-
 [linear]
 token_env = "MY_LINEAR_TOKEN"
 
@@ -974,7 +993,6 @@ port = 0
     #[test]
     fn claude_binary_override_round_trips_through_config() {
         let body = r#"
-workspace_root = "/var/lib/roki/workspaces"
 claude_binary = "/usr/local/bin/claude-test"
 
 [linear]
@@ -994,8 +1012,6 @@ strategy = "dangerously_skip_permissions"
     #[test]
     fn webhook_secret_env_round_trips_through_repo_config() {
         let body = r#"
-workspace_root = "/var/lib/roki/workspaces"
-
 [linear]
 token_env = "MY_LINEAR_TOKEN"
 
@@ -1004,7 +1020,7 @@ strategy = "dangerously_skip_permissions"
 
 [[repos]]
 id = "core"
-path = "/srv/git/core"
+repo = "owner/core"
 workflow_path = "/srv/git/core/WORKFLOW.md"
 webhook_secret_env = "ROKI_WEBHOOK_SECRET_CORE"
 
@@ -1025,8 +1041,6 @@ key = "ENG"
     #[test]
     fn invalid_repo_entry_names_the_offending_field() {
         let bad_repo = r#"
-workspace_root = "/var/lib/roki/workspaces"
-
 [linear]
 token_env = "MY_LINEAR_TOKEN"
 
@@ -1035,7 +1049,7 @@ strategy = "dangerously_skip_permissions"
 
 [[repos]]
 id = ""
-path = "/srv/git/core"
+repo = "owner/core"
 workflow_path = "/srv/git/core/WORKFLOW.md"
 
 [repos.scope]

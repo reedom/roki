@@ -38,6 +38,7 @@
 //! produces a clear, actionable [`anyhow::Error`] message and a non-zero
 //! exit code via the binary's `main`.
 
+use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -46,6 +47,7 @@ use std::time::Duration;
 use anyhow::{Context, Result, anyhow, bail};
 use axum::Router;
 use tokio::net::TcpListener;
+use tokio::process::Command as AsyncCommand;
 use tokio::runtime::Builder;
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinSet;
@@ -61,16 +63,17 @@ use crate::orchestrator::core::{
 };
 use crate::orchestrator::events::EventBus;
 use crate::orchestrator::hooks::HookRegistry;
+use crate::orchestrator::state::RepoId;
 use crate::orchestrator::tracker_bridge::TrackerBridge;
 use crate::shutdown::{
     SHUTDOWN_WINDOW, ShutdownSignal, await_workers_with_window, install_signal_handlers,
 };
-use crate::tools::{NoopRateLimit, RateLimitState};
+use crate::tools::{GhqTool, NoopRateLimit, RateLimitState, RealGhq, RealWt, WtTool};
 use crate::tracker::linear::{LinearTracker, LinearTrackerConfig, ScopeWatch};
 use crate::tracker::model::NormalizedIssue;
 use crate::tracker::webhook::{WebhookState, router as webhook_router};
 use crate::workflow::{WorkflowHandle, WorkflowLoader, WorkflowPolicy};
-use crate::workspace::WorkspaceManager;
+use crate::workspace::{GhqIdentifier, WorkspaceManager};
 use async_trait::async_trait;
 
 /// Default config-file path used when `--config` is not supplied on the CLI.
@@ -221,6 +224,17 @@ pub async fn run_with_shutdown(
     // ---- 3. resolve the claude binary ----------------------------------
     let claude_binary = resolve_claude_binary(config.claude_binary.as_deref())?;
 
+    // ---- 3b. refuse to start if `wt` or `ghq` are not on PATH ----------
+    // Task 6.1 locked decisions: the daemon shells out to `wt` for
+    // worktree management and `ghq` for repo discovery. Both must be on
+    // PATH; absence is a hard refusal with an actionable remediation.
+    ensure_external_tool_present("wt").await.with_context(|| {
+        "wt (worktrunk) not found on PATH — install via the worktrunk repo (https://github.com/reedom/worktrunk) or add it to PATH"
+    })?;
+    ensure_external_tool_present("ghq").await.with_context(|| {
+        "ghq not found on PATH — install via `brew install ghq` or `go install github.com/x-motemen/ghq@latest`"
+    })?;
+
     // ---- 4. build per-repo workflow loaders ----------------------------
     let mut workflow_handles: Vec<WorkflowHandle> = Vec::with_capacity(config.repos.len());
     let mut workflow_policies: Vec<Arc<WorkflowPolicy>> = Vec::with_capacity(config.repos.len());
@@ -240,14 +254,16 @@ pub async fn run_with_shutdown(
     }
 
     // ---- 5. build engine + workspace + orchestrator --------------------
-    let workspace = Arc::new(
-        WorkspaceManager::new(config.workspace_root.clone()).with_context(|| {
-            format!(
-                "failed to open workspace root at `{}`",
-                config.workspace_root.display(),
-            )
-        })?,
-    );
+    // Task 6.1: workspace manager is built from `wt` + `ghq` adapters and
+    // an operator-supplied `repo_index` mapping `RepoId` → ghq identifier.
+    let wt: Arc<dyn WtTool> = Arc::new(RealWt::new());
+    let ghq: Arc<dyn GhqTool> = Arc::new(RealGhq::new());
+    let repo_index: HashMap<RepoId, GhqIdentifier> = config
+        .repos
+        .iter()
+        .map(|repo| (RepoId::new(repo.id.clone()), repo.repo.clone()))
+        .collect();
+    let workspace = Arc::new(WorkspaceManager::new(wt, ghq, repo_index));
     let engine = Arc::new(ClaudeEngineLauncher::new(ClaudeEngineAdapter::with_binary(
         claude_binary.clone(),
     )));
@@ -530,6 +546,21 @@ fn resolve_claude_binary(override_path: Option<&Path>) -> Result<PathBuf> {
     )
 }
 
+/// Ensure `tool` is on `$PATH` by invoking `<tool> --version` once and
+/// classifying `io::ErrorKind::NotFound` as the absence signal. A non-zero
+/// exit from a present binary is treated as success — the tool exists; its
+/// version output is irrelevant to bootstrap. Used for `wt` and `ghq` per
+/// task 6.1 locked decisions #1 and #2.
+async fn ensure_external_tool_present(tool: &str) -> Result<()> {
+    match AsyncCommand::new(tool).arg("--version").output().await {
+        Ok(_) => Ok(()),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+            Err(anyhow!("{tool} binary not found on PATH",))
+        }
+        Err(err) => Err(anyhow!("{tool} --version: {err}")),
+    }
+}
+
 fn new_correlation_id() -> String {
     use std::sync::atomic::{AtomicU64, Ordering};
     static COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -627,7 +658,7 @@ mod tests {
     fn resolve_webhook_secrets_accepts_literal_with_warning() {
         let repos = vec![RepoConfig {
             id: "core".to_string(),
-            path: PathBuf::from("/srv/git/core"),
+            repo: "owner/core".to_string(),
             scope: crate::config::LinearScope::Team {
                 key: "ENG".to_string(),
             },
@@ -643,7 +674,7 @@ mod tests {
     fn resolve_webhook_secrets_refuses_when_neither_form_present() {
         let repos = vec![RepoConfig {
             id: "core".to_string(),
-            path: PathBuf::from("/srv/git/core"),
+            repo: "owner/core".to_string(),
             scope: crate::config::LinearScope::Team {
                 key: "ENG".to_string(),
             },
@@ -686,7 +717,7 @@ mod tests {
     fn resolve_webhook_secrets_refuses_empty_literal() {
         let repos = vec![RepoConfig {
             id: "core".to_string(),
-            path: PathBuf::from("/srv/git/core"),
+            repo: "owner/core".to_string(),
             scope: crate::config::LinearScope::Team {
                 key: "ENG".to_string(),
             },

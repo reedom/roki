@@ -632,10 +632,23 @@ pub enum EngineLifecycleEvent {
 | Requirements | 4.1, 4.2, 4.3, 4.4, 4.5, 10.1, 10.2, 10.3 |
 
 **Responsibilities & Constraints**
-- Sanitize identifiers to a fixed character class, reject anything that escapes the workspace root.
-- Path layout: `<workspace_root>/<repo_slug>/<sanitized_issue_id>/`.
-- Creation is idempotent; deletion only fires after the worker has exited.
-- Failures bubble as typed errors with the offending path.
+- Allocate per-`(repo, issue)` git worktrees via the external `wt` CLI
+  (worktrunk); resolve the source repo's local checkout via the external
+  `ghq` CLI from a per-repo `owner/repo` (or `host/owner/repo`)
+  identifier. See `design-worktree-workspace.md` for the locked decisions.
+- Path layout: `{repo_path}/../{repo_name}.{branch_sanitized}` where
+  `repo_path` is what `ghq list -p` returns and `branch` is the Linear
+  issue id verbatim. Branch sanitization (`[^A-Za-z0-9_-]` → `-`) lives
+  inside the `wt` adapter and is the only sanitizer applied.
+- Creation is idempotent; deletion fires only on `Cleaning -> [*]` via
+  `wt remove`. `TerminalFailure` retains both worktree dir and branch.
+- Two distinct issue ids that sanitize to the same worktree path under
+  the same repo are rejected with a typed identifier-collision error.
+- The manager depends on `WtTool` and `GhqTool` traits; the production
+  bootstrap injects `RealWt` / `RealGhq` (subprocess shellouts), and tests
+  inject hand-rolled mocks. There is no daemon-level workspace root.
+- Failures bubble as typed errors carrying the offending path or
+  identifier.
 
 **Contracts**: Service [x] / API [ ] / Event [ ] / Batch [ ] / State [x]
 
@@ -649,7 +662,10 @@ pub trait Workspace: Send + Sync {
 }
 ```
 
-- Invariants: the resolved path is always a descendant of the workspace root after canonicalization.
+- Invariants: the resolved path is the deterministic worktree layout
+  `{repo_path}/../{repo_name}.{branch_sanitized}` produced by
+  `wt switch --create` against the configured repo's local checkout.
+  There is no daemon-level workspace root.
 
 ### Workflow loader
 

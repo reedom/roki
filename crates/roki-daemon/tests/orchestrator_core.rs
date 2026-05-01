@@ -28,7 +28,10 @@ use roki_daemon::orchestrator::read::OrchestratorRead;
 use roki_daemon::orchestrator::state::{IssueId, RepoId, TransitionEvent, WorkerState};
 use roki_daemon::shutdown::ShutdownSignal;
 use roki_daemon::tracker::model::{IssueState as TrackerIssueState, NormalizedIssue};
-use roki_daemon::workspace::{Workspace, WorkspaceManager};
+use roki_daemon::workspace::Workspace;
+
+mod common;
+use crate::common::build_workspace_manager;
 
 /// Engine stub that emits a fixed terminal outcome for every launch.
 struct StubEngine {
@@ -102,9 +105,10 @@ async fn orchestrator_drives_issue_from_discovered_to_cleaning() {
     // issue from `Discovered` to `Cleaning` and assert the published
     // transition sequence (including `TerminalSuccess -> Cleaning`) plus
     // subscriber dispatch order.
-    let workspace_root = tempdir().expect("tempdir");
-    let workspace =
-        Arc::new(WorkspaceManager::new(workspace_root.path()).expect("workspace manager"));
+    let parent = tempdir().expect("tempdir");
+    let (manager, _parent_keep, _wt, _ghq) =
+        build_workspace_manager(parent, &[("repo-a", "owner/repo-a", "repo-a")]);
+    let workspace = Arc::new(manager);
     let event_bus = Arc::new(EventBus::with_default_capacity());
     let hook_registry = Arc::new(HookRegistry::new());
     let shutdown = ShutdownSignal::new();
@@ -221,9 +225,10 @@ async fn orchestrator_read_snapshot_matches_actual_state_mid_run() {
     // the stub engine emitting `CleanExit`, the actor will pass through
     // Discovered -> Queued -> Active -> AwaitingReview and then stay there
     // because Terminal isn't sent yet. We snapshot at AwaitingReview.
-    let workspace_root = tempdir().expect("tempdir");
-    let workspace =
-        Arc::new(WorkspaceManager::new(workspace_root.path()).expect("workspace manager"));
+    let parent = tempdir().expect("tempdir");
+    let (manager, _parent_keep, _wt, _ghq) =
+        build_workspace_manager(parent, &[("repo-a", "owner/repo-a", "repo-a")]);
+    let workspace = Arc::new(manager);
     let event_bus = Arc::new(EventBus::with_default_capacity());
     let hook_registry = Arc::new(HookRegistry::new());
     let shutdown = ShutdownSignal::new();
@@ -359,9 +364,10 @@ async fn non_clean_exit_drives_active_backoff_loop_until_budget_exhausted() {
     //   Active → TerminalFailure (attempt 3 failed, budget exhausted)
     //
     // The engine launcher is invoked exactly `max_attempts = 3` times.
-    let workspace_root = tempdir().expect("tempdir");
-    let workspace =
-        Arc::new(WorkspaceManager::new(workspace_root.path()).expect("workspace manager"));
+    let parent = tempdir().expect("tempdir");
+    let (manager, _parent_keep, _wt, _ghq) =
+        build_workspace_manager(parent, &[("repo-a", "owner/repo-a", "repo-a")]);
+    let workspace = Arc::new(manager);
     let event_bus = Arc::new(EventBus::with_default_capacity());
     let hook_registry = Arc::new(HookRegistry::new());
     let shutdown = ShutdownSignal::new();
@@ -444,7 +450,8 @@ async fn non_clean_exit_drives_active_backoff_loop_until_budget_exhausted() {
     // Workspace path must be retained throughout — no delete/recreate between
     // attempts, and TerminalFailure retains the workspace for inspection per
     // Requirement 4.5.
-    let expected_workspace = workspace_root.path().join("repo-a").join("ENG-1");
+    let expected_workspace =
+        crate::common::expected_worktree_path(_parent_keep.path(), "repo-a", "ENG-1");
     assert!(
         expected_workspace.is_dir(),
         "workspace must be retained after retry-budget exhaustion; expected {expected_workspace:?}",
@@ -464,9 +471,10 @@ async fn stalled_outcome_drives_active_to_terminal_failure_without_backoff() {
     // Task 3.7: `Stalled` is an agent-authored failure — re-running with the
     // same prompt and budget repeats the same outcome — so the worker actor
     // must skip the Backoff loop and route directly to `TerminalFailure`.
-    let workspace_root = tempdir().expect("tempdir");
-    let workspace =
-        Arc::new(WorkspaceManager::new(workspace_root.path()).expect("workspace manager"));
+    let parent = tempdir().expect("tempdir");
+    let (manager, _parent_keep, _wt, _ghq) =
+        build_workspace_manager(parent, &[("repo-b", "owner/repo-b", "repo-b")]);
+    let workspace = Arc::new(manager);
     let event_bus = Arc::new(EventBus::with_default_capacity());
     let hook_registry = Arc::new(HookRegistry::new());
     let shutdown = ShutdownSignal::new();
@@ -548,9 +556,10 @@ async fn stalled_outcome_drives_active_to_terminal_failure_without_backoff() {
 async fn turn_budget_exhausted_drives_active_to_terminal_failure_without_backoff() {
     // Task 3.7: `TurnBudgetExhausted` is also an agent-authored failure;
     // retrying with the same budget would reproduce the same outcome.
-    let workspace_root = tempdir().expect("tempdir");
-    let workspace =
-        Arc::new(WorkspaceManager::new(workspace_root.path()).expect("workspace manager"));
+    let parent = tempdir().expect("tempdir");
+    let (manager, _parent_keep, _wt, _ghq) =
+        build_workspace_manager(parent, &[("repo-c", "owner/repo-c", "repo-c")]);
+    let workspace = Arc::new(manager);
     let event_bus = Arc::new(EventBus::with_default_capacity());
     let hook_registry = Arc::new(HookRegistry::new());
     let shutdown = ShutdownSignal::new();
@@ -635,10 +644,11 @@ async fn workspace_path_retained_across_backoff_loop() {
     use std::path::PathBuf;
     use std::sync::Mutex as StdMutex;
 
-    let workspace_root = tempdir().expect("tempdir");
-    let workspace_path: PathBuf = workspace_root.path().to_path_buf();
-    let workspace =
-        Arc::new(WorkspaceManager::new(workspace_root.path()).expect("workspace manager"));
+    let parent = tempdir().expect("tempdir");
+    let parent_path = parent.path().to_path_buf();
+    let (manager, _parent_keep, _wt, _ghq) =
+        build_workspace_manager(parent, &[("repo-d", "owner/repo-d", "repo-d")]);
+    let workspace = Arc::new(manager);
     let event_bus = Arc::new(EventBus::with_default_capacity());
     let hook_registry = Arc::new(HookRegistry::new());
     let shutdown = ShutdownSignal::new();
@@ -671,7 +681,7 @@ async fn workspace_path_retained_across_backoff_loop() {
     }
 
     let observations = Arc::new(StdMutex::new(Vec::<bool>::new()));
-    let expected_dir = workspace_path.join("repo-d").join("ENG-2");
+    let expected_dir = crate::common::expected_worktree_path(&parent_path, "repo-d", "ENG-2");
     event_bus.register(Arc::new(WorkspaceProbe {
         observations: Arc::clone(&observations),
         expected_dir: expected_dir.clone(),

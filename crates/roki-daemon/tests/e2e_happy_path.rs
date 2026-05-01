@@ -61,8 +61,10 @@ use roki_daemon::shutdown::ShutdownSignal;
 use roki_daemon::tools::NoopRateLimit;
 use roki_daemon::tracker::linear::{LinearTracker, LinearTrackerConfig, ScopeWatch};
 use roki_daemon::tracker::model::NormalizedIssue;
-use roki_daemon::workspace::WorkspaceManager;
 use serde_json::{Value, json};
+
+mod common;
+use crate::common::{build_workspace_manager, expected_worktree_path};
 
 const TEST_TOKEN: &str = "lin_e2e_happy_path_token";
 const TEST_REPO: &str = "core";
@@ -237,10 +239,11 @@ async fn e2e_happy_path_drives_full_lifecycle() {
     // defaults to `clean_exit` when no `.fake_claude_mode` file is
     // present, which is exactly the outcome we need to drive
     // `Active -> AwaitingReview`.
-    let workspace_root = TempDir::new().expect("workspace tempdir");
-    let workspace_manager = Arc::new(
-        WorkspaceManager::new(workspace_root.path()).expect("workspace manager constructs"),
-    );
+    let parent = TempDir::new().expect("workspace tempdir");
+    let parent_path = parent.path().to_path_buf();
+    let (manager, _parent_keep, _wt, _ghq) =
+        build_workspace_manager(parent, &[(TEST_REPO, "owner/core", "core")]);
+    let workspace_manager = Arc::new(manager);
 
     // ---- Orchestrator wiring -----------------------------------------
     let event_bus = Arc::new(EventBus::with_default_capacity());
@@ -327,7 +330,7 @@ async fn e2e_happy_path_drives_full_lifecycle() {
     // AwaitingReview / TerminalSuccess (Requirement 4.3 / 4.4). The
     // fake Linear is still serving `started` here, so the actor cannot
     // race ahead to Cleaning before this check completes.
-    let expected_workspace = workspace_root.path().join(TEST_REPO).join(TEST_ISSUE);
+    let expected_workspace = expected_worktree_path(&parent_path, "core", TEST_ISSUE);
     assert!(
         expected_workspace.is_dir(),
         "workspace directory must exist after Active; expected {expected_workspace:?}",

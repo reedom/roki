@@ -40,11 +40,12 @@ use roki_daemon::routing::{IssueRouteInput, route_issue};
 /// Construct a minimal `RepoConfig` for routing assertions. The production
 /// loader populates more fields than `route_issue` actually inspects; the
 /// router only reads `id` and `scope`, so the test pins concrete but
-/// otherwise unused values for `path` and `workflow_path`.
+/// otherwise unused values for `repo` (the ghq identifier) and
+/// `workflow_path`.
 fn repo_config(id: &str, scope: LinearScope) -> RepoConfig {
     RepoConfig {
         id: id.to_string(),
-        path: PathBuf::from(format!("/srv/git/{id}")),
+        repo: format!("owner/{id}"),
         scope,
         workflow_path: PathBuf::from(format!("/srv/git/{id}/WORKFLOW.md")),
         webhook_secret_env: None,

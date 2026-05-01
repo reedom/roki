@@ -28,8 +28,6 @@
 //!   external commands and matches the design's "no external git binary"
 //!   assumption.
 
-use std::path::{Path, PathBuf};
-
 use tracing::info;
 
 use crate::config::repos::{LinearScope, RepoConfig};
@@ -83,27 +81,29 @@ impl Specificity {
 /// Reason a repository was marked unhealthy at startup.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum UnhealthyReason {
-    /// The configured `path` does not exist or is not a directory.
-    PathMissing,
-    /// The path exists as a directory but is not a Git working tree
-    /// (no `.git` entry, file or directory).
-    NotGitWorkingTree,
+    /// The configured ghq identifier was malformed (empty, contained
+    /// whitespace, etc.). Pre-task-6.1 this also covered "path does not
+    /// exist", which is now a runtime concern delegated to `ghq`.
+    InvalidGhqIdentifier,
 }
 
 impl UnhealthyReason {
     fn name(&self) -> &'static str {
         match self {
-            Self::PathMissing => "path_missing",
-            Self::NotGitWorkingTree => "not_git_working_tree",
+            Self::InvalidGhqIdentifier => "invalid_ghq_identifier",
         }
     }
 }
 
-/// A repository whose configured path failed the startup health check.
+/// A repository whose configured ghq identifier failed the startup health
+/// check. With the task-6.1 worktree model, "path" here refers to the ghq
+/// identifier the operator configured (`owner/repo` or `host/owner/repo`);
+/// the actual filesystem path is resolved at runtime via `ghq` and is not
+/// known at startup.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UnhealthyRepo {
     pub repo_id: String,
-    pub path: PathBuf,
+    pub identifier: String,
     pub reason: UnhealthyReason,
 }
 
@@ -121,59 +121,44 @@ pub struct RepoHealth {
 /// Inspect every configured repository and split it into healthy and
 /// unhealthy buckets.
 ///
-/// A repository is healthy when its `path` is an existing directory that
-/// contains a `.git` entry (either a `.git` directory or a `gitdir:`-style
-/// `.git` file). Anything else is unhealthy with the most specific reason
-/// available, so logs name the failure mode (Requirement 2.3).
+/// Pre-task-6.1 this performed a filesystem health check against the
+/// repo's `path`. The worktree model resolves the local checkout at
+/// runtime via `ghq`, so the only startup-level check that remains is the
+/// shape of the configured ghq identifier. Runtime clone / network
+/// failures are surfaced per-issue by the workspace adapter.
 pub fn classify_repo_health(repos: &[RepoConfig]) -> RepoHealth {
     let mut healthy = Vec::with_capacity(repos.len());
     let mut unhealthy = Vec::new();
 
     for repo in repos {
-        match assess_path(&repo.path) {
+        match crate::config::validate_ghq_identifier(&repo.repo) {
             Ok(()) => {
                 info!(
                     target: "roki",
                     repo_id = %repo.id,
-                    path = %repo.path.display(),
+                    identifier = %repo.repo,
                     "repo health check passed"
                 );
                 healthy.push(repo.clone());
             }
-            Err(reason) => {
+            Err(_) => {
                 info!(
                     target: "roki",
                     repo_id = %repo.id,
-                    path = %repo.path.display(),
-                    reason = reason.name(),
+                    identifier = %repo.repo,
+                    reason = UnhealthyReason::InvalidGhqIdentifier.name(),
                     "repo marked unhealthy; refusing to schedule work for it"
                 );
                 unhealthy.push(UnhealthyRepo {
                     repo_id: repo.id.clone(),
-                    path: repo.path.clone(),
-                    reason,
+                    identifier: repo.repo.clone(),
+                    reason: UnhealthyReason::InvalidGhqIdentifier,
                 });
             }
         }
     }
 
     RepoHealth { healthy, unhealthy }
-}
-
-fn assess_path(path: &Path) -> Result<(), UnhealthyReason> {
-    if !path.is_dir() {
-        return Err(UnhealthyReason::PathMissing);
-    }
-    let dot_git = path.join(".git");
-    // A regular working tree has `.git` as a directory; a worktree-from-bare
-    // or submodule has `.git` as a regular file containing `gitdir: ...`.
-    // For MVP we only need to confirm that *something* named `.git` exists
-    // alongside a real working tree directory.
-    if dot_git.is_dir() || dot_git.is_file() {
-        Ok(())
-    } else {
-        Err(UnhealthyReason::NotGitWorkingTree)
-    }
 }
 
 /// Route a Linear issue to exactly one configured repository, or `None` if
@@ -271,7 +256,7 @@ mod tests {
     fn repo(id: &str, scope: LinearScope) -> RepoConfig {
         RepoConfig {
             id: id.to_string(),
-            path: PathBuf::from(format!("/srv/git/{id}")),
+            repo: format!("owner/{id}"),
             scope,
             workflow_path: PathBuf::from(format!("/srv/git/{id}/WORKFLOW.md")),
             webhook_secret_env: None,
@@ -469,31 +454,14 @@ mod tests {
     }
 
     #[test]
-    fn missing_path_is_classified_as_path_missing() {
+    fn malformed_ghq_identifier_is_classified_unhealthy() {
+        // Task 6.1: pre-existing path-based health checks moved to runtime
+        // (delegated to ghq). The remaining startup check is identifier
+        // shape — a single-token "repo" without `<owner>/<repo>` is
+        // refused.
         let repos = vec![RepoConfig {
             id: "ghost".to_string(),
-            path: PathBuf::from("/this/path/should/not/exist/roki-test"),
-            scope: LinearScope::Team {
-                key: "ENG".to_string(),
-            },
-            workflow_path: PathBuf::from("/dev/null"),
-            webhook_secret_env: None,
-            webhook_secret: None,
-        }];
-
-        let health = classify_repo_health(&repos);
-        assert!(health.healthy.is_empty());
-        assert_eq!(health.unhealthy.len(), 1);
-        assert_eq!(health.unhealthy[0].reason, UnhealthyReason::PathMissing);
-        assert_eq!(health.unhealthy[0].repo_id, "ghost");
-    }
-
-    #[test]
-    fn directory_without_dot_git_is_classified_as_not_git_working_tree() {
-        let dir = tempdir().expect("tempdir");
-        let repos = vec![RepoConfig {
-            id: "bare".to_string(),
-            path: dir.path().to_path_buf(),
+            repo: "no-owner".to_string(),
             scope: LinearScope::Team {
                 key: "ENG".to_string(),
             },
@@ -507,17 +475,17 @@ mod tests {
         assert_eq!(health.unhealthy.len(), 1);
         assert_eq!(
             health.unhealthy[0].reason,
-            UnhealthyReason::NotGitWorkingTree
+            UnhealthyReason::InvalidGhqIdentifier,
         );
+        assert_eq!(health.unhealthy[0].repo_id, "ghost");
     }
 
     #[test]
-    fn directory_with_dot_git_directory_is_healthy() {
-        let dir = tempdir().expect("tempdir");
-        std::fs::create_dir_all(dir.path().join(".git")).expect("mkdir .git");
+    fn well_formed_owner_repo_is_healthy() {
+        let _ignored = tempdir().expect("tempdir is harmless even though we no longer probe it");
         let repos = vec![RepoConfig {
             id: "ok".to_string(),
-            path: dir.path().to_path_buf(),
+            repo: "owner/ok".to_string(),
             scope: LinearScope::Team {
                 key: "ENG".to_string(),
             },
@@ -533,14 +501,10 @@ mod tests {
     }
 
     #[test]
-    fn directory_with_dot_git_file_is_healthy() {
-        // Worktree-style `.git` is a regular file containing `gitdir: ...`.
-        let dir = tempdir().expect("tempdir");
-        std::fs::write(dir.path().join(".git"), "gitdir: ../main/.git/worktrees/x")
-            .expect("write .git file");
+    fn host_owner_repo_form_is_healthy() {
         let repos = vec![RepoConfig {
-            id: "wt".to_string(),
-            path: dir.path().to_path_buf(),
+            id: "ok".to_string(),
+            repo: "github.com/owner/ok".to_string(),
             scope: LinearScope::Team {
                 key: "ENG".to_string(),
             },
@@ -556,12 +520,10 @@ mod tests {
 
     #[test]
     fn classify_repo_health_keeps_serving_remaining_repos_when_one_is_unhealthy() {
-        let healthy_dir = tempdir().expect("tempdir");
-        std::fs::create_dir_all(healthy_dir.path().join(".git")).expect("mkdir .git");
         let repos = vec![
             RepoConfig {
                 id: "good".to_string(),
-                path: healthy_dir.path().to_path_buf(),
+                repo: "owner/good".to_string(),
                 scope: LinearScope::Team {
                     key: "ENG".to_string(),
                 },
@@ -571,7 +533,7 @@ mod tests {
             },
             RepoConfig {
                 id: "bad".to_string(),
-                path: PathBuf::from("/this/path/should/not/exist/roki-test-2"),
+                repo: "/abs/no-good".to_string(),
                 scope: LinearScope::Team {
                     key: "OPS".to_string(),
                 },
