@@ -21,6 +21,7 @@ pub mod repos;
 
 use std::env;
 use std::fs;
+use std::net::IpAddr;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -40,6 +41,13 @@ pub const DEFAULT_MAX_CONCURRENT_WORKERS: u32 = 4;
 
 /// Default environment variable name for the Linear API token.
 pub const DEFAULT_LINEAR_TOKEN_ENV: &str = "LINEAR_API_TOKEN";
+
+/// Default loopback bind address for the daemon's HTTP surface.
+/// SPEC.md §3.2: the operator opts into wider exposure explicitly.
+pub const DEFAULT_BIND_ADDRESS: &str = "127.0.0.1";
+
+/// Default port for the daemon's HTTP surface.
+pub const DEFAULT_BIND_PORT: u16 = 7878;
 
 /// Root configuration for the roki daemon.
 ///
@@ -66,6 +74,24 @@ pub struct Config {
 
     /// Per-repo configuration. Requirement 2.1.
     pub repos: Vec<RepoConfig>,
+
+    /// HTTP server bind address. Defaults to [`DEFAULT_BIND_ADDRESS`].
+    /// SPEC.md §3.2 / task 5.1.
+    pub server_bind: IpAddr,
+
+    /// HTTP server port. Defaults to [`DEFAULT_BIND_PORT`].
+    /// SPEC.md §3.2 / task 5.1.
+    pub server_port: u16,
+
+    /// Optional override for the `claude` binary path. When `None` the
+    /// bootstrap resolves `claude` via `$PATH` discovery.
+    /// SPEC.md §3.2 / task 5.1.
+    pub claude_binary: Option<PathBuf>,
+
+    /// Optional Linear GraphQL endpoint override. `None` means production
+    /// (`https://api.linear.app/graphql`); tests set this to a wiremock URL.
+    /// Not pinned in SPEC.md — purely an additive runtime knob.
+    pub linear_endpoint: Option<String>,
 }
 
 /// On-disk shape of the config file.
@@ -94,6 +120,22 @@ struct ConfigFile {
 
     #[serde(default)]
     repos: Vec<RepoConfig>,
+
+    #[serde(default)]
+    server: Option<ServerFile>,
+
+    #[serde(default)]
+    claude_binary: Option<PathBuf>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ServerFile {
+    #[serde(default)]
+    bind: Option<String>,
+
+    #[serde(default)]
+    port: Option<u16>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -106,6 +148,12 @@ struct LinearFile {
     /// Path to a file containing the API token (single-line UTF-8).
     #[serde(default)]
     token_file: Option<PathBuf>,
+
+    /// Optional endpoint override. Production callers leave this absent so
+    /// the daemon hits `api.linear.app/graphql`. Integration tests set this
+    /// to a wiremock URL so the tracker never touches the real Linear API.
+    #[serde(default)]
+    endpoint: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -368,6 +416,10 @@ impl Config {
 
         validate_repos(&file.repos)?;
 
+        let (server_bind, server_port) = resolve_server(file.server.as_ref())?;
+
+        let linear_endpoint = file.linear.as_ref().and_then(|f| f.endpoint.clone());
+
         Ok(Self {
             workspace_root,
             linear_token,
@@ -375,8 +427,46 @@ impl Config {
             max_concurrent_workers,
             permission_strategy,
             repos: file.repos,
+            server_bind,
+            server_port,
+            claude_binary: file.claude_binary,
+            linear_endpoint,
         })
     }
+}
+
+fn resolve_server(server: Option<&ServerFile>) -> Result<(IpAddr, u16), ConfigError> {
+    let default_bind: IpAddr =
+        DEFAULT_BIND_ADDRESS
+            .parse()
+            .map_err(|err: std::net::AddrParseError| ConfigError::InvalidField {
+                field: "server.bind".to_string(),
+                reason: format!(
+                    "default bind address `{DEFAULT_BIND_ADDRESS}` is malformed: {err}"
+                ),
+            })?;
+
+    let Some(server) = server else {
+        return Ok((default_bind, DEFAULT_BIND_PORT));
+    };
+
+    let bind = match server.bind.as_deref() {
+        Some(raw) => raw
+            .parse::<IpAddr>()
+            .map_err(|err| ConfigError::InvalidField {
+                field: "server.bind".to_string(),
+                reason: format!("expected an IP address, got `{raw}`: {err}"),
+            })?,
+        None => default_bind,
+    };
+    let port = server.port.unwrap_or(DEFAULT_BIND_PORT);
+    if port == 0 {
+        return Err(ConfigError::InvalidField {
+            field: "server.port".to_string(),
+            reason: "must be greater than zero".to_string(),
+        });
+    }
+    Ok((bind, port))
 }
 
 fn resolve_linear_token(
@@ -809,6 +899,127 @@ strategy = "dangerously_skip_permissions"
         let cfg = Config::load_from_str(&toml_body, &fixture_path(), &EnvOverrides::default())
             .expect("file-backed token must load");
         assert_eq!(cfg.linear_token.expose(), "file-token-value");
+    }
+
+    #[test]
+    fn server_section_defaults_to_loopback_and_documented_port() {
+        // SPEC.md §3.2 / task 5.1: when no `[server]` section is configured
+        // the daemon binds to 127.0.0.1:7878 (loopback only — operator opts
+        // into wider exposure explicitly).
+        let cfg = Config::load_from_str(valid_config_toml(), &fixture_path(), &env_with_token())
+            .expect("valid config without [server] must load");
+        assert_eq!(cfg.server_bind.to_string(), "127.0.0.1");
+        assert_eq!(cfg.server_port, 7878);
+    }
+
+    #[test]
+    fn server_section_overrides_bind_and_port() {
+        let body = r#"
+workspace_root = "/var/lib/roki/workspaces"
+
+[linear]
+token_env = "MY_LINEAR_TOKEN"
+
+[permissions]
+strategy = "dangerously_skip_permissions"
+
+[server]
+bind = "0.0.0.0"
+port = 9090
+"#;
+        let cfg = Config::load_from_str(body, &fixture_path(), &env_with_token())
+            .expect("server overrides must load");
+        assert_eq!(cfg.server_bind.to_string(), "0.0.0.0");
+        assert_eq!(cfg.server_port, 9090);
+    }
+
+    #[test]
+    fn server_section_rejects_malformed_bind_address() {
+        let body = r#"
+workspace_root = "/var/lib/roki/workspaces"
+
+[linear]
+token_env = "MY_LINEAR_TOKEN"
+
+[permissions]
+strategy = "dangerously_skip_permissions"
+
+[server]
+bind = "not-an-ip"
+"#;
+        let err = Config::load_from_str(body, &fixture_path(), &env_with_token())
+            .expect_err("malformed bind must be refused");
+        assert_eq!(err.field(), Some("server.bind"));
+    }
+
+    #[test]
+    fn server_section_rejects_zero_port() {
+        let body = r#"
+workspace_root = "/var/lib/roki/workspaces"
+
+[linear]
+token_env = "MY_LINEAR_TOKEN"
+
+[permissions]
+strategy = "dangerously_skip_permissions"
+
+[server]
+port = 0
+"#;
+        let err = Config::load_from_str(body, &fixture_path(), &env_with_token())
+            .expect_err("port=0 must be refused");
+        assert_eq!(err.field(), Some("server.port"));
+    }
+
+    #[test]
+    fn claude_binary_override_round_trips_through_config() {
+        let body = r#"
+workspace_root = "/var/lib/roki/workspaces"
+claude_binary = "/usr/local/bin/claude-test"
+
+[linear]
+token_env = "MY_LINEAR_TOKEN"
+
+[permissions]
+strategy = "dangerously_skip_permissions"
+"#;
+        let cfg = Config::load_from_str(body, &fixture_path(), &env_with_token())
+            .expect("claude_binary override must load");
+        assert_eq!(
+            cfg.claude_binary.as_deref().map(|p| p.to_str().unwrap()),
+            Some("/usr/local/bin/claude-test"),
+        );
+    }
+
+    #[test]
+    fn webhook_secret_env_round_trips_through_repo_config() {
+        let body = r#"
+workspace_root = "/var/lib/roki/workspaces"
+
+[linear]
+token_env = "MY_LINEAR_TOKEN"
+
+[permissions]
+strategy = "dangerously_skip_permissions"
+
+[[repos]]
+id = "core"
+path = "/srv/git/core"
+workflow_path = "/srv/git/core/WORKFLOW.md"
+webhook_secret_env = "ROKI_WEBHOOK_SECRET_CORE"
+
+[repos.scope]
+kind = "team"
+key = "ENG"
+"#;
+        let cfg = Config::load_from_str(body, &fixture_path(), &env_with_token())
+            .expect("webhook_secret_env must round-trip");
+        assert_eq!(cfg.repos.len(), 1);
+        assert_eq!(
+            cfg.repos[0].webhook_secret_env.as_deref(),
+            Some("ROKI_WEBHOOK_SECRET_CORE"),
+        );
+        assert!(cfg.repos[0].webhook_secret.is_none());
     }
 
     #[test]

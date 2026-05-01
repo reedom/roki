@@ -14,6 +14,7 @@ use serde::{Deserialize, Serialize};
 /// Requirement 2.1: each repo declares its own local path, Linear team or
 /// label scope, and `WORKFLOW.md` location.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct RepoConfig {
     /// Stable identifier for this repo (used as the `repo` half of the
     /// `(repo, issue)` workspace key).
@@ -28,6 +29,19 @@ pub struct RepoConfig {
     /// Path to this repo's `WORKFLOW.md`, resolved relative to the daemon's
     /// working directory if not absolute.
     pub workflow_path: PathBuf,
+
+    /// Environment variable holding the HMAC-SHA256 secret used to verify
+    /// Linear webhook signatures for this repo. Preferred over the literal
+    /// [`Self::webhook_secret`] form. Resolved at bootstrap; missing or empty
+    /// values are a hard refusal (`runtime::run` errors). SPEC.md §3.2.
+    #[serde(default)]
+    pub webhook_secret_env: Option<String>,
+
+    /// Literal HMAC-SHA256 webhook secret. Discouraged — set
+    /// [`Self::webhook_secret_env`] instead so the secret never lands on disk.
+    /// When this is used the bootstrap emits a WARN log on load.
+    #[serde(default)]
+    pub webhook_secret: Option<String>,
 }
 
 /// Linear team or label scope a repository subscribes to.

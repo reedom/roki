@@ -120,14 +120,30 @@ reference implementation calls it `roki run`) that:
 The configuration must declare:
 
 - **One or more repositories**, each with: a local working tree path, a
-  Linear team or label scope, and a `WORKFLOW.md` path.
+  Linear team or label scope, a `WORKFLOW.md` path, and one of either
+  `webhook_secret_env` (preferred — names an environment variable holding
+  the HMAC-SHA256 secret) or `webhook_secret` (literal — discouraged; the
+  daemon emits a WARN log on load when a literal is observed).
 - **A workspace root**: the directory under which per-issue workspaces are
   created (see §6).
 - **A permission strategy**: either an allowlist (the path to a Claude Code
   settings file) or the explicit dangerous-fallback flag (see §13). If
-  neither is configured, the daemon refuses to start.
+  neither is configured, the daemon refuses to start. The dangerous fallback
+  is also reachable via the CLI flag `--dangerously-skip-permissions`, which
+  overrides the configured strategy and emits a WARN log on every worker
+  launch.
 - **A Linear API token** loaded from a non-committed source.
-- **A webhook secret** for HMAC-SHA256 verification (see §14).
+- **An optional Linear GraphQL endpoint override** (`[linear].endpoint`).
+  When absent the daemon uses `https://api.linear.app/graphql`. The override
+  exists so integration harnesses can route polling at a local mock server;
+  production callers leave it unset.
+- **An HTTP server bind**: the optional `[server]` block declares the
+  `bind` address (default `127.0.0.1` — loopback) and the `port` (default
+  `7878`). CLI flags `--bind <addr>` and `--port <num>` override the
+  configured values when present.
+- **An optional `claude_binary`** path. When absent the daemon resolves
+  `claude` via `$PATH` discovery; absence from PATH with no override is a
+  hard refusal at startup.
 - **A log level** and **log destination** (stdout, file, or both).
 
 ### 2.3 Multi-repo routing
@@ -695,6 +711,42 @@ The stream-json parser is keyed on the stable `type` field. Unknown values
 map to `AgentMessage` so the supervisor loop continues to record progress
 timestamps when Claude Code adds new event shapes. One bad line cannot abort
 the worker.
+
+### 9.7 Bootstrap startup sequence
+
+A conformant `roki run` invocation composes its components in this order so
+secrets are redacted before they appear in any log line and so refusals
+land before any subsystem holds resources:
+
+1. Load the config from `--config <path>` (default `./roki.toml`). Apply
+   CLI overrides for `--bind`, `--port`, and `--dangerously-skip-permissions`.
+2. Resolve every secret (Linear API token plus per-repo webhook secret) and
+   reinitialise the redaction-aware logging pipeline with the resolved
+   secret list.
+3. Install OS signal handlers wired to a single `ShutdownSignal`.
+4. Resolve the `claude` binary (`claude_binary` config override → `$PATH`
+   discovery → hard refusal with an actionable message).
+5. Build per-repo `WorkflowLoader`s with debounced hot-reload, the
+   workspace manager, the permission resolver, and the engine adapter.
+6. Build the orchestrator with `EnginePolicy::from_workflow(&policy)`
+   resolved from the parsed `WORKFLOW.md`.
+7. For each repo, spawn a `LinearTracker` (poll task) and build a
+   `WebhookState`; mount the route at `/linear/webhook/<sanitised-repo-id>`
+   on a single `axum::Router`.
+8. Bind the HTTP server at `[server].bind:[server].port` (default
+   `127.0.0.1:7878`). A bind failure is a hard refusal naming the
+   conflicting address.
+9. Funnel polling and webhook outputs through the `TrackerBridge` into the
+   orchestrator inbox.
+10. Drive `tokio::select!` on the shared `ShutdownSignal` across the
+    orchestrator, the bridge, the server, and every tracker. On shutdown
+    the trackers receive their oneshot signal, then the bridge and the
+    server are awaited through `await_workers_with_window` with the
+    documented 30s shutdown window.
+
+The bootstrap MUST NOT block on Linear connectivity at startup. Trackers
+retry their first poll asynchronously, so the webhook server comes up
+regardless of whether Linear is reachable.
 
 ---
 

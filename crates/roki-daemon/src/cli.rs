@@ -1,9 +1,13 @@
 //! Command-line surface for the `roki` binary.
 //!
-//! This is the minimal CLI shell defined by task 1.1. Later tasks extend
-//! `RunArgs` with concrete configuration knobs (config path, log level,
-//! permission strategy, etc.). The structure here is deliberately additive so
-//! those follow-ups do not need to restructure the parser.
+//! Task 1.1 introduced the parser shell. Task 5.1 extends [`RunArgs`] with the
+//! bootstrap flags documented in `.kiro/specs/roki-mvp/design-bootstrap.md`
+//! (config-path override, server bind/port overrides, dangerous-permissions
+//! override). Precedence: CLI flags override `[server]` / `[permission_strategy]`
+//! values from the config file.
+
+use std::net::IpAddr;
+use std::path::PathBuf;
 
 use clap::{Parser, Subcommand};
 
@@ -32,12 +36,42 @@ pub enum Command {
 
 /// Arguments for the `roki run` subcommand.
 ///
-/// Task 1.1 keeps this intentionally empty. Subsequent tasks (1.2 config
-/// loader, 1.3 logging, 9.x permissions) add concrete fields here. The struct
-/// exists today so the parser can name the subcommand and so future fields
-/// land additively without reshaping the CLI.
+/// Task 5.1 introduces the full bootstrap flag surface:
+///
+/// * `--config <path>` — path to the daemon config file. When omitted the
+///   daemon loads `./roki.toml`. An explicit but missing path is a hard error.
+/// * `--bind <addr>` — override `[server].bind` from the config file. Accepts
+///   any IPv4/IPv6 literal that resolves under `IpAddr::from_str`.
+/// * `--port <num>` — override `[server].port` from the config file. Must be
+///   non-zero.
+/// * `--dangerously-skip-permissions` — override `[permission_strategy]` to the
+///   dangerous fallback regardless of what the file declares. The
+///   [`crate::permissions::PermissionResolver`] still emits a per-launch WARN
+///   log, so the elevated-permission decision is auditable.
+///
+/// CLI flags override the config file when both are present. The defaults
+/// applied only when *both* the file value and the CLI override are absent
+/// are documented on the matching constants in [`crate::config`].
 #[derive(Debug, Default, Parser)]
-pub struct RunArgs {}
+pub struct RunArgs {
+    /// Path to the daemon config file. Defaults to `./roki.toml` when
+    /// omitted.
+    #[arg(long, value_name = "PATH")]
+    pub config: Option<PathBuf>,
+
+    /// Override `[server].bind` from the config file (default `127.0.0.1`).
+    #[arg(long, value_name = "ADDR")]
+    pub bind: Option<IpAddr>,
+
+    /// Override `[server].port` from the config file (default `7878`).
+    #[arg(long, value_name = "PORT")]
+    pub port: Option<u16>,
+
+    /// Force the dangerous-skip-permissions fallback regardless of the
+    /// config-file permission strategy. Every worker launch emits a WARN log.
+    #[arg(long)]
+    pub dangerously_skip_permissions: bool,
+}
 
 impl Cli {
     /// Parse arguments from `std::env::args_os`.

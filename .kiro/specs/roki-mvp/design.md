@@ -223,6 +223,40 @@ crates/
 
 ## System Flows
 
+### Daemon bootstrap
+
+`runtime::run` (task 5.1) composes the architecture in a fixed order so
+secrets are added to the redaction list before any structured event is
+emitted, refusal modes land before any resource is held, and the HTTP
+surface comes up regardless of Linear's reachability. The full sequence is
+documented under `SPEC.md §9.7`; the reference implementation lives in
+`crates/roki-daemon/src/runtime.rs::run_with_shutdown`. Composition order:
+
+1. Load config (`--config <path>` overrides `./roki.toml`; CLI flags
+   `--bind` / `--port` / `--dangerously-skip-permissions` override the
+   file).
+2. Resolve every secret (Linear token + per-repo webhook secret) and
+   reinitialise the redaction-aware tracing pipeline with the secret list.
+3. Install OS signal handlers wired to a shared `ShutdownSignal`.
+4. Resolve the `claude` binary (config override → `$PATH` discovery → hard
+   refusal).
+5. Build per-repo `WorkflowLoader`s, the workspace manager, the engine
+   adapter, the orchestrator (with `EnginePolicy::from_workflow(&policy)`).
+6. For each repo, spawn a `LinearTracker` and mount
+   `/linear/webhook/<sanitised-repo-id>` on a single `axum::Router`.
+7. Bind the HTTP server at `[server].bind:[server].port`; a port conflict
+   is a hard refusal.
+8. Funnel polling + webhook streams through `TrackerBridge` into the
+   orchestrator inbox.
+9. `tokio::select!` on shutdown across orchestrator, bridge, server, and
+   trackers; bound the wind-down at `SHUTDOWN_WINDOW = 30s` via
+   `await_workers_with_window`.
+
+`Orchestrator::with_engine_policy` carries one runtime engine policy per
+daemon for the MVP. Per-repo policy resolution is a downstream-spec
+concern — when the orchestrator splits per-repo actor pools, this resolver
+expands to a per-repo map.
+
 ### Per-issue worker lifecycle
 
 ```mermaid

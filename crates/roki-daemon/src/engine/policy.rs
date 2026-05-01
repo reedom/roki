@@ -290,6 +290,45 @@ impl EnginePolicy {
         }
         Ok(value)
     }
+
+    /// Build a runtime [`EnginePolicy`] from a parsed [`crate::workflow::WorkflowPolicy`].
+    ///
+    /// This closes the resolution path documented in SPEC.md §9.5 and the
+    /// design.md "Engine" section: the operator authors `WORKFLOW.md` with
+    /// `max_turns`, `stall_window_seconds`, `backoff.{min,max}_seconds`, and
+    /// `max_attempts`; the bootstrap converts those into the runtime knobs the
+    /// supervisor consumes.
+    ///
+    /// Defense-in-depth:
+    ///
+    /// * `max_attempts` is clamped to `1..=MAX_ATTEMPTS_CEILING` even though the
+    ///   `WORKFLOW.md` JSON-Schema enforces the same bound — the schema check
+    ///   may be bypassed by callers that build a `WorkflowPolicy` directly.
+    /// * `backoff.initial` is set from `backoff.min_seconds` (the loader's
+    ///   convention is "min ≈ initial"), and `backoff.max` from
+    ///   `backoff.max_seconds`. The actual launch delay is always re-clamped
+    ///   to the documented `[BACKOFF_FLOOR, BACKOFF_CEILING]` envelope at
+    ///   computation time, so a misconfigured `WORKFLOW.md` cannot push delays
+    ///   outside the published bounds.
+    /// * `backoff_floor` stays at the documented `BACKOFF_FLOOR` constant
+    ///   (10s). Tests that need sub-second floors construct policies directly
+    ///   rather than going through this resolver.
+    pub fn from_workflow(policy: &crate::workflow::WorkflowPolicy) -> Self {
+        let clamped_attempts = policy.max_attempts.clamp(1, MAX_ATTEMPTS_CEILING);
+        let initial = Duration::from_secs(policy.backoff.min_seconds.max(1));
+        let max = Duration::from_secs(policy.backoff.max_seconds.max(1));
+        Self {
+            turn_budget: policy.max_turns,
+            stall_window: policy.stall_window,
+            backoff: BackoffPolicy {
+                initial,
+                max,
+                multiplier: BackoffPolicy::default().multiplier,
+            },
+            max_attempts: clamped_attempts,
+            backoff_floor: BACKOFF_FLOOR,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -599,6 +638,68 @@ mod tests {
             p.next_launch_delay(WorkerOutcome::CleanExit, 0),
             CLEAN_EXIT_RETRY_DELAY,
         );
+    }
+
+    #[test]
+    fn from_workflow_translates_every_runtime_knob() {
+        // Closes the 3.7 follow-up: WorkflowPolicy → EnginePolicy resolution.
+        // Every runtime knob (turn budget, stall window, backoff envelope,
+        // retry budget) must come straight from the parsed policy. The
+        // documented BACKOFF_FLOOR constant remains in effect because tests
+        // that need a sub-second floor build their own EnginePolicy.
+        use crate::workflow::{
+            BackoffPolicy as WfBackoff, ElicitationsMode, SandboxMode, WorkflowPolicy,
+        };
+        let wf = WorkflowPolicy {
+            sandbox: SandboxMode::WorkspaceWrite,
+            elicitations: ElicitationsMode::Reject,
+            max_turns: 17,
+            stall_window: Duration::from_secs(123),
+            backoff: WfBackoff {
+                min_seconds: 15,
+                max_seconds: 200,
+            },
+            max_attempts: 5,
+            extension: serde_json::Value::Object(Default::default()),
+            prompt_template: String::new(),
+        };
+        let resolved = EnginePolicy::from_workflow(&wf);
+        assert_eq!(resolved.turn_budget, 17);
+        assert_eq!(resolved.stall_window, Duration::from_secs(123));
+        assert_eq!(resolved.max_attempts, 5);
+        assert_eq!(resolved.backoff.initial, Duration::from_secs(15));
+        assert_eq!(resolved.backoff.max, Duration::from_secs(200));
+        assert_eq!(resolved.backoff_floor, BACKOFF_FLOOR);
+    }
+
+    #[test]
+    fn from_workflow_clamps_max_attempts_into_documented_envelope() {
+        // Defense-in-depth: even if a programmatically-built WorkflowPolicy
+        // bypasses the JSON-Schema check, from_workflow must clamp into 1..=10.
+        use crate::workflow::{
+            BackoffPolicy as WfBackoff, ElicitationsMode, SandboxMode, WorkflowPolicy,
+        };
+        fn wf(max_attempts: u32) -> WorkflowPolicy {
+            WorkflowPolicy {
+                sandbox: SandboxMode::WorkspaceWrite,
+                elicitations: ElicitationsMode::Reject,
+                max_turns: DEFAULT_TURN_BUDGET,
+                stall_window: DEFAULT_STALL_WINDOW,
+                backoff: WfBackoff::default(),
+                max_attempts,
+                extension: serde_json::Value::Object(Default::default()),
+                prompt_template: String::new(),
+            }
+        }
+        // Below floor → clamp up to 1.
+        assert_eq!(EnginePolicy::from_workflow(&wf(0)).max_attempts, 1);
+        // Above ceiling → clamp down to MAX_ATTEMPTS_CEILING.
+        assert_eq!(
+            EnginePolicy::from_workflow(&wf(99)).max_attempts,
+            MAX_ATTEMPTS_CEILING,
+        );
+        // Inside envelope → unchanged.
+        assert_eq!(EnginePolicy::from_workflow(&wf(7)).max_attempts, 7);
     }
 
     #[test]

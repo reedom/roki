@@ -274,6 +274,8 @@ mod tests {
             path: PathBuf::from(format!("/srv/git/{id}")),
             scope,
             workflow_path: PathBuf::from(format!("/srv/git/{id}/WORKFLOW.md")),
+            webhook_secret_env: None,
+            webhook_secret: None,
         }
     }
 
@@ -475,6 +477,8 @@ mod tests {
                 key: "ENG".to_string(),
             },
             workflow_path: PathBuf::from("/dev/null"),
+            webhook_secret_env: None,
+            webhook_secret: None,
         }];
 
         let health = classify_repo_health(&repos);
@@ -494,6 +498,8 @@ mod tests {
                 key: "ENG".to_string(),
             },
             workflow_path: PathBuf::from("/dev/null"),
+            webhook_secret_env: None,
+            webhook_secret: None,
         }];
 
         let health = classify_repo_health(&repos);
@@ -516,6 +522,8 @@ mod tests {
                 key: "ENG".to_string(),
             },
             workflow_path: PathBuf::from("/dev/null"),
+            webhook_secret_env: None,
+            webhook_secret: None,
         }];
 
         let health = classify_repo_health(&repos);
@@ -537,6 +545,8 @@ mod tests {
                 key: "ENG".to_string(),
             },
             workflow_path: PathBuf::from("/dev/null"),
+            webhook_secret_env: None,
+            webhook_secret: None,
         }];
 
         let health = classify_repo_health(&repos);
@@ -556,6 +566,8 @@ mod tests {
                     key: "ENG".to_string(),
                 },
                 workflow_path: PathBuf::from("/dev/null"),
+                webhook_secret_env: None,
+                webhook_secret: None,
             },
             RepoConfig {
                 id: "bad".to_string(),
@@ -564,6 +576,8 @@ mod tests {
                     key: "OPS".to_string(),
                 },
                 workflow_path: PathBuf::from("/dev/null"),
+                webhook_secret_env: None,
+                webhook_secret: None,
             },
         ];
 

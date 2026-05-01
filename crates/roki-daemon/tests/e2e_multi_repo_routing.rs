@@ -47,6 +47,8 @@ fn repo_config(id: &str, scope: LinearScope) -> RepoConfig {
         path: PathBuf::from(format!("/srv/git/{id}")),
         scope,
         workflow_path: PathBuf::from(format!("/srv/git/{id}/WORKFLOW.md")),
+        webhook_secret_env: None,
+        webhook_secret: None,
     }
 }
 
