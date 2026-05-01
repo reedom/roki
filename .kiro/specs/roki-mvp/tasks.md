@@ -150,7 +150,7 @@
   - _Depends: 1.5, 2.1, 2.1a, 2.2, 2.3, 2.10, 3.1_
   - _Requirements: 1.1, 8.1, 8.2, 8.3, 13.1_
 
-- [ ] 3.3 Implement restart recovery via Linear plus filesystem reconciliation
+- [x] 3.3 Implement restart recovery via Linear plus filesystem reconciliation
   - On daemon start, list the workspace root, match each existing workspace to a `(repo, issue)` key, and re-fetch the corresponding Linear state before resuming work.
   - Apply the documented per-case reconciliation: workspace plus active issue resumes Active; workspace without active issue is marked orphaned and logged without deletion; active issue without workspace produces a fresh workspace and enters Queued; absent on both sides is a no-op.
   - Confirm the daemon writes no per-issue runtime state to disk except workspace contents the agent itself produces and the structured logs the daemon emits.

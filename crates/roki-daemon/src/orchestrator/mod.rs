@@ -15,4 +15,5 @@ pub mod core;
 pub mod events;
 pub mod hooks;
 pub mod read;
+pub mod recovery;
 pub mod state;

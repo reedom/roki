@@ -56,6 +56,9 @@ use crate::engine::{SupervisedEvent, WorkerContext};
 use crate::orchestrator::events::EventBus;
 use crate::orchestrator::hooks::{HookRegistry, PreCleanupContext};
 use crate::orchestrator::read::{IssueState, OrchestratorRead, SnapshotResponse};
+use crate::orchestrator::recovery::{
+    RecoveryDecision, RecoveryError, RecoveryLinearReader, run_recovery,
+};
 use crate::orchestrator::state::{
     CorrelationId, IssueId, RepoId, TransitionEvent, TransitionTrigger, VetoDecision, WorkerState,
 };
@@ -205,6 +208,49 @@ impl Orchestrator {
             tracker_inbox,
             state: Arc::new(RwLock::new(HashMap::new())),
         }
+    }
+
+    /// Construct an orchestrator after running the restart-recovery scan
+    /// (task 3.3).
+    ///
+    /// This async constructor performs the documented per-`(repo, issue)`
+    /// reconciliation across the workspace root and Linear before returning.
+    /// Synthetic active-state tracker events are posted into
+    /// `recovery_sender` for `ResumeActive` and `FreshQueued` decisions so
+    /// the orchestrator's existing tracker-event path drives each issue back
+    /// into the active lifecycle once [`Orchestrator::run`] starts.
+    /// `recovery_sender` is the same `mpsc::Sender<NormalizedIssue>` that
+    /// feeds `tracker_inbox`; the caller normally owns both ends of the
+    /// channel and threads them through here.
+    ///
+    /// Returns the constructed [`Orchestrator`] together with the ordered
+    /// list of [`RecoveryDecision`] outcomes so callers can log the
+    /// reconciliation summary or, in tests, assert per-key post-recovery
+    /// state.
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "Orchestrator wiring requires every singleton plus the recovery sender and reader; collapsing into a builder would obscure the constructor's contract for the single caller (the daemon main)."
+    )]
+    pub async fn with_recovery(
+        workspace: Arc<dyn Workspace>,
+        engine: Arc<dyn EngineLauncher>,
+        event_bus: Arc<EventBus>,
+        hook_registry: Arc<HookRegistry>,
+        shutdown: ShutdownSignal,
+        tracker_inbox: mpsc::Receiver<NormalizedIssue>,
+        recovery_sender: mpsc::Sender<NormalizedIssue>,
+        reader: &dyn RecoveryLinearReader,
+    ) -> Result<(Self, Vec<RecoveryDecision>), RecoveryError> {
+        let decisions = run_recovery(workspace.as_ref(), reader, &recovery_sender).await?;
+        let orchestrator = Self::new(
+            workspace,
+            engine,
+            event_bus,
+            hook_registry,
+            shutdown,
+            tracker_inbox,
+        );
+        Ok((orchestrator, decisions))
     }
 
     /// Return a cheap-to-clone read-only handle into the orchestrator state
