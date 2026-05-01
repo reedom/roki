@@ -47,7 +47,8 @@ use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
 use roki_daemon::config::SecretString;
-use roki_daemon::config::repos::LinearScope;
+// LinearScope removed by 7.1a; this test still imports `ScopeWatch` for the
+// tracker shim until 7.1b/c reshape the orchestrator and tracker.
 use roki_daemon::engine::claude::ClaudeEngineAdapter;
 use roki_daemon::engine::policy::WorkerOutcome;
 use roki_daemon::engine::{SupervisedEvent, WorkerContext};
@@ -293,9 +294,6 @@ async fn e2e_happy_path_drives_full_lifecycle() {
         cadence: Duration::from_millis(50),
         scopes: vec![ScopeWatch {
             repo: RepoId::new(TEST_REPO),
-            scope: LinearScope::Team {
-                key: "ENG".to_string(),
-            },
         }],
         token: SecretString::new(TEST_TOKEN),
         rate_limit: Arc::new(NoopRateLimit),

@@ -54,7 +54,7 @@ use tokio::task::JoinSet;
 use tracing::{info, warn};
 
 use crate::cli::RunArgs;
-use crate::config::{Config, EnvOverrides, PermissionStrategy, RepoConfig, SecretString};
+use crate::config::{Config, EnvOverrides, LinearConfig, PermissionStrategy, SecretString};
 use crate::engine::ClaudeEngineAdapter;
 use crate::engine::policy::EnginePolicy;
 use crate::logging::{LogContext, LogDestination, LoggingConfig, LoggingGuard};
@@ -199,12 +199,15 @@ pub async fn run_with_shutdown(
     }
 
     // ---- 2. resolve secrets, then reinitialise logging with redaction ---
-    let webhook_secrets = resolve_webhook_secrets(&config.repos)?;
-    let mut redaction_secrets: Vec<String> = Vec::new();
-    redaction_secrets.push(config.linear_token.expose().to_string());
-    for secret in webhook_secrets.values() {
-        redaction_secrets.push(secret.expose().to_string());
-    }
+    // TODO(7.1c): collapse the multi-route webhook bootstrap onto a single
+    // `POST /linear/webhook` route. For 7.1a we keep the per-repo route
+    // shape but swap to a single workspace-level secret resolved from
+    // `[linear].webhook_secret_env` (Requirement 2.3).
+    let workspace_webhook_secret = resolve_workspace_webhook_secret(&config.linear)?;
+    let redaction_secrets: Vec<String> = vec![
+        config.linear_token.expose().to_string(),
+        workspace_webhook_secret.expose().to_string(),
+    ];
 
     let logging_directive = std::env::var("RUST_LOG").unwrap_or_else(|_| "info".to_string());
     let logging_config = LoggingConfig {
@@ -235,33 +238,34 @@ pub async fn run_with_shutdown(
         "ghq not found on PATH — install via `brew install ghq` or `go install github.com/x-motemen/ghq@latest`"
     })?;
 
-    // ---- 4. build per-repo workflow loaders ----------------------------
-    let mut workflow_handles: Vec<WorkflowHandle> = Vec::with_capacity(config.repos.len());
-    let mut workflow_policies: Vec<Arc<WorkflowPolicy>> = Vec::with_capacity(config.repos.len());
-    for repo in &config.repos {
-        let handle = WorkflowLoader::watch(repo.workflow_path.clone(), Duration::from_millis(250))
+    // ---- 4. build the single workspace-level workflow loader -----------
+    // Post-7.1a: one workspace-level `[workflow].path` replaces the
+    // per-repo `workflow_path` (Requirement 2.4, locked decision #6).
+    let workflow_handle =
+        WorkflowLoader::watch(config.workflow.path.clone(), Duration::from_millis(250))
             .await
             .with_context(|| {
                 format!(
-                    "failed to load `{}` for repo `{}`",
-                    repo.workflow_path.display(),
-                    repo.id,
+                    "failed to load workspace WORKFLOW.md from `{}`",
+                    config.workflow.path.display(),
                 )
             })?;
-        let policy = handle.current();
-        workflow_policies.push(policy);
-        workflow_handles.push(handle);
-    }
+    let workflow_policy = workflow_handle.current();
+    let workflow_handles: Vec<WorkflowHandle> = vec![workflow_handle];
+    let workflow_policies: Vec<Arc<WorkflowPolicy>> = vec![Arc::clone(&workflow_policy)];
 
     // ---- 5. build engine + workspace + orchestrator --------------------
     // Task 6.1: workspace manager is built from `wt` + `ghq` adapters and
     // an operator-supplied `repo_index` mapping `RepoId` → ghq identifier.
     let wt: Arc<dyn WtTool> = Arc::new(RealWt::new());
     let ghq: Arc<dyn GhqTool> = Arc::new(RealGhq::new());
+    // TODO(7.1d): drop the `RepoId`-keyed `repo_index` once `WorktreeRegistry`
+    // arrives; for now key the index by the repo's ghq identifier so the
+    // workspace manager continues to compile against `RepoId`.
     let repo_index: HashMap<RepoId, GhqIdentifier> = config
         .repos
         .iter()
-        .map(|repo| (RepoId::new(repo.id.clone()), repo.repo.clone()))
+        .map(|repo| (RepoId::new(repo.repo.clone()), repo.repo.clone()))
         .collect();
     let workspace = Arc::new(WorkspaceManager::new(wt, ghq, repo_index));
     let engine = Arc::new(ClaudeEngineLauncher::new(ClaudeEngineAdapter::with_binary(
@@ -306,45 +310,40 @@ pub async fn run_with_shutdown(
 
     let mut tracker_shutdowns: Vec<oneshot::Sender<()>> = Vec::with_capacity(config.repos.len());
 
+    // TODO(7.1c): collapse to a single `POST /linear/webhook` route plus a
+    // single `LinearTracker`. For 7.1a we keep one route + tracker per repo
+    // entry as a temporary shim using the SHARED workspace-level webhook
+    // secret. The route segment is derived from the repo's ghq identifier
+    // (sanitised) since `repo.id` is gone.
     for repo in &config.repos {
-        let webhook_secret = webhook_secrets
-            .get(repo.id.as_str())
-            .cloned()
-            .ok_or_else(|| anyhow!("webhook secret missing for repo `{}`", repo.id))?;
+        let webhook_secret = workspace_webhook_secret.clone();
 
-        // Webhook route: per-repo path under /linear/webhook/<sanitised-id>.
-        // The same sanitisation rule as the workspace layer (Requirement 4.2:
-        // `[A-Za-z0-9._-]`) is applied here so a repo id that survives
-        // workspace allocation also survives URL-path encoding without
-        // surprising `/`-splits.
-        let path_segment = sanitize_url_segment(repo.id.as_str()).map_err(|reason| {
+        let path_segment = sanitize_url_segment(repo.repo.as_str()).map_err(|reason| {
             anyhow!(
-                "repo id `{}` cannot be encoded as a URL path segment: {}",
-                repo.id,
+                "repo `{}` cannot be encoded as a URL path segment: {}",
+                repo.repo,
                 reason,
             )
         })?;
         let webhook_path = format!("/linear/webhook/{path_segment}");
-        let team_or_scope_fallback = match &repo.scope {
-            crate::config::LinearScope::Team { key } => key.clone(),
-            crate::config::LinearScope::Labels { .. } => String::new(),
-        };
+        // TODO(7.1c): drop the `team_or_scope_fallback` field along with the
+        // single-tracker collapse.
+        let team_or_scope_fallback = String::new();
         let webhook_state = WebhookState::new(
             webhook_secret,
-            crate::orchestrator::state::RepoId::new(repo.id.clone()),
+            crate::orchestrator::state::RepoId::new(repo.repo.clone()),
             team_or_scope_fallback,
             webhook_tx_master.clone(),
         );
         router = router.merge(webhook_router(webhook_state, &webhook_path));
 
-        // LinearTracker: one per repo scope. The cadence is global per the
-        // documented MVP behaviour.
+        // LinearTracker: one per repo allowlist entry as a temporary shim;
+        // the workspace-level collapse is 7.1c's job.
         let tracker = LinearTracker::new(LinearTrackerConfig {
             endpoint: linear_endpoint.clone(),
             cadence: config.polling_cadence,
             scopes: vec![ScopeWatch {
-                repo: crate::orchestrator::state::RepoId::new(repo.id.clone()),
-                scope: repo.scope.clone(),
+                repo: crate::orchestrator::state::RepoId::new(repo.repo.clone()),
             }],
             token: SecretString::new(config.linear_token.expose().to_string()),
             rate_limit: Arc::clone(&rate_limit),
@@ -460,56 +459,30 @@ pub async fn run_with_shutdown(
     Ok(())
 }
 
-/// Per-repo lookup of the resolved webhook secret. Maps the repo id to a
-/// [`SecretString`] so the secret never round-trips through plain `String`
-/// in any later code path.
-fn resolve_webhook_secrets(
-    repos: &[RepoConfig],
-) -> Result<std::collections::HashMap<String, SecretString>> {
-    let mut map = std::collections::HashMap::with_capacity(repos.len());
-    for repo in repos {
-        let secret = match (
-            repo.webhook_secret_env.as_deref(),
-            repo.webhook_secret.as_deref(),
-        ) {
-            (Some(var), _) => {
-                let value = std::env::var(var).map_err(|_| {
-                    anyhow!(
-                        "webhook_secret_env `{var}` is not set for repo `{}`",
-                        repo.id,
-                    )
-                })?;
-                if value.trim().is_empty() {
-                    return Err(anyhow!(
-                        "webhook_secret_env `{var}` is empty for repo `{}`",
-                        repo.id,
-                    ));
-                }
-                SecretString::new(value)
-            }
-            (None, Some(literal)) => {
-                if literal.trim().is_empty() {
-                    return Err(anyhow!(
-                        "webhook_secret is empty for repo `{}` — set webhook_secret_env or a non-empty literal",
-                        repo.id,
-                    ));
-                }
-                warn!(
-                    repo = %repo.id,
-                    "webhook secret declared as a literal — prefer webhook_secret_env so the value never hits disk",
-                );
-                SecretString::new(literal.to_string())
-            }
-            (None, None) => {
-                return Err(anyhow!(
-                    "no webhook secret configured for repo `{}` — set `webhook_secret_env` (preferred) or `webhook_secret` literal",
-                    repo.id,
-                ));
-            }
-        };
-        map.insert(repo.id.clone(), secret);
+/// Resolve the workspace-level webhook HMAC secret declared in
+/// `[linear].webhook_secret_env` (Requirement 2.3). The configured env-var
+/// must be set and non-empty; absence is a hard refusal. The returned
+/// [`SecretString`] is shared across every webhook route the bootstrap
+/// mounts.
+fn resolve_workspace_webhook_secret(linear: &LinearConfig) -> Result<SecretString> {
+    resolve_workspace_webhook_secret_with(linear, |var| std::env::var(var).ok())
+}
+
+/// Pure helper that the unit tests can drive without mutating the process
+/// environment. The lookup closure stands in for `std::env::var`.
+fn resolve_workspace_webhook_secret_with<F>(
+    linear: &LinearConfig,
+    lookup: F,
+) -> Result<SecretString>
+where
+    F: FnOnce(&str) -> Option<String>,
+{
+    let var = linear.webhook_secret_env.as_str();
+    let value = lookup(var).ok_or_else(|| anyhow!("webhook secret env-var `{var}` is not set"))?;
+    if value.trim().is_empty() {
+        return Err(anyhow!("webhook secret env-var `{var}` is empty"));
     }
-    Ok(map)
+    Ok(SecretString::new(value))
 }
 
 /// Resolve the `claude` binary path. The override (config-file
@@ -654,39 +627,43 @@ mod tests {
         );
     }
 
-    #[test]
-    fn resolve_webhook_secrets_accepts_literal_with_warning() {
-        let repos = vec![RepoConfig {
-            id: "core".to_string(),
-            repo: "owner/core".to_string(),
-            scope: crate::config::LinearScope::Team {
-                key: "ENG".to_string(),
-            },
-            workflow_path: PathBuf::from("/srv/git/core/WORKFLOW.md"),
-            webhook_secret_env: None,
-            webhook_secret: Some("literal-secret".to_string()),
-        }];
-        let map = resolve_webhook_secrets(&repos).expect("literal accepted");
-        assert_eq!(map.get("core").unwrap().expose(), "literal-secret");
+    fn linear_cfg(env_var: &str) -> LinearConfig {
+        LinearConfig {
+            token_env: "LINEAR_API_TOKEN".to_string(),
+            webhook_secret_env: env_var.to_string(),
+        }
     }
 
     #[test]
-    fn resolve_webhook_secrets_refuses_when_neither_form_present() {
-        let repos = vec![RepoConfig {
-            id: "core".to_string(),
-            repo: "owner/core".to_string(),
-            scope: crate::config::LinearScope::Team {
-                key: "ENG".to_string(),
-            },
-            workflow_path: PathBuf::from("/srv/git/core/WORKFLOW.md"),
-            webhook_secret_env: None,
-            webhook_secret: None,
-        }];
-        let err = resolve_webhook_secrets(&repos).expect_err("must refuse");
+    fn resolve_workspace_webhook_secret_reads_env_var() {
+        let linear = linear_cfg("ROKI_FAKE_WEBHOOK_SECRET");
+        let secret =
+            resolve_workspace_webhook_secret_with(&linear, |_| Some("the-secret".to_string()))
+                .expect("lookup must succeed");
+        assert_eq!(secret.expose(), "the-secret");
+    }
+
+    #[test]
+    fn resolve_workspace_webhook_secret_refuses_when_env_unset() {
+        let linear = linear_cfg("ROKI_FAKE_WEBHOOK_SECRET");
+        let err = resolve_workspace_webhook_secret_with(&linear, |_| None)
+            .expect_err("absent env var must be refused");
         let msg = format!("{err:#}");
         assert!(
-            msg.contains("no webhook secret configured"),
-            "error must call out the missing config, got: {msg}",
+            msg.contains("not set"),
+            "error must call out the missing env var, got: {msg}",
+        );
+    }
+
+    #[test]
+    fn resolve_workspace_webhook_secret_refuses_when_env_empty() {
+        let linear = linear_cfg("ROKI_FAKE_WEBHOOK_SECRET");
+        let err = resolve_workspace_webhook_secret_with(&linear, |_| Some("   ".to_string()))
+            .expect_err("empty value must be refused");
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("empty"),
+            "error must call out empty value: {msg}"
         );
     }
 
@@ -711,25 +688,5 @@ mod tests {
     #[test]
     fn sanitize_url_segment_rejects_traversal_sentinel() {
         assert!(sanitize_url_segment("..").is_err());
-    }
-
-    #[test]
-    fn resolve_webhook_secrets_refuses_empty_literal() {
-        let repos = vec![RepoConfig {
-            id: "core".to_string(),
-            repo: "owner/core".to_string(),
-            scope: crate::config::LinearScope::Team {
-                key: "ENG".to_string(),
-            },
-            workflow_path: PathBuf::from("/srv/git/core/WORKFLOW.md"),
-            webhook_secret_env: None,
-            webhook_secret: Some("   ".to_string()),
-        }];
-        let err = resolve_webhook_secrets(&repos).expect_err("empty literal must be refused");
-        let msg = format!("{err:#}");
-        assert!(
-            msg.contains("empty"),
-            "error must call out empty value: {msg}"
-        );
     }
 }

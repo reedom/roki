@@ -119,27 +119,34 @@ reference implementation calls it `roki run`) that:
 
 The configuration must declare:
 
-- **One or more repositories**, each with: a `repo` ghq identifier
-  (`<owner>/<repo>` or `<host>/<owner>/<repo>`), a Linear team or label
-  scope, a `WORKFLOW.md` path, and one of either `webhook_secret_env`
-  (preferred — names an environment variable holding the HMAC-SHA256
-  secret) or `webhook_secret` (literal — discouraged; the daemon emits a
-  WARN log on load when a literal is observed). The local checkout path
-  is resolved at runtime via `ghq list -p` (cloning on miss via
-  `ghq get`); workspaces are git worktrees laid out by the external `wt`
-  CLI (see §6). Operators must install both `wt` and `ghq` on `$PATH`;
-  absence of either at startup is a hard refusal.
+- **An agent allowlist of repositories** under `[[repos]]`. Each entry
+  carries only a `repo` ghq identifier (`<owner>/<repo>` or
+  `<host>/<owner>/<repo>`); the daemon refuses to start when two entries
+  declare the same identifier and names the offending entry. The local
+  checkout path is resolved at runtime via `ghq list -p` (cloning on miss
+  via `ghq get`); workspaces are git worktrees laid out by the external
+  `wt` CLI (see §6). Operators must install both `wt` and `ghq` on
+  `$PATH`; absence of either at startup is a hard refusal. An empty
+  allowlist starts the daemon with a WARN log; every `roki_open_worktree`
+  invocation then returns a typed allowlist-rejection error to the agent.
+- **A workspace-level `[linear]` block** carrying the Linear API token
+  source (`token_env`, defaults to `LINEAR_API_TOKEN`; or `token_file`
+  for file-backed tokens), the workspace-level webhook secret env-var
+  name (`webhook_secret_env`, required), and an optional
+  `endpoint` override (test-only — production callers leave this unset
+  so the daemon hits `https://api.linear.app/graphql`). The daemon
+  refuses to start if the API token or the webhook secret cannot be
+  resolved.
+- **A workspace-level `[workflow]` block** carrying the path to the
+  single workspace-level `WORKFLOW.md` policy file (`path`, required).
+  The same policy applies regardless of which configured repo(s) the
+  agent operates in. Missing or unreadable paths are a hard refusal.
 - **A permission strategy**: either an allowlist (the path to a Claude Code
   settings file) or the explicit dangerous-fallback flag (see §13). If
   neither is configured, the daemon refuses to start. The dangerous fallback
   is also reachable via the CLI flag `--dangerously-skip-permissions`, which
   overrides the configured strategy and emits a WARN log on every worker
   launch.
-- **A Linear API token** loaded from a non-committed source.
-- **An optional Linear GraphQL endpoint override** (`[linear].endpoint`).
-  When absent the daemon uses `https://api.linear.app/graphql`. The override
-  exists so integration harnesses can route polling at a local mock server;
-  production callers leave it unset.
 - **An HTTP server bind**: the optional `[server]` block declares the
   `bind` address (default `127.0.0.1` — loopback) and the `port` (default
   `7878`). CLI flags `--bind <addr>` and `--port <num>` override the

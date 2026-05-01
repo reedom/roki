@@ -10,7 +10,6 @@ pub mod engine;
 pub mod logging;
 pub mod orchestrator;
 pub mod permissions;
-pub mod routing;
 pub mod runtime;
 pub mod shutdown;
 pub mod tools;

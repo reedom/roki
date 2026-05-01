@@ -18,9 +18,15 @@
 //! cadence timer is run per scope so a slow scope never starves a fast one.
 //! Inputs that the orchestrator (task 3.x) will provide:
 //!
-//! * the `(RepoId, LinearScope)` pairs derived from `RepoConfig`;
+//! * a list of [`ScopeWatch`] entries identifying the watched workspace;
 //! * a `tokio::sync::oneshot::Receiver<()>` shutdown channel;
 //! * an `mpsc::Sender<NormalizedIssue>` sink the orchestrator drains.
+//!
+//! TODO(7.1c): collapse the per-scope poller into a single workspace-level
+//! poller. Post-7.1a the daemon no longer carries a `LinearScope` filter; the
+//! tracker now polls active issues without scope-narrowing variables. The
+//! actual collapse to a single tracker (and the removal of [`ScopeWatch`])
+//! lands in 7.1c.
 
 use std::sync::Arc;
 use std::sync::Mutex;
@@ -37,7 +43,6 @@ use tokio::time::{Instant, sleep_until};
 use tracing::{debug, info, warn};
 
 use crate::config::SecretString;
-use crate::config::repos::LinearScope;
 use crate::orchestrator::state::{IssueId, RepoId};
 use crate::tools::RateLimitState;
 use crate::tracker::model::{IssueState, NormalizedIssue};
@@ -58,17 +63,16 @@ const MAX_BACKOFF: Duration = Duration::from_secs(300);
 /// Default request timeout for the underlying reqwest client.
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 
-/// One Linear scope the tracker should watch.
+/// One Linear poller scope the tracker should watch.
 ///
-/// The tracker today emits [`NormalizedIssue::repo`] from this struct because
-/// the polling poller knows the repo per scope at construction time. Future
-/// orchestrator-side routing (task 1.5) may replace this with a router that
-/// resolves repo from the response, in which case `repo` becomes optional —
-/// for now the tracker is a self-contained scope-watcher.
+/// TODO(7.1c): collapse into a single workspace-level poller. Post-7.1a the
+/// `LinearScope` filter was removed (agent-driven repo selection means the
+/// daemon no longer pre-classifies issues by team/label). The `repo` field
+/// is retained as an interim stamp for `NormalizedIssue.repo` until 7.1b
+/// rekeys the orchestrator on `IssueId` alone.
 #[derive(Debug, Clone)]
 pub struct ScopeWatch {
     pub repo: RepoId,
-    pub scope: LinearScope,
 }
 
 /// Construction-time configuration for [`LinearTracker`].
@@ -476,7 +480,7 @@ async fn poll_once(
 ) -> Result<Vec<NormalizedIssue>, PollError> {
     let body = json!({
         "query": ACTIVE_ISSUES_QUERY,
-        "variables": variables_for(&scope.scope),
+        "variables": active_issues_variables(),
     });
 
     let response = http
@@ -573,23 +577,15 @@ fn clamp_cadence(cadence: Duration) -> Duration {
 /// needs (Requirement 3.4) so we do not pull more from Linear than necessary.
 const ACTIVE_ISSUES_QUERY: &str = "query ActiveIssues($filter: IssueFilter, $first: Int) {\n  issues(filter: $filter, first: $first) {\n    nodes {\n      id\n      identifier\n      title\n      description\n      state { type name }\n      labels { nodes { name } }\n      team { key }\n    }\n  }\n}";
 
-/// Build the `IssueFilter` for a given scope.
+/// Build the `IssueFilter` for the workspace poller.
 ///
-/// * `Team { key }` → filter by `team.key` and the active-state types.
-/// * `Labels { any_of }` → filter by `labels.some.name.in` and the active-state
-///   types.
-fn variables_for(scope: &LinearScope) -> Value {
+/// TODO(7.1c): post-7.1a the daemon no longer pre-classifies issues by
+/// team/label. The polling tracker requests every active issue the API
+/// token can see; the agent decides on its first turn whether the ticket
+/// is in scope. The `LinearScope`-keyed filter shape is gone.
+fn active_issues_variables() -> Value {
     let active_states = json!({ "type": { "in": ["unstarted", "started"] } });
-    let filter = match scope {
-        LinearScope::Team { key } => json!({
-            "team": { "key": { "eq": key } },
-            "state": active_states,
-        }),
-        LinearScope::Labels { any_of } => json!({
-            "labels": { "some": { "name": { "in": any_of } } },
-            "state": active_states,
-        }),
-    };
+    let filter = json!({ "state": active_states });
     json!({ "filter": filter, "first": 100 })
 }
 
@@ -607,13 +603,10 @@ fn node_to_normalized(node: IssueNode, scope: &ScopeWatch) -> NormalizedIssue {
         .labels
         .map(|l| l.nodes.into_iter().map(|n| n.name).collect::<Vec<_>>())
         .unwrap_or_default();
-    let team_or_scope = node
-        .team
-        .map(|t| t.key)
-        .unwrap_or_else(|| match &scope.scope {
-            LinearScope::Team { key } => key.clone(),
-            LinearScope::Labels { .. } => String::new(),
-        });
+    // TODO(7.1c): drop `team_or_scope` from `NormalizedIssue` along with the
+    // single-tracker collapse. Post-7.1a there is no scope-fallback string;
+    // the team key is best-effort from the response and otherwise empty.
+    let team_or_scope = node.team.map(|t| t.key).unwrap_or_default();
     let state = IssueState::from_linear_type(node.state.kind.as_deref().unwrap_or(""));
 
     NormalizedIssue {
@@ -718,9 +711,6 @@ mod tests {
     fn dummy_scope_watch() -> ScopeWatch {
         ScopeWatch {
             repo: RepoId::new("core"),
-            scope: LinearScope::Team {
-                key: "ENG".to_string(),
-            },
         }
     }
 
@@ -769,23 +759,15 @@ mod tests {
     }
 
     #[test]
-    fn variables_for_team_scope_filters_by_team_key() {
-        let vars = variables_for(&LinearScope::Team {
-            key: "ENG".to_string(),
-        });
-        assert_eq!(vars["filter"]["team"]["key"]["eq"], "ENG");
-        // Active-state filter must be present so we never poll closed issues.
+    fn active_issues_variables_filters_only_by_active_state() {
+        // Post-7.1a: the per-scope team/label filter is gone; the daemon
+        // polls every active issue and lets the agent decide which tickets
+        // are in scope. TODO(7.1c): folded into single workspace tracker.
+        let vars = active_issues_variables();
         assert_eq!(vars["filter"]["state"]["type"]["in"][0], "unstarted");
         assert_eq!(vars["filter"]["state"]["type"]["in"][1], "started");
-    }
-
-    #[test]
-    fn variables_for_labels_scope_filters_by_label_set() {
-        let vars = variables_for(&LinearScope::Labels {
-            any_of: vec!["bug".to_string(), "p1".to_string()],
-        });
-        assert_eq!(vars["filter"]["labels"]["some"]["name"]["in"][0], "bug");
-        assert_eq!(vars["filter"]["labels"]["some"]["name"]["in"][1], "p1");
+        assert!(vars["filter"]["team"].is_null());
+        assert!(vars["filter"]["labels"].is_null());
     }
 
     #[test]
@@ -816,7 +798,9 @@ mod tests {
     }
 
     #[test]
-    fn node_to_normalized_falls_back_to_scope_when_team_absent() {
+    fn node_to_normalized_emits_empty_team_when_response_lacks_team() {
+        // Post-7.1a: with no scope-derived fallback, an absent team field
+        // produces an empty `team_or_scope`. TODO(7.1c): drop the field.
         let scope = dummy_scope_watch();
         let node = IssueNode {
             id: None,
@@ -831,7 +815,7 @@ mod tests {
             team: None,
         };
         let normalized = node_to_normalized(node, &scope);
-        assert_eq!(normalized.team_or_scope, "ENG");
+        assert_eq!(normalized.team_or_scope, "");
         assert_eq!(normalized.state, IssueState::Other);
         assert_eq!(normalized.description, "");
         assert!(normalized.labels.is_empty());

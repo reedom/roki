@@ -15,7 +15,6 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use roki_daemon::config::SecretString;
-use roki_daemon::config::repos::LinearScope;
 use roki_daemon::orchestrator::state::RepoId;
 use roki_daemon::tools::NoopRateLimit;
 use roki_daemon::tracker::linear::{LinearTracker, LinearTrackerConfig, ScopeWatch};
@@ -62,11 +61,10 @@ fn empty_payload() -> Value {
 }
 
 fn scope_watch() -> ScopeWatch {
+    // TODO(7.1c): drop this scaffolding when the single workspace tracker
+    // collapses. Post-7.1a `ScopeWatch` carries only the repo stamp.
     ScopeWatch {
         repo: RepoId::new("core"),
-        scope: LinearScope::Team {
-            key: "ENG".to_string(),
-        },
     }
 }
 

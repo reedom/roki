@@ -19,6 +19,7 @@
 
 pub mod repos;
 
+use std::collections::HashMap;
 use std::env;
 use std::fs;
 use std::net::IpAddr;
@@ -27,7 +28,7 @@ use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 
-pub use repos::{GhqIdentifierError, LinearScope, RepoConfig, validate_ghq_identifier};
+pub use repos::{GhqIdentifierError, RepoConfig, validate_ghq_identifier};
 
 /// Default polling cadence cap (Requirement 3.2: <= 5 min per scope).
 pub const DEFAULT_POLLING_CADENCE_SECONDS: u64 = 300;
@@ -93,6 +94,46 @@ pub struct Config {
     /// (`https://api.linear.app/graphql`); tests set this to a wiremock URL.
     /// Not pinned in SPEC.md — purely an additive runtime knob.
     pub linear_endpoint: Option<String>,
+
+    /// Workspace-level Linear configuration (Requirement 2.3, post-7.1a).
+    /// Carries the env-var name resolving to the single workspace-level
+    /// webhook HMAC secret and the optional `token_env` source the
+    /// `linear_token` was resolved from.
+    pub linear: LinearConfig,
+
+    /// Workspace-level workflow policy configuration (Requirement 2.4,
+    /// post-7.1a). The single `WORKFLOW.md` policy applies regardless of
+    /// which configured repo(s) the agent picks.
+    pub workflow: WorkflowConfig,
+}
+
+/// Resolved workspace-level Linear configuration (post-7.1a).
+///
+/// `webhook_secret_env` is the env-var name the bootstrap reads to obtain
+/// the single workspace-level HMAC secret. `token_env` is preserved for
+/// observability — the actual token is wrapped in [`SecretString`] on
+/// [`Config::linear_token`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LinearConfig {
+    /// Env-var name that holds the Linear API token. Defaults to
+    /// [`DEFAULT_LINEAR_TOKEN_ENV`] when not configured.
+    pub token_env: String,
+
+    /// Env-var name that holds the workspace-level webhook HMAC secret.
+    /// Required (Requirement 2.3); the bootstrap resolves the actual
+    /// secret value at startup.
+    pub webhook_secret_env: String,
+}
+
+/// Resolved workspace-level workflow configuration (post-7.1a).
+///
+/// One `WORKFLOW.md` policy applies regardless of which configured repo(s)
+/// the agent operates in (Requirement 2.4, locked decision #6 in
+/// `design-agent-driven-repo-selection.md`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorkflowConfig {
+    /// Filesystem path to the workspace-level `WORKFLOW.md`. Required.
+    pub path: PathBuf,
 }
 
 /// On-disk shape of the config file.
@@ -124,6 +165,17 @@ struct ConfigFile {
 
     #[serde(default)]
     claude_binary: Option<PathBuf>,
+
+    #[serde(default)]
+    workflow: Option<WorkflowFile>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct WorkflowFile {
+    /// Path to the workspace-level `WORKFLOW.md` policy file. Required.
+    #[serde(default)]
+    path: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -152,6 +204,11 @@ struct LinearFile {
     /// to a wiremock URL so the tracker never touches the real Linear API.
     #[serde(default)]
     endpoint: Option<String>,
+
+    /// Env-var name that holds the workspace-level webhook HMAC secret.
+    /// Required (Requirement 2.3, post-7.1a).
+    #[serde(default)]
+    webhook_secret_env: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -410,6 +467,8 @@ impl Config {
         let (server_bind, server_port) = resolve_server(file.server.as_ref())?;
 
         let linear_endpoint = file.linear.as_ref().and_then(|f| f.endpoint.clone());
+        let linear = resolve_linear_block(file.linear.as_ref())?;
+        let workflow = resolve_workflow_block(file.workflow.as_ref())?;
 
         Ok(Self {
             linear_token,
@@ -421,8 +480,62 @@ impl Config {
             server_port,
             claude_binary: file.claude_binary,
             linear_endpoint,
+            linear,
+            workflow,
         })
     }
+}
+
+/// Resolve the workspace-level `[linear]` block. Per Requirement 2.3 the
+/// webhook secret env-var name is required; absence is a hard refusal that
+/// names the offending field.
+fn resolve_linear_block(linear: Option<&LinearFile>) -> Result<LinearConfig, ConfigError> {
+    let Some(linear) = linear else {
+        return Err(ConfigError::MissingField {
+            field: "linear.webhook_secret_env".to_string(),
+        });
+    };
+    let Some(webhook_secret_env) = linear.webhook_secret_env.as_deref() else {
+        return Err(ConfigError::MissingField {
+            field: "linear.webhook_secret_env".to_string(),
+        });
+    };
+    if webhook_secret_env.trim().is_empty() {
+        return Err(ConfigError::InvalidField {
+            field: "linear.webhook_secret_env".to_string(),
+            reason: "must not be empty".to_string(),
+        });
+    }
+    let token_env = linear
+        .token_env
+        .clone()
+        .unwrap_or_else(|| DEFAULT_LINEAR_TOKEN_ENV.to_string());
+    Ok(LinearConfig {
+        token_env,
+        webhook_secret_env: webhook_secret_env.to_string(),
+    })
+}
+
+/// Resolve the workspace-level `[workflow]` block. Per Requirement 2.4 the
+/// path is required; absence is a hard refusal.
+fn resolve_workflow_block(workflow: Option<&WorkflowFile>) -> Result<WorkflowConfig, ConfigError> {
+    let Some(workflow) = workflow else {
+        return Err(ConfigError::MissingField {
+            field: "workflow.path".to_string(),
+        });
+    };
+    let Some(path) = workflow.path.as_ref() else {
+        return Err(ConfigError::MissingField {
+            field: "workflow.path".to_string(),
+        });
+    };
+    if path.as_os_str().is_empty() {
+        return Err(ConfigError::InvalidField {
+            field: "workflow.path".to_string(),
+            reason: "must not be empty".to_string(),
+        });
+    }
+    Ok(WorkflowConfig { path: path.clone() })
 }
 
 fn resolve_server(server: Option<&ServerFile>) -> Result<(IpAddr, u16), ConfigError> {
@@ -548,40 +661,25 @@ fn resolve_permission_strategy(
     }
 }
 
+/// Validate the per-repo allowlist (Requirement 2.1) and refuse duplicates
+/// (Requirement 2.2, post-7.1a).
 fn validate_repos(repos: &[RepoConfig]) -> Result<(), ConfigError> {
+    let mut seen: HashMap<&str, usize> = HashMap::with_capacity(repos.len());
     for (index, repo) in repos.iter().enumerate() {
-        if repo.id.trim().is_empty() {
-            return Err(ConfigError::InvalidField {
-                field: format!("repos[{index}].id"),
-                reason: "must not be empty".to_string(),
-            });
-        }
         if let Err(err) = validate_ghq_identifier(&repo.repo) {
             return Err(ConfigError::InvalidField {
                 field: format!("repos[{index}].repo"),
                 reason: err.message().to_string(),
             });
         }
-        if repo.workflow_path.as_os_str().is_empty() {
+        if let Some(prior) = seen.insert(repo.repo.as_str(), index) {
             return Err(ConfigError::InvalidField {
-                field: format!("repos[{index}].workflow_path"),
-                reason: "must not be empty".to_string(),
+                field: format!("repos[{index}].repo"),
+                reason: format!(
+                    "duplicate ghq identifier `{}` (also declared at repos[{prior}])",
+                    repo.repo,
+                ),
             });
-        }
-        match &repo.scope {
-            LinearScope::Team { key } if key.trim().is_empty() => {
-                return Err(ConfigError::InvalidField {
-                    field: format!("repos[{index}].scope.key"),
-                    reason: "team key must not be empty".to_string(),
-                });
-            }
-            LinearScope::Labels { any_of } if any_of.is_empty() => {
-                return Err(ConfigError::InvalidField {
-                    field: format!("repos[{index}].scope.any_of"),
-                    reason: "label list must not be empty".to_string(),
-                });
-            }
-            _ => {}
         }
     }
     Ok(())
@@ -660,25 +758,25 @@ mod tests {
     }
 
     fn valid_config_toml() -> &'static str {
+        // Post-7.1a shape: only `repo` per `[[repos]]`, workspace-level
+        // `[linear].webhook_secret_env`, workspace-level `[workflow].path`.
         r#"
 polling_cadence_seconds = 120
 max_concurrent_workers = 3
 
 [linear]
 token_env = "MY_LINEAR_TOKEN"
+webhook_secret_env = "ROKI_LINEAR_WEBHOOK_SECRET"
+
+[workflow]
+path = "/srv/policy/WORKFLOW.md"
 
 [permissions]
 strategy = "allowlist"
 settings = "/etc/roki/claude-settings.json"
 
 [[repos]]
-id = "core"
 repo = "owner/core"
-workflow_path = "/srv/git/core/WORKFLOW.md"
-
-[repos.scope]
-kind = "team"
-key = "ENG"
 "#
     }
 
@@ -702,13 +800,11 @@ key = "ENG"
             PermissionStrategy::Allowlist { .. }
         ));
         assert_eq!(cfg.repos.len(), 1);
-        assert_eq!(cfg.repos[0].id, "core");
         assert_eq!(cfg.repos[0].repo, "owner/core");
+        assert_eq!(cfg.linear.webhook_secret_env, "ROKI_LINEAR_WEBHOOK_SECRET");
         assert_eq!(
-            cfg.repos[0].scope,
-            LinearScope::Team {
-                key: "ENG".to_string()
-            }
+            cfg.workflow.path.to_str().unwrap(),
+            "/srv/policy/WORKFLOW.md"
         );
     }
 
@@ -744,18 +840,16 @@ strategy = "dangerously_skip_permissions"
         let bad = r#"
 [linear]
 token_env = "MY_LINEAR_TOKEN"
+webhook_secret_env = "ROKI_LINEAR_WEBHOOK_SECRET"
+
+[workflow]
+path = "/srv/policy/WORKFLOW.md"
 
 [permissions]
 strategy = "dangerously_skip_permissions"
 
 [[repos]]
-id = "core"
 repo = "/abs/path/to/local"
-workflow_path = "/srv/git/core/WORKFLOW.md"
-
-[repos.scope]
-kind = "team"
-key = "ENG"
 "#;
         let err = Config::load_from_str(bad, &fixture_path(), &env_with_token())
             .expect_err("absolute-path-shaped ghq identifier must be refused");
@@ -915,6 +1009,10 @@ strategy = "dangerously_skip_permissions"
             r#"
 [linear]
 token_file = "{}"
+webhook_secret_env = "ROKI_LINEAR_WEBHOOK_SECRET"
+
+[workflow]
+path = "/srv/policy/WORKFLOW.md"
 
 [permissions]
 strategy = "dangerously_skip_permissions"
@@ -942,6 +1040,10 @@ strategy = "dangerously_skip_permissions"
         let body = r#"
 [linear]
 token_env = "MY_LINEAR_TOKEN"
+webhook_secret_env = "ROKI_LINEAR_WEBHOOK_SECRET"
+
+[workflow]
+path = "/srv/policy/WORKFLOW.md"
 
 [permissions]
 strategy = "dangerously_skip_permissions"
@@ -997,6 +1099,10 @@ claude_binary = "/usr/local/bin/claude-test"
 
 [linear]
 token_env = "MY_LINEAR_TOKEN"
+webhook_secret_env = "ROKI_LINEAR_WEBHOOK_SECRET"
+
+[workflow]
+path = "/srv/policy/WORKFLOW.md"
 
 [permissions]
 strategy = "dangerously_skip_permissions"
@@ -1010,54 +1116,243 @@ strategy = "dangerously_skip_permissions"
     }
 
     #[test]
-    fn webhook_secret_env_round_trips_through_repo_config() {
+    fn workspace_level_webhook_secret_env_round_trips() {
+        // Post-7.1a: the per-repo `webhook_secret_env` was replaced by a
+        // single workspace-level `[linear].webhook_secret_env`.
+        let body = r#"
+[linear]
+token_env = "MY_LINEAR_TOKEN"
+webhook_secret_env = "ROKI_LINEAR_WEBHOOK_SECRET"
+
+[workflow]
+path = "/srv/policy/WORKFLOW.md"
+
+[permissions]
+strategy = "dangerously_skip_permissions"
+
+[[repos]]
+repo = "owner/core"
+"#;
+        let cfg = Config::load_from_str(body, &fixture_path(), &env_with_token())
+            .expect("workspace-level webhook_secret_env must round-trip");
+        assert_eq!(cfg.repos.len(), 1);
+        assert_eq!(cfg.repos[0].repo, "owner/core");
+        assert_eq!(cfg.linear.webhook_secret_env, "ROKI_LINEAR_WEBHOOK_SECRET");
+    }
+
+    // ---- 7.1a: post-rewrite schema tests --------------------------------
+
+    fn valid_config_toml_71a() -> &'static str {
+        // The new shape after task 7.1a: `[[repos]]` carries only `repo`,
+        // `[linear]` declares the workspace-level webhook secret env var, and
+        // `[workflow]` declares the single workspace-level policy path.
+        r#"
+polling_cadence_seconds = 120
+max_concurrent_workers = 3
+
+[linear]
+token_env = "MY_LINEAR_TOKEN"
+webhook_secret_env = "ROKI_LINEAR_WEBHOOK_SECRET"
+
+[workflow]
+path = "/srv/policy/WORKFLOW.md"
+
+[permissions]
+strategy = "allowlist"
+settings = "/etc/roki/claude-settings.json"
+
+[[repos]]
+repo = "owner/core"
+
+[[repos]]
+repo = "owner/infra"
+"#
+    }
+
+    #[test]
+    fn loads_a_valid_71a_shape_config() {
+        // The post-7.1a schema parses end-to-end: only `repo` per entry,
+        // workspace-level `[linear].webhook_secret_env` and `[workflow].path`.
+        let cfg =
+            Config::load_from_str(valid_config_toml_71a(), &fixture_path(), &env_with_token())
+                .expect("post-7.1a config must load");
+
+        assert_eq!(cfg.repos.len(), 2);
+        assert_eq!(cfg.repos[0].repo, "owner/core");
+        assert_eq!(cfg.repos[1].repo, "owner/infra");
+        assert_eq!(cfg.linear.webhook_secret_env, "ROKI_LINEAR_WEBHOOK_SECRET",);
+        assert_eq!(
+            cfg.workflow.path.to_str().unwrap(),
+            "/srv/policy/WORKFLOW.md"
+        );
+    }
+
+    #[test]
+    fn linear_block_requires_webhook_secret_env() {
+        // Requirement 2.3: refuse to start if the workspace-level webhook
+        // secret source is absent.
         let body = r#"
 [linear]
 token_env = "MY_LINEAR_TOKEN"
 
+[workflow]
+path = "/srv/policy/WORKFLOW.md"
+
 [permissions]
 strategy = "dangerously_skip_permissions"
 
 [[repos]]
-id = "core"
 repo = "owner/core"
-workflow_path = "/srv/git/core/WORKFLOW.md"
-webhook_secret_env = "ROKI_WEBHOOK_SECRET_CORE"
-
-[repos.scope]
-kind = "team"
-key = "ENG"
 "#;
-        let cfg = Config::load_from_str(body, &fixture_path(), &env_with_token())
-            .expect("webhook_secret_env must round-trip");
-        assert_eq!(cfg.repos.len(), 1);
-        assert_eq!(
-            cfg.repos[0].webhook_secret_env.as_deref(),
-            Some("ROKI_WEBHOOK_SECRET_CORE"),
-        );
-        assert!(cfg.repos[0].webhook_secret.is_none());
+        let err = Config::load_from_str(body, &fixture_path(), &env_with_token())
+            .expect_err("missing webhook_secret_env must be refused");
+        assert_eq!(err.field(), Some("linear.webhook_secret_env"));
     }
 
     #[test]
-    fn invalid_repo_entry_names_the_offending_field() {
-        let bad_repo = r#"
+    fn workflow_block_is_required() {
+        // Requirement 2.4: refuse to start if the workspace-level workflow
+        // path is absent.
+        let body = r#"
 [linear]
 token_env = "MY_LINEAR_TOKEN"
+webhook_secret_env = "ROKI_LINEAR_WEBHOOK_SECRET"
 
 [permissions]
 strategy = "dangerously_skip_permissions"
 
 [[repos]]
-id = ""
+repo = "owner/core"
+"#;
+        let err = Config::load_from_str(body, &fixture_path(), &env_with_token())
+            .expect_err("missing [workflow] block must be refused");
+        assert_eq!(err.field(), Some("workflow.path"));
+    }
+
+    #[test]
+    fn duplicate_repo_entries_are_refused() {
+        // Requirement 2.2: duplicate `[[repos]]` entries with the same `repo`
+        // identifier must be refused at load with the offending entry named.
+        let body = r#"
+[linear]
+token_env = "MY_LINEAR_TOKEN"
+webhook_secret_env = "ROKI_LINEAR_WEBHOOK_SECRET"
+
+[workflow]
+path = "/srv/policy/WORKFLOW.md"
+
+[permissions]
+strategy = "dangerously_skip_permissions"
+
+[[repos]]
+repo = "owner/core"
+
+[[repos]]
+repo = "owner/core"
+"#;
+        let err = Config::load_from_str(body, &fixture_path(), &env_with_token())
+            .expect_err("duplicate repo entries must be refused");
+        let field = err.field().expect("error must name the offending field");
+        assert!(
+            field.contains("repos[1].repo"),
+            "error must name the duplicate entry's index, got `{field}`",
+        );
+        assert!(
+            err.to_string().contains("owner/core"),
+            "rendered error must echo the duplicate ghq identifier, got: {err}",
+        );
+    }
+
+    #[test]
+    fn legacy_workflow_path_under_repo_is_refused() {
+        // Post-7.1a: per-repo `workflow_path` is gone. Existing configs that
+        // still carry it must fail loudly (deny_unknown_fields surfaces this).
+        let body = r#"
+[linear]
+token_env = "MY_LINEAR_TOKEN"
+webhook_secret_env = "ROKI_LINEAR_WEBHOOK_SECRET"
+
+[workflow]
+path = "/srv/policy/WORKFLOW.md"
+
+[permissions]
+strategy = "dangerously_skip_permissions"
+
+[[repos]]
 repo = "owner/core"
 workflow_path = "/srv/git/core/WORKFLOW.md"
+"#;
+        let err = Config::load_from_str(body, &fixture_path(), &env_with_token())
+            .expect_err("legacy per-repo workflow_path must be refused");
+        match err {
+            ConfigError::Parse { ref field, .. } => {
+                assert!(
+                    field.contains("workflow_path"),
+                    "expected error to name `workflow_path`, got `{field}`",
+                );
+            }
+            other => panic!("expected Parse error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn legacy_repo_scope_block_is_refused() {
+        // Post-7.1a: `[[repos]].scope` is gone (agent-driven repo selection).
+        let body = r#"
+[linear]
+token_env = "MY_LINEAR_TOKEN"
+webhook_secret_env = "ROKI_LINEAR_WEBHOOK_SECRET"
+
+[workflow]
+path = "/srv/policy/WORKFLOW.md"
+
+[permissions]
+strategy = "dangerously_skip_permissions"
+
+[[repos]]
+repo = "owner/core"
 
 [repos.scope]
 kind = "team"
 key = "ENG"
 "#;
-        let err = Config::load_from_str(bad_repo, &fixture_path(), &env_with_token())
-            .expect_err("empty repo id must be refused");
-        assert_eq!(err.field(), Some("repos[0].id"));
+        let err = Config::load_from_str(body, &fixture_path(), &env_with_token())
+            .expect_err("legacy `[repos.scope]` must be refused");
+        match err {
+            ConfigError::Parse { ref field, .. } => {
+                assert!(
+                    field.contains("scope"),
+                    "expected error to name `scope`, got `{field}`",
+                );
+            }
+            other => panic!("expected Parse error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn linear_endpoint_override_round_trips() {
+        // The 5.1 test-injection seam survives 7.1a: `[linear].endpoint`
+        // remains a test-only override.
+        let body = r#"
+[linear]
+token_env = "MY_LINEAR_TOKEN"
+webhook_secret_env = "ROKI_LINEAR_WEBHOOK_SECRET"
+endpoint = "http://127.0.0.1:9999/graphql"
+
+[workflow]
+path = "/srv/policy/WORKFLOW.md"
+
+[permissions]
+strategy = "dangerously_skip_permissions"
+
+[[repos]]
+repo = "owner/core"
+"#;
+        let cfg = Config::load_from_str(body, &fixture_path(), &env_with_token())
+            .expect("endpoint override must load");
+        assert_eq!(
+            cfg.linear_endpoint.as_deref(),
+            Some("http://127.0.0.1:9999/graphql"),
+        );
     }
 }

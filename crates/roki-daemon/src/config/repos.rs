@@ -1,74 +1,35 @@
 //! Per-repository configuration entries.
 //!
-//! This module owns the shape of the per-repo block in the daemon config. The
-//! deterministic routing precedence rule across overlapping Linear scopes is
-//! explicitly NOT implemented here — that lives in task 1.5. We only define
-//! the data so task 1.2's loader can validate it.
+//! Post task 7.1a, the per-repo block is a pure allowlist: each entry carries
+//! only the `ghq` identifier the agent is permitted to open a worktree in via
+//! the `roki_open_worktree` tool. The Linear scope, per-repo webhook secret,
+//! per-repo `WORKFLOW.md`, and operator-supplied `id` fields were removed
+//! along with the daemon-side routing logic — the agent reads each ticket on
+//! its first turn and decides which repo(s) to operate in.
 //!
 //! ## Worktree migration (task 6.1)
 //!
 //! Per `.kiro/specs/roki-mvp/design-worktree-workspace.md`, the per-repo
 //! configuration carries a `repo` ghq identifier (`owner/repo` or
-//! `host/owner/repo`) instead of an absolute working-tree `path`. The local
-//! checkout is resolved at runtime via `ghq list -p` / `ghq get`, and
-//! workspaces are git worktrees laid out by `wt`. The schema rename here is
-//! the operator-visible half of that migration.
-
-use std::path::PathBuf;
+//! `host/owner/repo`). The local checkout is resolved at runtime via
+//! `ghq list -p` / `ghq get`, and workspaces are git worktrees laid out by
+//! `wt`.
 
 use serde::{Deserialize, Serialize};
 
 /// Configuration for a single Git repository served by the daemon.
 ///
-/// Requirement 2.1: each repo declares its own ghq identifier, Linear team or
-/// label scope, and `WORKFLOW.md` location.
+/// Post task 7.1a, this is the agent allowlist — no per-repo scope or
+/// secret. Requirement 2.1: each entry declares its `ghq` identifier and the
+/// daemon resolves the local clone path at runtime.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RepoConfig {
-    /// Stable identifier for this repo (used as the `repo` half of the
-    /// `(repo, issue)` workspace key).
-    pub id: String,
-
     /// Ghq identifier for the repo's source remote
     /// (`owner/repo` or `host/owner/repo`). The daemon uses this to discover
     /// the local checkout via `ghq list -p`, cloning on miss via `ghq get`.
     /// Validated at config load (see [`validate_ghq_identifier`]).
     pub repo: String,
-
-    /// Linear scope this repo subscribes to.
-    pub scope: LinearScope,
-
-    /// Path to this repo's `WORKFLOW.md`, resolved relative to the daemon's
-    /// working directory if not absolute.
-    pub workflow_path: PathBuf,
-
-    /// Environment variable holding the HMAC-SHA256 secret used to verify
-    /// Linear webhook signatures for this repo. Preferred over the literal
-    /// [`Self::webhook_secret`] form. Resolved at bootstrap; missing or empty
-    /// values are a hard refusal (`runtime::run` errors). SPEC.md §3.2.
-    #[serde(default)]
-    pub webhook_secret_env: Option<String>,
-
-    /// Literal HMAC-SHA256 webhook secret. Discouraged — set
-    /// [`Self::webhook_secret_env`] instead so the secret never lands on disk.
-    /// When this is used the bootstrap emits a WARN log on load.
-    #[serde(default)]
-    pub webhook_secret: Option<String>,
-}
-
-/// Linear team or label scope a repository subscribes to.
-///
-/// Either form is accepted; downstream routing (task 1.5) must select exactly
-/// one repository per `(repo, issue)` pair using a deterministic precedence
-/// rule.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case", tag = "kind")]
-pub enum LinearScope {
-    /// Match every issue from a Linear team identified by its key.
-    Team { key: String },
-
-    /// Match issues bearing any of the listed labels.
-    Labels { any_of: Vec<String> },
 }
 
 /// Result of validating a ghq identifier candidate. Keeps the caller's error
