@@ -109,7 +109,7 @@
   - _Requirements: 5.2_
   - _Boundary: engine/stream_
 
-- [ ] 2.8 (P) Implement the engine policy controller (turn budget, stall, backoff, retry)
+- [x] 2.8 (P) Implement the engine policy controller (turn budget, stall, backoff, retry)
   - Implement the configurable per-worker turn budget so that no further continuation prompt is sent once exhausted.
   - Implement event-inactivity stall detection over a configurable window with a typed `Stalled` outcome.
   - Implement exponential backoff between worker invocations bounded between 10s and 5min, and the one-second continuation retry on clean exit.
