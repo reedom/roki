@@ -1,6 +1,6 @@
 # Implementation Plan
 
-- [ ] 1. Foundation: project scaffolding, configuration, and logging
+- [x] 1. Foundation: project scaffolding, configuration, and logging
 
 - [x] 1.1 Initialize the Cargo workspace and the roki-daemon crate
   - Create the root `Cargo.toml` as a Cargo workspace with `[workspace]` and `members = ["crates/roki-daemon"]`. Reserve the workspace layout so downstream specs can append `crates/roki-tui` and `crates/roki-api-types` as additive members without restructuring.
@@ -37,7 +37,7 @@
   - Observable completion: a unit test routes the same issue against two overlapping configured scopes and asserts a single `(repo, issue)` key is produced, plus a log event names the precedence decision.
   - _Requirements: 2.6 (NOTE: this task implemented the pre-7.1 deterministic precedence rule and per-repo health classifier — both are removed by task 7.1; the original requirement IDs `2.2 (overlapping precedence)` and `2.3 (unhealthy repo)` no longer exist in the synced requirements.md)_
 
-- [ ] 2. Core: domain types, traits, and per-component implementations
+- [x] 2. Core: domain types, traits, and per-component implementations
 
 - [x] 2.1 (P) Define orchestrator state, transitions, and events
   - Implement the `WorkerState` enum, including the `Cleaning` interim state, and the transition table (legal transitions, vetoable subset).
@@ -133,7 +133,7 @@
   - _Depends: 2.7, 2.8, 2.9, 2.4, 2.3_
   - _Boundary: engine/claude_
 
-- [ ] 3. Integration: orchestrator wiring, recovery, and event bus
+- [x] 3. Integration: orchestrator wiring, recovery, and event bus
 
 - [x] 3.1 Implement the transition event bus and subscription hooks
   - Implement a bounded broadcast channel for non-vetoable transitions plus an explicit per-subscriber await path for vetoable transitions where a `Deny` decision blocks the transition.
@@ -194,7 +194,7 @@
   - _Requirements: 4.6, 5.6, 8.1_
   - _Design: `.kiro/specs/roki-mvp/design-retry-policy.md`_
 
-- [ ] 4. Validation: end-to-end paths, language-agnostic SPEC.md
+- [x] 4. Validation: end-to-end paths, language-agnostic SPEC.md
 
 - [x] 4.1 Author the language-agnostic `SPEC.md` at the repo root
   - Document the daemon contract, the `WORKFLOW.md` schema with all four reserved extension namespaces (`extension.gates.spec.*`, `extension.gates.review.*`, `extension.server.*`, `extension.distill.*`), the per-issue state machine and full vetoable-transition list (including `TerminalSuccess -> Cleaning` as the pre-cleanup hook), the agent tool registry contract and `linear_graphql` semantics, the workspace path layout and sanitization rules, and the lifecycle event taxonomy.
@@ -234,7 +234,7 @@
   - Observable completion: the parser keeps the same outcome on the captured fixture set across changes; new fixtures can be added with a single helper.
   - _Requirements: 5.2_
 
-- [ ] 7. Agent-driven repo selection: collapse multi-repo routing into the agent
+- [x] 7. Agent-driven repo selection: collapse multi-repo routing into the agent
 
 _Task 7.1 was split into 7.1a–7.1f after the first implementer dispatch BLOCKED on size (~16K production lines + ~4K tests + SPEC/design rewrites in one reviewer-gated unit). The 11 locked decisions in `design-agent-driven-repo-selection.md` carry through unchanged; only the envelope is split. Sub-tasks dispatched sequentially with normal subagent-per-task discipline._
 
@@ -393,7 +393,7 @@ _Task 7.1 was split into 7.1a–7.1f after the first implementer dispatch BLOCKE
   - _Requirements: 2.1, 2.2, 2.3, 2.4, 2.6, 2.7, 3.1, 3.2, 4.1, 4.2, 4.4, 4.5, 4.6, 6.1, 7.1, 7.4, 7.5, 7.6, 7.7, 8.2, 10.1, 10.2, 10.3, 10.4_
   - _Design: `.kiro/specs/roki-mvp/design-agent-driven-repo-selection.md`_
 
-- [ ] 6. Workspace model migration: switch from sandbox dirs to git worktrees
+- [x] 6. Workspace model migration: switch from sandbox dirs to git worktrees
 
 - [x] 6.1 Replace the sandbox-dir workspace model with `wt` + `ghq` git worktrees
   - _Boundary:_ `crates/roki-daemon/src/config/{mod.rs,repos.rs}`, `crates/roki-daemon/src/tools/{mod.rs,wt.rs,ghq.rs}` (the latter two new), `crates/roki-daemon/src/workspace/{mod.rs,layout.rs}`, `crates/roki-daemon/src/runtime.rs` (bootstrap composition), `SPEC.md` §2.2 + §6 (rewrite), `.kiro/specs/roki-mvp/design.md`. Tests under `crates/roki-daemon/tests/orchestrator_workspace.rs`, `e2e_happy_path.rs`, `e2e_failure_retry.rs`, `e2e_multi_repo_routing.rs` (only struct-literal cascades), `e2e_vetoable_transition.rs` (only if needed), `e2e_bootstrap.rs`, plus new unit tests beside `tools/wt.rs` and `tools/ghq.rs`.
@@ -437,7 +437,7 @@ _Task 7.1 was split into 7.1a–7.1f after the first implementer dispatch BLOCKE
   - _Requirements: 4.3, 4.4, 4.5, 4.6, 10.1_
   - _Design: `.kiro/specs/roki-mvp/design-worktree-workspace.md`_
 
-- [ ] 5. Bootstrap: make `roki run` actually run the daemon end-to-end
+- [x] 5. Bootstrap: make `roki run` actually run the daemon end-to-end
 
 - [ ] ~~5.2~~ Wire restart recovery through the bootstrap (SUPERSEDED by 7.1e)
   - _Boundary:_ a new production `RecoveryLinearReader` impl backed by `LinearTracker` (live module path TBD — implementer chooses), `crates/roki-daemon/src/runtime.rs` (swap `Orchestrator::new` for `Orchestrator::with_recovery`), and a new integration test that pre-seeds workspace directories before invoking `runtime::run_with_shutdown`.
