@@ -173,7 +173,7 @@
   - _Depends: 2.1a, 2.2, 3.2_
   - _Requirements: 4.3, 4.4, 4.5, 13.2_
 
-- [ ] 3.6 Connect the tracker adapter to the orchestrator
+- [x] 3.6 Connect the tracker adapter to the orchestrator
   - Bridge `NormalizedIssue` events from both polling and webhook paths into the orchestrator's tracker-event sink, ensuring duplicates are idempotent on `(repo, issue, target_state)`.
   - Refuse any code path that performs Linear writes from inside the daemon process; all writes must originate from the agent through `linear_graphql`.
   - Observable completion: an integration test delivers the same logical issue update via both webhook and polling within a single tick and asserts only one observable transition is produced.
