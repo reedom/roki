@@ -1,20 +1,12 @@
-//! Shared test helpers for orchestrator + workspace integration tests.
+//! Shared test helpers for orchestrator + tool integration tests (post 7.1d).
 //!
-//! Provides hand-rolled mocks for `WtTool` and `GhqTool` (per task 6.1
-//! locked decisions) so tests can construct a [`WorkspaceManager`] without
-//! shelling out to real `wt` / `ghq` binaries. Mirrors monorail's pattern;
-//! kept dependency-free (no `mockall`) so the surface stays trivial to
-//! audit.
-//!
-//! ## Layout the mocks emulate
-//!
-//! Each mock owns a `tempfile::TempDir` for its repo root and lays out
-//! per-issue worktrees under that root using the deterministic
-//! `{repo_path}/../{repo_name}.{branch_sanitized}` rule documented by
-//! [`roki_daemon::tools::wt::worktree_path_for`]. `ensure` actually
-//! `mkdir`s the worktree path so existing tests that probe
-//! `expected_workspace.is_dir()` keep their semantics; `remove` deletes
-//! the directory so `!expected_workspace.exists()` keeps its semantics.
+//! Provides hand-rolled mocks for `WtTool` and `GhqTool` that materialise
+//! real on-disk directories so tests that probe `is_dir()` / `exists()`
+//! observe the same shape they did before the worktree migration. The
+//! pre-7.1d `WorkspaceManager` and `Workspace` trait are gone — tests now
+//! drive `SessionManager` + `WorktreeRegistry` directly via the
+//! orchestrator's new constructor surface (`Orchestrator::new(session,
+//! registry, wt, ...)`).
 
 #![allow(dead_code)]
 
@@ -24,16 +16,13 @@ use std::sync::Arc;
 use std::sync::Mutex as StdMutex;
 
 use async_trait::async_trait;
-use tempfile::TempDir;
 
-use roki_daemon::orchestrator::state::RepoId;
 use roki_daemon::tools::ghq::{GhqError, GhqTool};
 use roki_daemon::tools::wt::{WtError, WtTool, worktree_path_for};
-use roki_daemon::workspace::{GhqIdentifier, WorkspaceManager};
 
 /// Mock `WtTool` that materialises worktree directories on disk so tests
-/// can probe `is_dir()` / `exists()` exactly the way they did under the
-/// pre-task-6.1 sandbox-dir model.
+/// can probe `is_dir()` / `exists()`. Records every invocation so tests
+/// can assert call counts and call shapes.
 pub struct MockWt {
     pub switch_create_calls: StdMutex<Vec<(PathBuf, String)>>,
     pub remove_calls: StdMutex<Vec<PathBuf>>,
@@ -56,8 +45,6 @@ impl WtTool for MockWt {
             .unwrap()
             .push((repo_path.to_path_buf(), branch.to_string()));
         let target = worktree_path_for(repo_path, branch)?;
-        // Materialise the directory so tests that assert is_dir() see the
-        // same shape as the production CLI.
         std::fs::create_dir_all(&target).map_err(|err| WtError::Io {
             message: format!("mock create_dir_all({}): {err}", target.display()),
         })?;
@@ -79,12 +66,10 @@ impl WtTool for MockWt {
 }
 
 /// Mock `GhqTool` that resolves a fixed map of identifiers to real local
-/// directories under a `TempDir`. Each repo's root directory is created
-/// when the mock is built so subsequent `ensure_cloned` calls succeed
-/// without touching the network.
+/// directories under a parent. Each repo's root directory is created when
+/// the mock is built so subsequent `ensure_cloned` calls succeed without
+/// touching the network.
 pub struct MockGhq {
-    /// Identifier → repo path. The repo path is always inside the
-    /// associated `TempDir`'s tree.
     pub roots: HashMap<String, PathBuf>,
     pub list_calls: StdMutex<Vec<String>>,
     pub ensure_calls: StdMutex<Vec<String>>,
@@ -128,33 +113,40 @@ impl GhqTool for MockGhq {
     }
 }
 
-/// Convenience: build a `WorkspaceManager` with the mock tools rooted at
-/// `parent`, plus a repo index built from the supplied
-/// `(repo_id, ghq_identifier, repo_dir_name)` triples. Returns the
-/// manager plus the parent `TempDir` so the test owns the lifetime.
-pub fn build_workspace_manager(
-    parent: TempDir,
-    entries: &[(&str, &str, &str)],
-) -> (WorkspaceManager, TempDir, Arc<MockWt>, Arc<MockGhq>) {
-    let mock_entries: Vec<(&str, &str)> =
-        entries.iter().map(|(_, ghq, dir)| (*ghq, *dir)).collect();
-    let ghq = Arc::new(MockGhq::new(parent.path(), &mock_entries));
-    let wt = Arc::new(MockWt::default());
-    let repo_index: HashMap<RepoId, GhqIdentifier> = entries
-        .iter()
-        .map(|(repo_id, ghq, _)| (RepoId::new(*repo_id), (*ghq).to_string()))
-        .collect();
-    let manager = WorkspaceManager::new(
-        Arc::clone(&wt) as Arc<dyn WtTool>,
-        Arc::clone(&ghq) as Arc<dyn GhqTool>,
-        repo_index,
-    );
-    (manager, parent, wt, ghq)
-}
-
-/// Compute the worktree path the mock will produce for a given repo +
-/// issue. Tests use this to assert "the workspace is on disk" without
-/// re-deriving the layout rule.
+/// Compute the worktree path the mock will produce for a given repo + issue.
+/// Tests use this to assert "the worktree was opened at this path".
 pub fn expected_worktree_path(parent: &Path, repo_dir: &str, issue: &str) -> PathBuf {
     worktree_path_for(&parent.join(repo_dir), issue).expect("worktree path")
+}
+
+/// Build a `(MockGhq, MockWt)` pair rooted under `parent` with one entry per
+/// `(ghq_identifier, repo_dir_name)` tuple. Returns owned mocks the test can
+/// share via `Arc`.
+pub fn build_repo_mocks(parent: &Path, entries: &[(&str, &str)]) -> (Arc<MockGhq>, Arc<MockWt>) {
+    let ghq = Arc::new(MockGhq::new(parent, entries));
+    let wt = Arc::new(MockWt::default());
+    (ghq, wt)
+}
+
+/// Build the per-test [`SessionManager`] + [`WorktreeRegistry`] wiring used
+/// to construct an [`Orchestrator`]. Roots the session tempdir under
+/// `session_root` (typically owned by a `tempfile::TempDir`).
+pub fn build_session_wiring(
+    session_root: PathBuf,
+) -> (
+    Arc<roki_daemon::session::SessionManager>,
+    roki_daemon::worktrees::WorktreeRegistry,
+) {
+    let session_manager = Arc::new(roki_daemon::session::SessionManager::with_root(
+        session_root,
+    ));
+    let registry = roki_daemon::worktrees::WorktreeRegistry::new();
+    (session_manager, registry)
+}
+
+/// Construct a `WtTool` stub useful for orchestrator tests that exercise
+/// the cleanup arc but do not exercise the agent tool directly. The stub
+/// records `remove` invocations so tests can assert per-arc behaviour.
+pub fn build_recording_wt() -> Arc<MockWt> {
+    Arc::new(MockWt::default())
 }

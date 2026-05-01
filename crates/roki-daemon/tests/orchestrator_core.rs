@@ -26,12 +26,13 @@ use roki_daemon::orchestrator::events::{EventBus, SubscriberError, TransitionSub
 use roki_daemon::orchestrator::hooks::HookRegistry;
 use roki_daemon::orchestrator::read::OrchestratorRead;
 use roki_daemon::orchestrator::state::{IssueId, RepoId, TransitionEvent, WorkerState};
+use roki_daemon::session::SessionManager;
 use roki_daemon::shutdown::ShutdownSignal;
 use roki_daemon::tracker::model::{IssueState as TrackerIssueState, NormalizedIssue};
-use roki_daemon::workspace::Workspace;
+use roki_daemon::worktrees::WorktreeRegistry;
 
 mod common;
-use crate::common::build_workspace_manager;
+use crate::common::MockWt;
 
 /// Engine stub that emits a fixed terminal outcome for every launch.
 struct StubEngine {
@@ -105,9 +106,10 @@ async fn orchestrator_drives_issue_from_discovered_to_cleaning() {
     // transition sequence (including `TerminalSuccess -> Cleaning`) plus
     // subscriber dispatch order.
     let parent = tempdir().expect("tempdir");
-    let (manager, _parent_keep, _wt, _ghq) =
-        build_workspace_manager(parent, &[("repo-a", "owner/repo-a", "repo-a")]);
-    let workspace = Arc::new(manager);
+    let session_manager = Arc::new(SessionManager::with_root(parent.path().join("sessions")));
+    let registry = WorktreeRegistry::new();
+    let wt: Arc<dyn roki_daemon::tools::WtTool> = Arc::new(MockWt::default());
+    let _parent_keep = parent;
     let event_bus = Arc::new(EventBus::with_default_capacity());
     let hook_registry = Arc::new(HookRegistry::new());
     let shutdown = ShutdownSignal::new();
@@ -127,7 +129,9 @@ async fn orchestrator_drives_issue_from_discovered_to_cleaning() {
     let (tracker_tx, tracker_rx) = mpsc::channel::<NormalizedIssue>(8);
 
     let orchestrator = Orchestrator::new(
-        Arc::clone(&workspace) as Arc<_>,
+        Arc::clone(&session_manager),
+        registry.clone(),
+        Arc::clone(&wt),
         engine,
         Arc::clone(&event_bus),
         Arc::clone(&hook_registry),
@@ -224,9 +228,10 @@ async fn orchestrator_read_snapshot_matches_actual_state_mid_run() {
     // Discovered -> Queued -> Active -> AwaitingReview and then stay there
     // because Terminal isn't sent yet. We snapshot at AwaitingReview.
     let parent = tempdir().expect("tempdir");
-    let (manager, _parent_keep, _wt, _ghq) =
-        build_workspace_manager(parent, &[("repo-a", "owner/repo-a", "repo-a")]);
-    let workspace = Arc::new(manager);
+    let session_manager = Arc::new(SessionManager::with_root(parent.path().join("sessions")));
+    let registry = WorktreeRegistry::new();
+    let wt: Arc<dyn roki_daemon::tools::WtTool> = Arc::new(MockWt::default());
+    let _parent_keep = parent;
     let event_bus = Arc::new(EventBus::with_default_capacity());
     let hook_registry = Arc::new(HookRegistry::new());
     let shutdown = ShutdownSignal::new();
@@ -244,7 +249,9 @@ async fn orchestrator_read_snapshot_matches_actual_state_mid_run() {
     let (tracker_tx, tracker_rx) = mpsc::channel::<NormalizedIssue>(8);
 
     let orchestrator = Orchestrator::new(
-        workspace,
+        Arc::clone(&session_manager),
+        registry.clone(),
+        Arc::clone(&wt),
         engine,
         Arc::clone(&event_bus),
         Arc::clone(&hook_registry),
@@ -362,9 +369,10 @@ async fn non_clean_exit_drives_active_backoff_loop_until_budget_exhausted() {
     //
     // The engine launcher is invoked exactly `max_attempts = 3` times.
     let parent = tempdir().expect("tempdir");
-    let (manager, _parent_keep, _wt, _ghq) =
-        build_workspace_manager(parent, &[("repo-a", "owner/repo-a", "repo-a")]);
-    let workspace = Arc::new(manager);
+    let session_manager = Arc::new(SessionManager::with_root(parent.path().join("sessions")));
+    let registry = WorktreeRegistry::new();
+    let wt: Arc<dyn roki_daemon::tools::WtTool> = Arc::new(MockWt::default());
+    let _parent_keep = parent;
     let event_bus = Arc::new(EventBus::with_default_capacity());
     let hook_registry = Arc::new(HookRegistry::new());
     let shutdown = ShutdownSignal::new();
@@ -390,7 +398,9 @@ async fn non_clean_exit_drives_active_backoff_loop_until_budget_exhausted() {
     let (tracker_tx, tracker_rx) = mpsc::channel::<NormalizedIssue>(8);
 
     let orchestrator = Orchestrator::new(
-        Arc::clone(&workspace) as Arc<dyn Workspace>,
+        Arc::clone(&session_manager),
+        registry.clone(),
+        Arc::clone(&wt),
         engine,
         Arc::clone(&event_bus),
         Arc::clone(&hook_registry),
@@ -466,9 +476,10 @@ async fn stalled_outcome_drives_active_to_terminal_failure_without_backoff() {
     // same prompt and budget repeats the same outcome — so the worker actor
     // must skip the Backoff loop and route directly to `TerminalFailure`.
     let parent = tempdir().expect("tempdir");
-    let (manager, _parent_keep, _wt, _ghq) =
-        build_workspace_manager(parent, &[("repo-b", "owner/repo-b", "repo-b")]);
-    let workspace = Arc::new(manager);
+    let session_manager = Arc::new(SessionManager::with_root(parent.path().join("sessions")));
+    let registry = WorktreeRegistry::new();
+    let wt: Arc<dyn roki_daemon::tools::WtTool> = Arc::new(MockWt::default());
+    let _parent_keep = parent;
     let event_bus = Arc::new(EventBus::with_default_capacity());
     let hook_registry = Arc::new(HookRegistry::new());
     let shutdown = ShutdownSignal::new();
@@ -492,7 +503,9 @@ async fn stalled_outcome_drives_active_to_terminal_failure_without_backoff() {
     let (tracker_tx, tracker_rx) = mpsc::channel::<NormalizedIssue>(8);
 
     let orchestrator = Orchestrator::new(
-        Arc::clone(&workspace) as Arc<dyn Workspace>,
+        Arc::clone(&session_manager),
+        registry.clone(),
+        Arc::clone(&wt),
         engine,
         Arc::clone(&event_bus),
         Arc::clone(&hook_registry),
@@ -551,9 +564,10 @@ async fn turn_budget_exhausted_drives_active_to_terminal_failure_without_backoff
     // Task 3.7: `TurnBudgetExhausted` is also an agent-authored failure;
     // retrying with the same budget would reproduce the same outcome.
     let parent = tempdir().expect("tempdir");
-    let (manager, _parent_keep, _wt, _ghq) =
-        build_workspace_manager(parent, &[("repo-c", "owner/repo-c", "repo-c")]);
-    let workspace = Arc::new(manager);
+    let session_manager = Arc::new(SessionManager::with_root(parent.path().join("sessions")));
+    let registry = WorktreeRegistry::new();
+    let wt: Arc<dyn roki_daemon::tools::WtTool> = Arc::new(MockWt::default());
+    let _parent_keep = parent;
     let event_bus = Arc::new(EventBus::with_default_capacity());
     let hook_registry = Arc::new(HookRegistry::new());
     let shutdown = ShutdownSignal::new();
@@ -575,7 +589,9 @@ async fn turn_budget_exhausted_drives_active_to_terminal_failure_without_backoff
     let (tracker_tx, tracker_rx) = mpsc::channel::<NormalizedIssue>(8);
 
     let orchestrator = Orchestrator::new(
-        Arc::clone(&workspace) as Arc<dyn Workspace>,
+        Arc::clone(&session_manager),
+        registry.clone(),
+        Arc::clone(&wt),
         engine,
         Arc::clone(&event_bus),
         Arc::clone(&hook_registry),
@@ -630,44 +646,46 @@ async fn turn_budget_exhausted_drives_active_to_terminal_failure_without_backoff
 }
 
 #[tokio::test]
-#[ignore = "TODO(7.1d): post-7.1b the workspace lifecycle on Queued -> Active \
-            is a NoOp shim that does not materialise a directory on disk. \
-            Re-enable once SessionManager creates a real session tempdir; \
-            the test asserts the path exists during every Backoff window."]
-async fn workspace_path_retained_across_backoff_loop() {
-    // Task 3.7 explicit observable completion: confirm the workspace path
-    // exists on disk during every Backoff window of the retry loop. We pin
-    // a subscriber that records existence at each `Active → Backoff`
-    // transition and assert the workspace was present every time.
+async fn session_tempdir_retained_across_backoff_loop() {
+    // Task 7.1d: post-7.1d the durable path across the retry loop is the
+    // session tempdir managed by `SessionManager`. Worktrees come and go
+    // via the agent tool; the session tempdir is the worker's CWD and
+    // must exist for the duration of the actor's lifetime including every
+    // Backoff window. The test pins a subscriber that records the
+    // session-tempdir's existence at each `Active → Backoff` transition
+    // and asserts presence at every observation, plus retention on
+    // TerminalFailure (design decision #6).
     use std::path::PathBuf;
     use std::sync::Mutex as StdMutex;
 
     let parent = tempdir().expect("tempdir");
-    let parent_path = parent.path().to_path_buf();
-    let (manager, _parent_keep, _wt, _ghq) =
-        build_workspace_manager(parent, &[("repo-d", "owner/repo-d", "repo-d")]);
-    let workspace = Arc::new(manager);
+    let session_root = parent.path().join("sessions");
+    let session_manager = Arc::new(SessionManager::with_root(session_root.clone()));
+    let registry = WorktreeRegistry::new();
+    let wt: Arc<dyn roki_daemon::tools::WtTool> = Arc::new(MockWt::default());
+    let _parent_keep = parent;
+
     let event_bus = Arc::new(EventBus::with_default_capacity());
     let hook_registry = Arc::new(HookRegistry::new());
     let shutdown = ShutdownSignal::new();
 
     let recorded = Arc::new(Mutex::new(Vec::<(WorkerState, WorkerState)>::new()));
     event_bus.register(Arc::new(RecordingObserver {
-        id: "workspace-recorder",
+        id: "session-recorder",
         log: Arc::clone(&recorded),
     }));
 
-    /// Subscriber that asserts the workspace exists at every
+    /// Subscriber that asserts the session tempdir exists at every
     /// `Active → Backoff` transition.
-    struct WorkspaceProbe {
+    struct SessionProbe {
         observations: Arc<StdMutex<Vec<bool>>>,
         expected_dir: PathBuf,
     }
 
     #[async_trait]
-    impl TransitionSubscriber for WorkspaceProbe {
+    impl TransitionSubscriber for SessionProbe {
         fn id(&self) -> &str {
-            "workspace-probe"
+            "session-probe"
         }
         async fn on_transition(&self, event: &TransitionEvent) -> Result<(), SubscriberError> {
             if event.previous == WorkerState::Active && event.next == WorkerState::Backoff {
@@ -679,8 +697,8 @@ async fn workspace_path_retained_across_backoff_loop() {
     }
 
     let observations = Arc::new(StdMutex::new(Vec::<bool>::new()));
-    let expected_dir = crate::common::expected_worktree_path(&parent_path, "repo-d", "ENG-2");
-    event_bus.register(Arc::new(WorkspaceProbe {
+    let expected_dir = session_root.join("ENG-2");
+    event_bus.register(Arc::new(SessionProbe {
         observations: Arc::clone(&observations),
         expected_dir: expected_dir.clone(),
     }));
@@ -700,7 +718,9 @@ async fn workspace_path_retained_across_backoff_loop() {
     let (tracker_tx, tracker_rx) = mpsc::channel::<NormalizedIssue>(8);
 
     let orchestrator = Orchestrator::new(
-        Arc::clone(&workspace) as Arc<dyn Workspace>,
+        session_manager,
+        registry,
+        wt,
         engine,
         Arc::clone(&event_bus),
         Arc::clone(&hook_registry),
@@ -736,13 +756,14 @@ async fn workspace_path_retained_across_backoff_loop() {
     );
     assert!(
         snapshot.iter().all(|present| *present),
-        "workspace must be present during every Backoff window: observations={snapshot:?}",
+        "session tempdir must be present during every Backoff window: observations={snapshot:?}",
     );
 
-    // After TerminalFailure the workspace is also retained for inspection.
+    // After TerminalFailure the session tempdir is retained for inspection
+    // (design decision #6).
     assert!(
         expected_dir.is_dir(),
-        "workspace must remain on disk after TerminalFailure",
+        "session tempdir must remain on disk after TerminalFailure",
     );
 
     drop(tracker_tx);

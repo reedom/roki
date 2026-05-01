@@ -18,9 +18,11 @@ use thiserror::Error;
 
 pub mod ghq;
 pub mod linear_graphql;
+pub mod roki_open_worktree;
 pub mod wt;
 
 pub use ghq::{GhqError, GhqTool, RealGhq};
+pub use roki_open_worktree::OpenWorktreeTool;
 pub use wt::{RealWt, WtError, WtTool};
 
 /// Stable surface for an agent-callable tool. Implementations MUST keep
@@ -192,6 +194,29 @@ pub enum ToolError {
     /// rather than re-panicking so the orchestrator can decide how to recover.
     #[error("REGISTRY_POISONED")]
     RegistryPoisoned,
+
+    /// The agent called `roki_open_worktree` with a `repo` that is not in
+    /// the operator-configured `[[repos]]` allowlist (task 7.1d locked
+    /// decision #3). The agent receives the rejected repo plus the
+    /// allowed list so it can recover with a valid choice.
+    #[error("REPO_NOT_IN_ALLOWLIST: repo={repo}, allowed={allowed:?}")]
+    RepoNotInAllowlist { repo: String, allowed: Vec<String> },
+
+    /// `ghq.ensure_cloned` failed inside `roki_open_worktree`. Surfaced as
+    /// a typed tool error so the agent can present the failure to the user
+    /// rather than treating it as a generic failure.
+    #[error("GHQ_RESOLUTION_FAILED: repo={repo}, reason={reason}")]
+    GhqResolutionFailed { repo: String, reason: String },
+
+    /// `wt.switch_create` failed inside `roki_open_worktree` (e.g., the
+    /// branch already exists at a conflicting worktree). Carries the
+    /// specific `(repo, branch)` pair and the captured failure reason.
+    #[error("WORKTREE_CREATION_FAILED: repo={repo}, branch={branch}, reason={reason}")]
+    WorktreeCreationFailed {
+        repo: String,
+        branch: String,
+        reason: String,
+    },
 }
 
 /// Trait shared with the tracker (task 2.5) so the daemon enforces a single

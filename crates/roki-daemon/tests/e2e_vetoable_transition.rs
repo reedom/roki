@@ -62,7 +62,9 @@ use roki_daemon::orchestrator::state::{
 use roki_daemon::shutdown::ShutdownSignal;
 use roki_daemon::tracker::model::{IssueState as TrackerIssueState, NormalizedIssue};
 mod common;
-use crate::common::build_workspace_manager;
+use crate::common::MockWt;
+use roki_daemon::session::SessionManager;
+use roki_daemon::worktrees::WorktreeRegistry;
 
 const TEST_REPO: &str = "repo-a";
 const DENIED_ISSUE: &str = "ENG-DENIED";
@@ -177,9 +179,10 @@ async fn e2e_vetoable_transition_blocks_denied_issue_and_lets_others_progress() 
     // Per-issue workspaces are created under this root. Only the unaffected
     // issue advances past `Queued`, so only that workspace is materialised.
     let parent = tempdir().expect("workspace tempdir");
-    let (manager, _parent_keep, _wt, _ghq) =
-        build_workspace_manager(parent, &[(TEST_REPO, "owner/repo-a", "repo-a")]);
-    let workspace = Arc::new(manager);
+    let session_manager = Arc::new(SessionManager::with_root(parent.path().join("sessions")));
+    let registry = WorktreeRegistry::new();
+    let wt: Arc<dyn roki_daemon::tools::WtTool> = Arc::new(MockWt::default());
+    let _parent_keep = parent;
 
     // ---- EventBus and subscribers ------------------------------------
     let event_bus = Arc::new(EventBus::with_default_capacity());
@@ -214,7 +217,9 @@ async fn e2e_vetoable_transition_blocks_denied_issue_and_lets_others_progress() 
     let (inbox_tx, inbox_rx) = mpsc::channel::<NormalizedIssue>(8);
 
     let orchestrator = Orchestrator::new(
-        Arc::clone(&workspace) as Arc<_>,
+        Arc::clone(&session_manager),
+        registry.clone(),
+        Arc::clone(&wt),
         engine,
         Arc::clone(&event_bus),
         Arc::clone(&hook_registry),

@@ -16,6 +16,7 @@ anyhow = "1.0"
 async-trait = "0.1"
 axum = { version = "0.7", default-features = false, features = ["http1", "json", "tokio"] }
 clap = { version = "4.5", features = ["derive"] }
+dirs = "5"
 hex = "0.4"
 hmac = "0.12"
 jsonschema = { version = "0.46", default-features = false }

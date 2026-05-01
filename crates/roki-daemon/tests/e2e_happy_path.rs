@@ -65,7 +65,9 @@ use roki_daemon::tracker::model::NormalizedIssue;
 use serde_json::{Value, json};
 
 mod common;
-use crate::common::{build_workspace_manager, expected_worktree_path};
+use crate::common::MockWt;
+use roki_daemon::session::SessionManager;
+use roki_daemon::worktrees::WorktreeRegistry;
 
 const TEST_TOKEN: &str = "lin_e2e_happy_path_token";
 const TEST_REPO: &str = "core";
@@ -219,12 +221,6 @@ where
 
 /// The end-to-end happy-path test pinned by tasks.md task 4.2.
 #[tokio::test]
-#[ignore = "TODO(7.1d): post-7.1b the orchestrator's Queued -> Active hands \
-            the engine a NoOp session-workdir placeholder that is not \
-            materialised on disk. fake_claude requires a real cwd, and the \
-            test asserts the workspace dir exists between Active and \
-            Cleaning. Re-enable once SessionManager creates the real \
-            session tempdir under ~/Library/Caches/roki/sessions/<issue>."]
 async fn e2e_happy_path_drives_full_lifecycle() {
     // ---- Fake Linear ---------------------------------------------------
     // The fake Linear initially returns the issue as `started`. After the
@@ -241,16 +237,20 @@ async fn e2e_happy_path_drives_full_lifecycle() {
         .mount(&server)
         .await;
 
-    // ---- Workspace ----------------------------------------------------
-    // Each per-issue workspace is created under this root. `fake_claude`
+    // ---- Session tempdir wiring ------------------------------------
+    // Post-7.1d: the worker's CWD is a session tempdir. `fake_claude`
     // defaults to `clean_exit` when no `.fake_claude_mode` file is
     // present, which is exactly the outcome we need to drive
-    // `Active -> AwaitingReview`.
-    let parent = TempDir::new().expect("workspace tempdir");
+    // `Active -> AwaitingReview`. The agent itself does not call
+    // `roki_open_worktree` in this test — the happy path is valid even
+    // when the agent never opens a worktree (design decision #8).
+    let parent = TempDir::new().expect("session tempdir");
+    let session_root = parent.path().join("sessions");
     let parent_path = parent.path().to_path_buf();
-    let (manager, _parent_keep, _wt, _ghq) =
-        build_workspace_manager(parent, &[(TEST_REPO, "owner/core", "core")]);
-    let workspace_manager = Arc::new(manager);
+    let session_manager = Arc::new(SessionManager::with_root(session_root.clone()));
+    let registry = WorktreeRegistry::new();
+    let wt: Arc<dyn roki_daemon::tools::WtTool> = Arc::new(MockWt::default());
+    let _parent_keep = parent;
 
     // ---- Orchestrator wiring -----------------------------------------
     let event_bus = Arc::new(EventBus::with_default_capacity());
@@ -280,7 +280,9 @@ async fn e2e_happy_path_drives_full_lifecycle() {
     let bridge_handle = tokio::spawn(bridge.run());
 
     let orchestrator = Orchestrator::new(
-        Arc::clone(&workspace_manager) as Arc<_>,
+        Arc::clone(&session_manager),
+        registry.clone(),
+        Arc::clone(&wt),
         engine,
         Arc::clone(&event_bus),
         Arc::clone(&hook_registry),
@@ -330,15 +332,16 @@ async fn e2e_happy_path_drives_full_lifecycle() {
         recorded.lock().await,
     );
 
-    // Workspace directory MUST exist on disk while the actor is in
+    // Session tempdir MUST exist on disk while the actor is in
     // AwaitingReview / TerminalSuccess (Requirement 4.3 / 4.4). The
     // fake Linear is still serving `started` here, so the actor cannot
     // race ahead to Cleaning before this check completes.
-    let expected_workspace = expected_worktree_path(&parent_path, "core", TEST_ISSUE);
+    let expected_session = session_root.join(TEST_ISSUE);
     assert!(
-        expected_workspace.is_dir(),
-        "workspace directory must exist after Active; expected {expected_workspace:?}",
+        expected_session.is_dir(),
+        "session tempdir must exist after Active; expected {expected_session:?}",
     );
+    let _ = &parent_path;
 
     // Now stage the terminal payload. Resetting the wiremock server
     // drops the `started` mock; mounting `completed` flips every
@@ -372,13 +375,13 @@ async fn e2e_happy_path_drives_full_lifecycle() {
         recorded.lock().await,
     );
 
-    // Workspace removal happens during the `Cleaning` handler, before
-    // the actor exits. Wait for the directory to disappear from disk.
-    let workspace_for_check = expected_workspace.clone();
-    let removed = await_cond(Duration::from_secs(10), || !workspace_for_check.exists()).await;
+    // Session-tempdir removal happens during the `Cleaning` handler,
+    // before the actor exits. Wait for the directory to disappear.
+    let session_for_check = expected_session.clone();
+    let removed = await_cond(Duration::from_secs(10), || !session_for_check.exists()).await;
     assert!(
         removed,
-        "workspace directory must be removed after Cleaning; still present at {expected_workspace:?}",
+        "session tempdir must be removed after Cleaning; still present at {expected_session:?}",
     );
 
     // ---- Assertions on the published transition log ------------------

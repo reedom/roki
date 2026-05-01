@@ -55,7 +55,7 @@ use tracing::{info, warn};
 
 use crate::orchestrator::state::{IssueId, RepoId};
 use crate::tracker::model::{IssueState as TrackerIssueState, NormalizedIssue};
-use crate::workspace::{Workspace, WorkspaceError};
+use crate::worktrees::{RecoveryListing, RecoveryListingError};
 
 /// Errors surfaced by the recovery driver.
 ///
@@ -67,7 +67,7 @@ pub enum RecoveryError {
     /// Listing the workspace root failed; recovery cannot proceed because the
     /// daemon has no authoritative inventory of existing workspaces.
     #[error("recovery: workspace listing failed: {0}")]
-    Workspace(#[from] WorkspaceError),
+    Workspace(#[from] RecoveryListingError),
 
     /// The Linear reader failed; recovery cannot determine which workspaces
     /// are still active so it refuses to make decisions to avoid mistakenly
@@ -221,7 +221,7 @@ pub fn reconcile_decisions(
 /// callers (notably the integration test) can assert the post-recovery
 /// post-conditions per Requirement 10.1 / 10.2 / 10.3.
 pub async fn run_recovery(
-    workspace: &dyn Workspace,
+    workspace: &dyn RecoveryListing,
     reader: &dyn RecoveryLinearReader,
     tracker_sender: &mpsc::Sender<NormalizedIssue>,
 ) -> Result<Vec<RecoveryDecision>, RecoveryError> {

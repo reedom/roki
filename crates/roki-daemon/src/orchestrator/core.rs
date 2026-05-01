@@ -63,10 +63,12 @@ use crate::orchestrator::state::{
     CorrelationId, IssueId, RepoId, TransitionEvent, TransitionTrigger, VetoDecision, WorkerState,
 };
 use crate::permissions::{PermissionMode, PermissionSource, ResolvedPermission};
+use crate::session::SessionManager;
 use crate::shutdown::ShutdownSignal;
+use crate::tools::WtTool;
 use crate::tracker::model::{IssueState as TrackerIssueState, NormalizedIssue};
 use crate::workflow::{ElicitationsMode, SandboxMode};
-use crate::workspace::Workspace;
+use crate::worktrees::{RecoveryListing, WorktreeRegistry};
 
 /// Error type re-exported for the engine launcher trait so downstream test
 /// stubs and the real `ClaudeEngineAdapter` can both surface launch failures
@@ -183,19 +185,17 @@ impl OrchestratorRead for OrchestratorReadHandle {
 /// before starting, then drive [`Orchestrator::run`] from a tokio task. The
 /// `run` future resolves only after [`ShutdownSignal::wait`] resolves.
 pub struct Orchestrator {
-    /// Workspace adapter retained for restart-recovery's `list_existing`
-    /// call (see [`Self::with_recovery`]). The worker actor no longer calls
-    /// `ensure`/`remove` post-7.1b — those become NoOp shims until 7.1d
-    /// wires `SessionManager` and `WorktreeRegistry`. The trait dependency
-    /// itself drops in 7.1d. The field is currently set-only on the
-    /// orchestrator runtime path; `with_recovery` consumes the same value
-    /// before constructing `Self`, so reading it back here would be
-    /// redundant.
-    #[allow(
-        dead_code,
-        reason = "Retained for the 7.1d wiring (drops the trait dependency entirely) so the public constructor signature stays stable across the 7.1b → 7.1d transition."
-    )]
-    workspace: Arc<dyn Workspace>,
+    /// Per-issue session-tempdir lifecycle (task 7.1d). Replaces the
+    /// pre-7.1d `Workspace::ensure`/`remove` flow on the `Queued -> Active`
+    /// and `Cleaning` arcs.
+    session_manager: Arc<SessionManager>,
+    /// Per-issue worktree registry. The agent populates this via
+    /// `roki_open_worktree`; the orchestrator walks it on `Cleaning` to
+    /// call `wt.remove` for every registered worktree.
+    worktree_registry: WorktreeRegistry,
+    /// `wt` adapter consumed by the `Cleaning` arc to remove every
+    /// worktree the agent registered for the issue. Cloned per-actor.
+    wt: Arc<dyn WtTool>,
     engine: Arc<dyn EngineLauncher>,
     event_bus: Arc<EventBus>,
     hook_registry: Arc<HookRegistry>,
@@ -226,15 +226,23 @@ pub struct Orchestrator {
 
 impl Orchestrator {
     /// Construct a new orchestrator. The caller is expected to inject the
-    /// canonical singletons (workspace, engine, event bus, hook registry,
-    /// shutdown signal) and a `tracker_inbox` receiver fed by the
-    /// tracker→orchestrator bridge (task 3.6).
+    /// canonical singletons (session manager, worktree registry, wt
+    /// adapter, engine, event bus, hook registry, shutdown signal) and a
+    /// `tracker_inbox` receiver fed by the tracker→orchestrator bridge
+    /// (task 3.6 / 7.1c).
     ///
-    /// The `workspace` argument is currently retained only for
-    /// [`Self::with_recovery`]; the worker actor itself no longer calls
-    /// into it (post-7.1b). Task 7.1d drops the parameter entirely.
+    /// Replaces the pre-7.1d `workspace: Arc<dyn Workspace>` parameter
+    /// with the agent-driven model: `SessionManager` owns the per-issue
+    /// session tempdir; `WorktreeRegistry` tracks worktrees the agent
+    /// opens; `WtTool` is the cleanup back-end for those worktrees.
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "Each argument is a distinct singleton injected by the daemon's main; collapsing into a builder would obscure the constructor's contract for the single production caller (runtime::run)."
+    )]
     pub fn new(
-        workspace: Arc<dyn Workspace>,
+        session_manager: Arc<SessionManager>,
+        worktree_registry: WorktreeRegistry,
+        wt: Arc<dyn WtTool>,
         engine: Arc<dyn EngineLauncher>,
         event_bus: Arc<EventBus>,
         hook_registry: Arc<HookRegistry>,
@@ -242,7 +250,9 @@ impl Orchestrator {
         tracker_inbox: mpsc::Receiver<NormalizedIssue>,
     ) -> Self {
         Self {
-            workspace,
+            session_manager,
+            worktree_registry,
+            wt,
             engine,
             event_bus,
             hook_registry,
@@ -288,18 +298,23 @@ impl Orchestrator {
         reason = "Orchestrator wiring requires every singleton plus the recovery sender and reader; collapsing into a builder would obscure the constructor's contract for the single caller (the daemon main)."
     )]
     pub async fn with_recovery(
-        workspace: Arc<dyn Workspace>,
+        session_manager: Arc<SessionManager>,
+        worktree_registry: WorktreeRegistry,
+        wt: Arc<dyn WtTool>,
         engine: Arc<dyn EngineLauncher>,
         event_bus: Arc<EventBus>,
         hook_registry: Arc<HookRegistry>,
         shutdown: ShutdownSignal,
         tracker_inbox: mpsc::Receiver<NormalizedIssue>,
         recovery_sender: mpsc::Sender<NormalizedIssue>,
+        recovery_listing: &dyn RecoveryListing,
         reader: &dyn RecoveryLinearReader,
     ) -> Result<(Self, Vec<RecoveryDecision>), RecoveryError> {
-        let decisions = run_recovery(workspace.as_ref(), reader, &recovery_sender).await?;
+        let decisions = run_recovery(recovery_listing, reader, &recovery_sender).await?;
         let orchestrator = Self::new(
-            workspace,
+            session_manager,
+            worktree_registry,
+            wt,
             engine,
             event_bus,
             hook_registry,
@@ -439,6 +454,9 @@ impl Orchestrator {
             event_bus: Arc::clone(&self.event_bus),
             hook_registry: Arc::clone(&self.hook_registry),
             poisoned: Arc::clone(&self.poisoned),
+            session_manager: Arc::clone(&self.session_manager),
+            worktree_registry: self.worktree_registry.clone(),
+            wt: Arc::clone(&self.wt),
             engine_policy: self.engine_policy,
             shutdown: self.shutdown.clone(),
         };
@@ -462,14 +480,19 @@ struct WorkerActor {
     hook_registry: Arc<HookRegistry>,
     /// Shared with [`Orchestrator`] so a workspace fault recorded inside the
     /// actor immediately fences off subsequent tracker events for the same
-    /// issue. Requirement 4.5. Currently unused on the production path
-    /// (post-7.1b NoOp shims); 7.1d repopulates this from the new
-    /// `SessionManager` / `WorktreeRegistry` failure paths.
-    #[allow(
-        dead_code,
-        reason = "Surface retained for the 7.1d wiring; the NoOp shims used post-7.1b never fault, so the field is currently set-only. Removing it now would require re-introducing the field in 7.1d."
-    )]
+    /// issue. Requirement 4.5. Repopulated by `try_promote_to_active` and
+    /// `try_cleaning` on session/worktree failures (task 7.1d).
     poisoned: Arc<RwLock<HashSet<IssueId>>>,
+    /// Per-issue session-tempdir lifecycle. Created on `Queued -> Active`
+    /// and removed on `Cleaning` (subject to pre-cleanup hooks). Retained
+    /// on `TerminalFailure` per design decision #6.
+    session_manager: Arc<SessionManager>,
+    /// Shared registry of worktrees the agent opened via
+    /// `roki_open_worktree`. The `Cleaning` arc walks this for the issue
+    /// and calls `wt.remove` per registered worktree.
+    worktree_registry: WorktreeRegistry,
+    /// `wt` adapter used by the cleanup walk.
+    wt: Arc<dyn WtTool>,
     /// Per-launch policy carried from the orchestrator. Drives the
     /// retry-budget Backoff loop (`max_attempts`, `backoff_floor`, etc.) and
     /// is also forwarded into the [`WorkerContext`] passed to each engine
@@ -610,20 +633,30 @@ impl WorkerActor {
             return;
         }
 
-        // TODO(7.1d): replace this NoOp shim with
-        // `SessionManager::create_session(&self.key)` once 7.1d lands. The
-        // session tempdir lives at `~/Library/Caches/roki/sessions/<issue>`
-        // on macOS / `~/.cache/roki/sessions/<issue>` on Linux per design
-        // decision #5. Until then we hand the engine a placeholder path so
-        // the orchestrator core's lifecycle still drives `Active` → engine
-        // launch → terminal-outcome dispatch identically to the production
-        // path. The engine launcher in the integration tests does not read
-        // from the workspace_dir so the placeholder path is observationally
-        // equivalent for unit-test purposes; the e2e tests that DO read
-        // from it (`e2e_failure_retry`, `e2e_happy_path`) are temporarily
-        // gated under `#[ignore]` until 7.1d wires the real session
-        // tempdir.
-        let workspace_dir = noop_session_workdir(&self.key);
+        // Task 7.1d: create the session tempdir for this issue. This is
+        // the worker's CWD; the agent decides which (if any) configured
+        // repos to operate in via `roki_open_worktree`. A failure here
+        // poisons the issue so subsequent tracker events are refused.
+        let workspace_dir = match self.session_manager.create_session(&self.key) {
+            Ok(path) => path,
+            Err(err) => {
+                warn!(
+                    target: "orchestrator",
+                    issue = %self.key.as_str(),
+                    error = %err,
+                    "session tempdir create failed; routing to TerminalFailure",
+                );
+                self.poison_key();
+                self.commit_transition(
+                    WorkerState::Active,
+                    WorkerState::TerminalFailure,
+                    TransitionTrigger::EngineEvent,
+                    correlation,
+                )
+                .await;
+                return;
+            }
+        };
 
         // Drive the retry-budget Backoff loop. The actor enters the loop in
         // `Active` (committed above) and re-enters `Active` after each
@@ -930,20 +963,61 @@ impl WorkerActor {
             return;
         }
 
-        // TODO(7.1d): replace this NoOp shim with a walk over
-        // `WorktreeRegistry` for the worker that calls `wt.remove` per
-        // registered worktree, then `SessionManager::remove_session(&self.key)`.
-        // Per design decision #11 cleanup-on-Cleaning is the daemon's
-        // responsibility (the agent does not call a `roki_close_worktree`
-        // tool); the iteration order is registration order so per-arc logs
-        // remain stable. A failure during the iteration must repopulate the
-        // `poisoned` set so subsequent tracker events for the issue are
-        // refused (mirrors the pre-7.1b workspace.remove failure path).
-        debug!(
-            target: "orchestrator",
-            issue = %self.key.as_str(),
-            "Cleaning entered; workspace teardown is a NoOp shim until 7.1d wires WorktreeRegistry",
-        );
+        // Task 7.1d: walk every worktree the agent registered for this
+        // issue and call `wt.remove` per entry. Iteration is in
+        // registration order so per-arc logs are stable. A removal
+        // failure poisons the issue per Requirement 4.5 but does not
+        // abort the cleanup loop — every worktree is given a chance
+        // before the session tempdir is removed.
+        let worktrees = self.worktree_registry.take_for_issue(&self.key);
+        let mut had_failure = false;
+        for entry in &worktrees {
+            match self.wt.remove(&entry.path).await {
+                Ok(()) => {
+                    info!(
+                        target: "orchestrator",
+                        issue = %self.key.as_str(),
+                        repo = %entry.repo.as_str(),
+                        path = %entry.path.display(),
+                        "worktree removed",
+                    );
+                }
+                Err(err) => {
+                    had_failure = true;
+                    warn!(
+                        target: "orchestrator",
+                        issue = %self.key.as_str(),
+                        repo = %entry.repo.as_str(),
+                        path = %entry.path.display(),
+                        error = %err,
+                        "worktree remove failed",
+                    );
+                }
+            }
+        }
+
+        match self.session_manager.remove_session(&self.key) {
+            Ok(()) => {
+                debug!(
+                    target: "orchestrator",
+                    issue = %self.key.as_str(),
+                    "session tempdir removed",
+                );
+            }
+            Err(err) => {
+                had_failure = true;
+                warn!(
+                    target: "orchestrator",
+                    issue = %self.key.as_str(),
+                    error = %err,
+                    "session tempdir remove failed",
+                );
+            }
+        }
+
+        if had_failure {
+            self.poison_key();
+        }
     }
 
     /// Read the actor's current state from the orchestrator state map.
@@ -1034,25 +1108,16 @@ impl WorkerActor {
             record.inbox = None;
         }
     }
-}
 
-/// Build a placeholder session-workdir path keyed by issue id.
-///
-/// TODO(7.1d): replace with `SessionManager::create_session(issue)` returning
-/// `~/Library/Caches/roki/sessions/<issue>` on macOS / `~/.cache/roki/sessions/<issue>`
-/// on Linux. The current placeholder is intentionally not materialised on
-/// disk — the engine launchers used in the orchestrator's unit + integration
-/// tests do not require a real directory, and the e2e tests that DO require
-/// one (`e2e_happy_path`, `e2e_failure_retry`) are gated under `#[ignore]`
-/// pending 7.1d.
-fn noop_session_workdir(issue: &IssueId) -> PathBuf {
-    // Use the system temp dir as a host so `Path::parent`/`is_absolute`
-    // semantics match what 7.1d's real `SessionManager` will return. The
-    // path is NOT created and may not exist; consumers that probe disk for
-    // it will fail. That is intentional during the 7.1b → 7.1d window.
-    std::env::temp_dir()
-        .join("roki-sessions-noop")
-        .join(issue.as_str())
+    /// Mark this issue as poisoned so subsequent tracker events for the
+    /// same key are refused at admission. Requirement 4.5.
+    fn poison_key(&self) {
+        let mut guard = self
+            .poisoned
+            .write()
+            .expect("orchestrator poisoned-set RwLock poisoned; this is unrecoverable");
+        guard.insert(self.key.clone());
+    }
 }
 
 /// Build the per-launch [`WorkerContext`] supplied to the engine adapter.
@@ -1064,11 +1129,13 @@ fn noop_session_workdir(issue: &IssueId) -> PathBuf {
 /// [`crate::engine::ClaudeEngineAdapter`] would already accept and let the
 /// orchestrator core land without crossing into 3.4 / 3.5 territory.
 ///
-/// Per task 7.1b the [`WorkerContext`] still carries a `repo: RepoId` field
-/// for backwards compatibility with the engine surface (`engine/mod.rs` is
+/// The [`WorkerContext`] still carries a `repo: RepoId` field for backwards
+/// compatibility with the engine prelude surface (`engine/claude.rs` is
 /// outside this task's boundary). We populate it with a placeholder value
-/// because the state-machine no longer keys by repo; 7.1d removes this
-/// field from `WorkerContext` when the agent-driven repo selection lands.
+/// because the state-machine no longer keys by repo and the agent itself
+/// chooses the repo via `roki_open_worktree`. 7.1f removes this field from
+/// `WorkerContext` when the engine surface is rewritten alongside the
+/// bootstrap finalization.
 fn build_worker_context(
     issue: IssueId,
     correlation: CorrelationId,
@@ -1076,9 +1143,9 @@ fn build_worker_context(
     policy: EnginePolicy,
 ) -> WorkerContext {
     WorkerContext {
-        // TODO(7.1d): drop `repo` from `WorkerContext`; it is no longer in
-        // the state-machine key. The engine surface is outside the 7.1b
-        // boundary so we populate it with a placeholder for now.
+        // TODO(7.1f): drop `repo` from `WorkerContext` when the engine
+        // surface is rewritten. The agent picks the repo at runtime via
+        // `roki_open_worktree`, so an actor-level placeholder is correct.
         repo: RepoId::new(""),
         issue,
         correlation_id: correlation,
@@ -1131,57 +1198,51 @@ mod tests {
         }
     }
 
-    /// Stub workspace that succeeds on every call. The orchestrator core no
-    /// longer invokes `ensure`/`remove` (post-7.1b NoOp shims) but the
-    /// `with_recovery` constructor still requires a `Workspace` until 7.1d
-    /// drops the trait dependency. The stub returns empty results so unit
-    /// tests focused on the state-machine driver do not need to materialise
-    /// any directories.
-    fn workspace_for_test() -> Arc<dyn Workspace> {
+    /// Stub `WtTool` for the orchestrator's unit tests. `wt.remove` is the
+    /// only method the orchestrator core invokes on this trait
+    /// (`switch_create` belongs to the agent tool and is exercised in
+    /// `tools::roki_open_worktree::tests`).
+    fn wt_for_test() -> Arc<dyn WtTool> {
         use async_trait::async_trait;
-        use std::path::PathBuf;
+        use std::path::Path;
 
-        struct StubWorkspace;
+        use crate::tools::WtError;
+
+        struct StubWt;
 
         #[async_trait]
-        impl Workspace for StubWorkspace {
-            async fn ensure(
+        impl WtTool for StubWt {
+            async fn switch_create(
                 &self,
-                _repo: &RepoId,
-                _issue: &IssueId,
-            ) -> Result<PathBuf, crate::workspace::WorkspaceError> {
-                Ok(std::env::temp_dir().join("roki-stub-workspace"))
+                _repo_path: &Path,
+                _branch: &str,
+            ) -> Result<PathBuf, WtError> {
+                Ok(PathBuf::new())
             }
 
-            async fn remove(
-                &self,
-                _repo: &RepoId,
-                _issue: &IssueId,
-            ) -> Result<(), crate::workspace::WorkspaceError> {
+            async fn remove(&self, _worktree_path: &Path) -> Result<(), WtError> {
                 Ok(())
-            }
-
-            async fn list_existing(
-                &self,
-            ) -> Result<Vec<(RepoId, IssueId, PathBuf)>, crate::workspace::WorkspaceError>
-            {
-                Ok(Vec::new())
             }
         }
 
-        Arc::new(StubWorkspace)
+        Arc::new(StubWt)
     }
 
     fn fresh_orchestrator(
         engine: Arc<dyn EngineLauncher>,
     ) -> (Orchestrator, mpsc::Sender<NormalizedIssue>, ShutdownSignal) {
-        let workspace = workspace_for_test();
+        let session_root = tempfile::tempdir().expect("session tempdir");
+        let session_manager = Arc::new(SessionManager::with_root(session_root.keep()));
+        let registry = WorktreeRegistry::new();
+        let wt = wt_for_test();
         let event_bus = Arc::new(EventBus::with_default_capacity());
         let hook_registry = Arc::new(HookRegistry::new());
         let shutdown = ShutdownSignal::new();
         let (tx, rx) = mpsc::channel::<NormalizedIssue>(8);
         let orch = Orchestrator::new(
-            workspace,
+            session_manager,
+            registry,
+            wt,
             engine,
             event_bus,
             hook_registry,

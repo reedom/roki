@@ -55,7 +55,9 @@ use roki_daemon::tracker::model::NormalizedIssue;
 use serde_json::{Value, json};
 
 mod common;
-use crate::common::{build_workspace_manager, expected_worktree_path};
+use crate::common::MockWt;
+use roki_daemon::session::SessionManager;
+use roki_daemon::worktrees::WorktreeRegistry;
 
 const TEST_TOKEN: &str = "lin_e2e_failure_retry_token";
 const TEST_REPO: &str = "core";
@@ -213,13 +215,6 @@ fn fast_retry_policy(max_attempts: u32) -> EnginePolicy {
 /// The end-to-end retry-budget exhaustion test pinned by tasks.md task 4.3.
 #[tokio::test]
 #[tracing_test::traced_test]
-#[ignore = "TODO(7.1d): post-7.1b the orchestrator's Queued -> Active hands \
-            the engine a NoOp session-workdir placeholder that is not \
-            materialised on disk. NonCleanExitLauncher writes \
-            .fake_claude_mode into the supervisor-supplied workspace_dir, \
-            which fails when the path is absent. Re-enable once \
-            SessionManager creates the real session tempdir under \
-            ~/Library/Caches/roki/sessions/<issue>."]
 async fn e2e_failure_path_retry_budget_exhaustion() {
     // ---- Fake Linear --------------------------------------------------
     let server = MockServer::start().await;
@@ -229,12 +224,19 @@ async fn e2e_failure_path_retry_budget_exhaustion() {
         .mount(&server)
         .await;
 
-    // ---- Workspace ---------------------------------------------------
-    let parent = TempDir::new().expect("workspace tempdir");
+    // ---- Session tempdir wiring -------------------------------------
+    // Post-7.1d: the worker's CWD is a session tempdir managed by
+    // `SessionManager`; the agent itself decides which configured repos to
+    // operate in via `roki_open_worktree`. For this retry-trace test, no
+    // worktrees are opened — the engine launcher writes its mode file
+    // straight into the session tempdir.
+    let parent = TempDir::new().expect("session tempdir");
+    let session_root = parent.path().join("sessions");
     let parent_path = parent.path().to_path_buf();
-    let (manager, _parent_keep, _wt, _ghq) =
-        build_workspace_manager(parent, &[(TEST_REPO, "owner/core", "core")]);
-    let workspace_manager = Arc::new(manager);
+    let session_manager = Arc::new(SessionManager::with_root(session_root.clone()));
+    let registry = WorktreeRegistry::new();
+    let wt: Arc<dyn roki_daemon::tools::WtTool> = Arc::new(MockWt::default());
+    let _parent_keep = parent;
 
     // ---- Orchestrator wiring -----------------------------------------
     let event_bus = Arc::new(EventBus::with_default_capacity());
@@ -270,7 +272,9 @@ async fn e2e_failure_path_retry_budget_exhaustion() {
     // hookpoint that lets a test override these knobs without touching
     // the daemon's main wiring code.
     let orchestrator = Orchestrator::new(
-        Arc::clone(&workspace_manager) as Arc<_>,
+        Arc::clone(&session_manager),
+        registry.clone(),
+        Arc::clone(&wt),
         engine,
         Arc::clone(&event_bus),
         Arc::clone(&hook_registry),
@@ -352,14 +356,17 @@ async fn e2e_failure_path_retry_budget_exhaustion() {
         assert_eq!(ev.issue.as_str(), TEST_ISSUE);
     }
 
-    // ---- Workspace retention (Requirement 4.5) -----------------------
-    // The workspace directory must remain on disk after TerminalFailure
-    // so an operator can inspect the failed run.
-    let expected_workspace = expected_worktree_path(&parent_path, "core", TEST_ISSUE);
+    // ---- Session-tempdir retention (Requirement 4.5, design decision #6)
+    // The session tempdir must remain on disk after TerminalFailure so an
+    // operator can inspect the failed run.
+    let expected_session = session_root.join(TEST_ISSUE);
     assert!(
-        expected_workspace.is_dir(),
-        "workspace directory must be retained after TerminalFailure; expected {expected_workspace:?}",
+        expected_session.is_dir(),
+        "session tempdir must be retained after TerminalFailure; expected {expected_session:?}",
     );
+    // Suppress the unused-binding warning when this assertion is the only
+    // post-loop check that touches `parent_path`.
+    let _ = &parent_path;
 
     // ---- Orchestrator read snapshot ----------------------------------
     let snapshot = read_handle.snapshot();

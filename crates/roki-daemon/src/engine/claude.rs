@@ -150,6 +150,9 @@ fn error_kind(err: &ToolError) -> &'static str {
         ToolError::DuplicateName { .. } => "DUPLICATE_TOOL",
         ToolError::UnknownTool { .. } => "UNKNOWN_TOOL",
         ToolError::RegistryPoisoned => "REGISTRY_POISONED",
+        ToolError::RepoNotInAllowlist { .. } => "REPO_NOT_IN_ALLOWLIST",
+        ToolError::GhqResolutionFailed { .. } => "GHQ_RESOLUTION_FAILED",
+        ToolError::WorktreeCreationFailed { .. } => "WORKTREE_CREATION_FAILED",
     }
 }
 

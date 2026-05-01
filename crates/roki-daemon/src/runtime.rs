@@ -38,7 +38,6 @@
 //! produces a clear, actionable [`anyhow::Error`] message and a non-zero
 //! exit code via the binary's `main`.
 
-use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -63,8 +62,8 @@ use crate::orchestrator::core::{
 };
 use crate::orchestrator::events::EventBus;
 use crate::orchestrator::hooks::HookRegistry;
-use crate::orchestrator::state::RepoId;
 use crate::orchestrator::tracker_bridge::TrackerBridge;
+use crate::session::SessionManager;
 use crate::shutdown::{
     SHUTDOWN_WINDOW, ShutdownSignal, await_workers_with_window, install_signal_handlers,
 };
@@ -73,7 +72,7 @@ use crate::tracker::linear::{LinearTracker, LinearTrackerConfig, ScopeWatch};
 use crate::tracker::model::NormalizedIssue;
 use crate::tracker::webhook::{WebhookState, router as webhook_router};
 use crate::workflow::{WorkflowHandle, WorkflowLoader, WorkflowPolicy};
-use crate::workspace::{GhqIdentifier, WorkspaceManager};
+use crate::worktrees::WorktreeRegistry;
 use async_trait::async_trait;
 
 /// Default config-file path used when `--config` is not supplied on the CLI.
@@ -254,20 +253,23 @@ pub async fn run_with_shutdown(
     let workflow_handles: Vec<WorkflowHandle> = vec![workflow_handle];
     let workflow_policies: Vec<Arc<WorkflowPolicy>> = vec![Arc::clone(&workflow_policy)];
 
-    // ---- 5. build engine + workspace + orchestrator --------------------
-    // Task 6.1: workspace manager is built from `wt` + `ghq` adapters and
-    // an operator-supplied `repo_index` mapping `RepoId` → ghq identifier.
+    // ---- 5. build engine + session/worktree state + orchestrator ------
+    // Task 7.1d: replace `WorkspaceManager`/`Workspace` trait with the
+    // agent-driven model: `SessionManager` for per-issue tempdirs,
+    // `WorktreeRegistry` for tracking worktrees the agent opens via
+    // `roki_open_worktree`, and the `wt` / `ghq` adapters for the agent
+    // tool's lookup-or-clone path.
     let wt: Arc<dyn WtTool> = Arc::new(RealWt::new());
-    let ghq: Arc<dyn GhqTool> = Arc::new(RealGhq::new());
-    // TODO(7.1d): drop the `RepoId`-keyed `repo_index` once `WorktreeRegistry`
-    // arrives; for now key the index by the repo's ghq identifier so the
-    // workspace manager continues to compile against `RepoId`.
-    let repo_index: HashMap<RepoId, GhqIdentifier> = config
-        .repos
-        .iter()
-        .map(|repo| (RepoId::new(repo.repo.clone()), repo.repo.clone()))
-        .collect();
-    let workspace = Arc::new(WorkspaceManager::new(wt, ghq, repo_index));
+    let _ghq: Arc<dyn GhqTool> = Arc::new(RealGhq::new());
+    // TODO(7.1f): wire `_ghq` into the agent tool registration alongside the
+    // `OpenWorktreeTool` so each per-issue worker carries the
+    // `roki_open_worktree` tool with the operator's allowlist injected.
+    // The current bootstrap composition still constructs the orchestrator
+    // through the legacy single-tracker shim; 7.1f completes the rewire.
+    let session_manager = Arc::new(SessionManager::new().with_context(|| {
+        "failed to resolve platform cache dir for session tempdirs (set $HOME or supply an explicit override)".to_string()
+    })?);
+    let worktree_registry = WorktreeRegistry::new();
     let engine = Arc::new(ClaudeEngineLauncher::new(ClaudeEngineAdapter::with_binary(
         claude_binary.clone(),
     )));
@@ -285,7 +287,9 @@ pub async fn run_with_shutdown(
 
     let (inbox_tx, inbox_rx) = mpsc::channel::<NormalizedIssue>(64);
     let orchestrator = Orchestrator::new(
-        Arc::clone(&workspace) as Arc<_>,
+        Arc::clone(&session_manager),
+        worktree_registry.clone(),
+        Arc::clone(&wt),
         engine,
         Arc::clone(&event_bus),
         Arc::clone(&hook_registry),

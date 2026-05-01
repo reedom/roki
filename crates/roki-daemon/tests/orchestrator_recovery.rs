@@ -44,9 +44,11 @@ use roki_daemon::orchestrator::hooks::HookRegistry;
 use roki_daemon::orchestrator::read::OrchestratorRead;
 use roki_daemon::orchestrator::recovery::{RecoveryDecision, RecoveryLinearReader};
 use roki_daemon::orchestrator::state::{IssueId, RepoId, WorkerState};
+use roki_daemon::session::SessionManager;
 use roki_daemon::shutdown::ShutdownSignal;
 use roki_daemon::tracker::model::{IssueState as TrackerIssueState, NormalizedIssue};
-use roki_daemon::workspace::{Workspace, WorkspaceError};
+use roki_daemon::worktrees::{RecoveryListing, RecoveryListingError, WorktreeRegistry};
+use std::path::Path;
 
 /// Engine stub: counts launches and emits a single terminal event per
 /// launch. The recovery test only needs the `Active`-state path to be
@@ -98,37 +100,44 @@ fn linear_active(repo: &str, issue: &str) -> ((RepoId, IssueId), NormalizedIssue
     (key, value)
 }
 
-/// Stub workspace for the recovery test. Replaces the production
-/// `WorkspaceManager` so the test can pre-seed `list_existing` directly,
-/// independent of the new worktree model. Tracks ensure/remove invocations
-/// per `(repo, issue)` and returns synthesised paths under a tempdir.
-struct StubWorkspace {
+/// Stub `RecoveryListing` for the recovery test. Returns a fixed,
+/// pre-seeded list of `(repo, issue, path)` triples so the test can drive
+/// the recovery matrix without booting any disk-walk implementation. Task
+/// 7.1e replaces this with the production session-tempdir + `git worktree
+/// list --porcelain` walker.
+#[allow(
+    dead_code,
+    reason = "`root` keeps the workspace tempdir alive for the test duration; rust 2021 reports this as unused via the wildcard match."
+)]
+struct StubRecoveryListing {
     root: tempfile::TempDir,
-    /// Pre-seeded `(repo, issue) -> path` returned by `list_existing`.
     seeded: Vec<(RepoId, IssueId, PathBuf)>,
-    ensures: StdMutex<Vec<(String, String)>>,
 }
 
 #[async_trait]
-impl Workspace for StubWorkspace {
-    async fn ensure(&self, repo: &RepoId, issue: &IssueId) -> Result<PathBuf, WorkspaceError> {
-        self.ensures
-            .lock()
-            .unwrap()
-            .push((repo.as_str().to_string(), issue.as_str().to_string()));
-        let path = self.root.path().join(repo.as_str()).join(issue.as_str());
-        std::fs::create_dir_all(&path).map_err(|err| WorkspaceError::InvalidIdentifier {
-            reason: format!("stub create_dir_all: {err}"),
-        })?;
-        Ok(path)
-    }
-
-    async fn remove(&self, _repo: &RepoId, _issue: &IssueId) -> Result<(), WorkspaceError> {
-        Ok(())
-    }
-
-    async fn list_existing(&self) -> Result<Vec<(RepoId, IssueId, PathBuf)>, WorkspaceError> {
+impl RecoveryListing for StubRecoveryListing {
+    async fn list_existing(&self) -> Result<Vec<(RepoId, IssueId, PathBuf)>, RecoveryListingError> {
         Ok(self.seeded.clone())
+    }
+}
+
+/// Stub `WtTool` that no-ops every call. The recovery test does not
+/// exercise the cleanup arc, but `Orchestrator::new` requires a `WtTool`
+/// for the per-actor cleanup walk so we supply a no-op.
+struct StubWt;
+
+#[async_trait]
+impl roki_daemon::tools::WtTool for StubWt {
+    async fn switch_create(
+        &self,
+        _repo_path: &Path,
+        _branch: &str,
+    ) -> Result<PathBuf, roki_daemon::tools::WtError> {
+        Ok(PathBuf::new())
+    }
+
+    async fn remove(&self, _worktree_path: &Path) -> Result<(), roki_daemon::tools::WtError> {
+        Ok(())
     }
 }
 
@@ -162,7 +171,7 @@ async fn recovery_reconciles_workspaces_and_linear_state_on_startup() {
     std::fs::create_dir_all(&seed_path_2).expect("seed workspace ENG-2");
     let workspace_root_path = root.path().to_path_buf();
 
-    let workspace = Arc::new(StubWorkspace {
+    let recovery_listing = Arc::new(StubRecoveryListing {
         root,
         seeded: vec![
             (
@@ -176,8 +185,10 @@ async fn recovery_reconciles_workspaces_and_linear_state_on_startup() {
                 seed_path_2.clone(),
             ),
         ],
-        ensures: StdMutex::new(Vec::new()),
     });
+    // Suppress the unused-import warning for the unused StdMutex helper
+    // that was used by the pre-7.1d StubWorkspace.
+    let _ = std::marker::PhantomData::<StdMutex<()>>;
 
     // Linear stub reports ENG-1 and ENG-3 active. ENG-2 is intentionally
     // absent so the matrix produces an `OrphanedWorkspace` decision.
@@ -199,18 +210,31 @@ async fn recovery_reconciles_workspaces_and_linear_state_on_startup() {
     // channel; the test owns the sender so it can drop it on shutdown.
     let (tracker_tx, tracker_rx) = mpsc::channel::<NormalizedIssue>(16);
 
+    // Build session-tempdir + worktree wiring fresh per test.
+    let session_root_dir = tempdir().expect("session tempdir root");
+    let session_manager = Arc::new(SessionManager::with_root(
+        session_root_dir.path().to_path_buf(),
+    ));
+    let registry = WorktreeRegistry::new();
+    let wt: Arc<dyn roki_daemon::tools::WtTool> = Arc::new(StubWt);
+
     let (orchestrator, decisions) = Orchestrator::with_recovery(
-        Arc::clone(&workspace) as Arc<_>,
+        session_manager,
+        registry,
+        wt,
         engine,
         Arc::clone(&event_bus),
         Arc::clone(&hook_registry),
         shutdown.clone(),
         tracker_rx,
         tracker_tx.clone(),
+        recovery_listing.as_ref() as &dyn RecoveryListing,
         &reader,
     )
     .await
     .expect("recovery must succeed against the in-memory reader");
+    // Keep the session-tempdir root alive for the test duration.
+    let _session_root_dir = session_root_dir;
 
     // 1. Decision shape must match the documented matrix exactly. The
     //    decisions list is sorted by (repo, issue), so ENG-1 first, ENG-2
