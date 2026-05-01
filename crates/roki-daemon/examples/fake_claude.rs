@@ -40,11 +40,32 @@ fn main() -> ExitCode {
         "non_clean_exit" => non_clean_exit(),
         "stall" => stall(),
         "capture_prelude" => ExitCode::from(0),
+        "tool_call" => tool_call(),
         _ => {
             eprintln!("fake_claude: unknown FAKE_CLAUDE_MODE `{mode}`");
             ExitCode::from(2)
         }
     }
+}
+
+/// Emit a stream-json sequence that contains a `tool_use` content block for
+/// the `linear-graphql` tool, followed by a clean session result. Drives the
+/// integration scenario for task 3.4: the supervisor must surface the
+/// `ToolCall { name: "linear-graphql" }` lifecycle event without leaking the
+/// daemon-owned API token through the event stream.
+fn tool_call() -> ExitCode {
+    let stdout = std::io::stdout();
+    let mut out = stdout.lock();
+    let lines = [
+        r#"{"type":"system","subtype":"init","session_id":"fake-tool-call","model":"claude-test","tools":[]}"#,
+        r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","id":"toolu_lg_1","name":"linear-graphql","input":{"query":"query Me { viewer { id } }","variables":{}}}]}}"#,
+        r#"{"type":"result","subtype":"success","is_error":false,"result":"done"}"#,
+    ];
+    for line in lines {
+        let _ = writeln!(out, "{line}");
+        let _ = out.flush();
+    }
+    ExitCode::from(0)
 }
 
 /// Emit a representative stream-json sequence (system init + assistant

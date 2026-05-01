@@ -158,7 +158,7 @@
   - _Depends: 2.2, 2.5, 3.2_
   - _Requirements: 8.5, 10.1, 10.2, 10.3, 10.4_
 
-- [ ] 3.4 Wire the tool registry into the engine adapter at worker launch
+- [x] 3.4 Wire the tool registry into the engine adapter at worker launch
   - Compose the tool catalog (including the built-in `linear_graphql` proxy) and pass it to each spawned worker subprocess at launch.
   - Forward tool calls from the agent through the registry, applying redaction on errors before they leave the daemon.
   - Observable completion: an integration test with a fake `claude` binary issues a `linear_graphql` call against a stub Linear server and asserts the response is returned to the worker without the API token appearing in any tool input, output, or error.

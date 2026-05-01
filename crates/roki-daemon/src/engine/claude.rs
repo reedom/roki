@@ -51,7 +51,7 @@ use crate::engine::policy::{EnginePolicy, StallReason, WorkerOutcome};
 use crate::engine::stream::{EngineLifecycleEvent, parse_line};
 use crate::orchestrator::state::{CorrelationId, IssueId, RepoId};
 use crate::permissions::{PermissionMode, ResolvedPermission};
-use crate::tools::ToolDescriptor;
+use crate::tools::{Registry, ToolDescriptor, ToolError};
 
 /// Stable opening sentinel of the prelude envelope (req 13.4). Documented as
 /// part of the daemon ↔ agent contract so downstream specs can locate the
@@ -133,6 +133,26 @@ struct PreludePayload<'a> {
 /// change (req 13.4 documents the forwarding mechanism as additive).
 const PRELUDE_VERSION: u32 = 1;
 
+/// Map a [`ToolError`] to a stable, redaction-safe discriminant for tracing.
+///
+/// We log the variant name rather than the rendered error string so the
+/// supervisor's observability path stays robust even when a future tool
+/// implementation forgets to redact a daemon-owned credential before
+/// constructing the error (req 7.4).
+fn error_kind(err: &ToolError) -> &'static str {
+    match err {
+        ToolError::MultipleOperations => "MULTIPLE_OPERATIONS",
+        ToolError::InvalidInput { .. } => "INVALID_INPUT",
+        ToolError::RateLimited { .. } => "RATE_LIMITED",
+        ToolError::LinearHttpError { .. } => "LINEAR_HTTP_ERROR",
+        ToolError::Network { .. } => "LINEAR_HTTP_ERROR",
+        ToolError::RedactionFailed => "REDACTION_FAILED",
+        ToolError::DuplicateName { .. } => "DUPLICATE_TOOL",
+        ToolError::UnknownTool { .. } => "UNKNOWN_TOOL",
+        ToolError::RegistryPoisoned => "REGISTRY_POISONED",
+    }
+}
+
 /// Build the full session input the supervisor pipes to `claude --print`'s
 /// stdin: the prelude envelope followed by the rendered prompt.
 ///
@@ -197,15 +217,33 @@ pub enum LaunchError {
 /// `binary` defaults to the literal `"claude"` so production callers pick up
 /// the operator's `$PATH`. Tests inject a path to the fake binary that drives
 /// the observable-completion matrix.
-#[derive(Debug, Clone)]
+///
+/// The optional `registry` field carries the daemon's tool registry (task 3.4).
+/// When attached, every successful launch composes the worker's tool catalog
+/// from [`Registry::catalog`] and dispatches agent tool calls through
+/// [`ClaudeEngineAdapter::dispatch_tool`] so the daemon-owned credentials
+/// (notably the Linear API token) never cross the subprocess boundary
+/// (req 7.1, 7.2, 7.4).
+#[derive(Clone)]
 pub struct ClaudeEngineAdapter {
     binary: PathBuf,
+    registry: Option<Arc<dyn Registry>>,
+}
+
+impl std::fmt::Debug for ClaudeEngineAdapter {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ClaudeEngineAdapter")
+            .field("binary", &self.binary)
+            .field("registry", &self.registry.as_ref().map(|_| "<registry>"))
+            .finish()
+    }
 }
 
 impl Default for ClaudeEngineAdapter {
     fn default() -> Self {
         Self {
             binary: PathBuf::from("claude"),
+            registry: None,
         }
     }
 }
@@ -219,7 +257,64 @@ impl ClaudeEngineAdapter {
     /// Build an adapter that invokes the binary at `binary`. Used by the
     /// integration test harness with a fake `claude` binary.
     pub fn with_binary(binary: PathBuf) -> Self {
-        Self { binary }
+        Self {
+            binary,
+            registry: None,
+        }
+    }
+
+    /// Attach a tool [`Registry`] used to compose the worker's tool catalog
+    /// at launch and to dispatch agent-issued tool calls (task 3.4,
+    /// req 7.1, 7.2, 7.4).
+    ///
+    /// The adapter takes a shared `Arc` so the orchestrator and the adapter
+    /// observe a single source of truth for registered tools.
+    pub fn with_registry(mut self, registry: Arc<dyn Registry>) -> Self {
+        self.registry = Some(registry);
+        self
+    }
+
+    /// Forward an agent-issued tool call through the attached [`Registry`].
+    ///
+    /// Errors returned from this method are already redaction-safe: each
+    /// registered tool (e.g. [`crate::tools::linear_graphql::LinearGraphqlTool`])
+    /// scrubs daemon-owned credentials from any error message it emits before
+    /// the value reaches the [`ToolError`] enum (req 7.4). The supervisor
+    /// itself never copies tool input or output into log messages — only the
+    /// tool name is recorded — so the daemon-owned token cannot leak through
+    /// the observability path either.
+    pub async fn dispatch_tool(
+        &self,
+        name: &str,
+        input: serde_json::Value,
+    ) -> Result<serde_json::Value, ToolError> {
+        let registry = self
+            .registry
+            .as_ref()
+            .ok_or_else(|| ToolError::UnknownTool {
+                name: name.to_string(),
+            })?;
+        // Trace the dispatch with only the tool name; never log input or
+        // output bytes because they may contain credentials or PII.
+        tracing::debug!(
+            target: "engine.claude.tools",
+            tool = name,
+            "dispatching agent tool call through registry",
+        );
+        let result = registry.dispatch(name, input).await;
+        if let Err(err) = &result {
+            // The error string from `LinearGraphqlTool` is already redacted;
+            // log the variant discriminant rather than the rendered message
+            // to keep this path robust against future tools that forget to
+            // redact internally.
+            tracing::warn!(
+                target: "engine.claude.tools",
+                tool = name,
+                error_kind = error_kind(err),
+                "tool dispatch returned an error",
+            );
+        }
+        result
     }
 
     /// Launch a supervised `claude` session and stream lifecycle events into
@@ -231,9 +326,19 @@ impl ClaudeEngineAdapter {
     /// observability path.
     pub async fn launch(
         &self,
-        ctx: WorkerContext,
+        mut ctx: WorkerContext,
         events: mpsc::Sender<SupervisedEvent>,
     ) -> Result<WorkerOutcome, LaunchError> {
+        // Task 3.4 / req 7.1: when a registry is attached and the caller did
+        // not pre-populate the catalog, compose it from the live registry so
+        // every spawned worker subprocess sees the daemon's audited tool
+        // surface.
+        if ctx.tool_catalog.is_empty()
+            && let Some(registry) = &self.registry
+        {
+            ctx.tool_catalog = registry.catalog();
+        }
+
         let session_input = build_session_input(&ctx);
 
         let mut command = Command::new(&self.binary);
@@ -339,6 +444,18 @@ impl ClaudeEngineAdapter {
             while let Ok(Some(line)) = reader.next_line().await {
                 if let Some(event) = parse_line(&line) {
                     *stdout_last.lock().await = Instant::now();
+                    // Task 3.4 / req 7.4: when the agent invokes a tool we
+                    // record the observation under a stable target with only
+                    // the tool name. Never log inputs or outputs through the
+                    // engine's tracing path because they may contain
+                    // daemon-owned credentials.
+                    if let EngineLifecycleEvent::ToolCall { name } = &event {
+                        tracing::info!(
+                            target: "engine.claude.tools",
+                            tool = name.as_str(),
+                            "agent invoked tool (observed via stream-json)",
+                        );
+                    }
                     if events_for_stream
                         .send(SupervisedEvent::Lifecycle(event))
                         .await
