@@ -234,6 +234,68 @@
   - Observable completion: the parser keeps the same outcome on the captured fixture set across changes; new fixtures can be added with a single helper.
   - _Requirements: 5.2_
 
+- [ ] 7. Agent-driven repo selection: collapse multi-repo routing into the agent
+
+- [ ] 7.1 Replace `repos.scope` daemon-side routing with agent-driven repo selection
+  - _Boundary:_ `crates/roki-daemon/src/config/{mod.rs,repos.rs}`, `crates/roki-daemon/src/routing.rs` (deleted), `crates/roki-daemon/src/orchestrator/{state.rs,core.rs,tracker_bridge.rs,recovery.rs}`, `crates/roki-daemon/src/workspace/` (REWRITTEN as `session/` and `worktrees/` modules; the `Workspace` trait is dropped), `crates/roki-daemon/src/tools/{mod.rs,roki_open_worktree.rs}` (new tool alongside existing `linear_graphql`), `crates/roki-daemon/src/tracker/{linear.rs,webhook.rs}`, `crates/roki-daemon/src/runtime.rs`, `SPEC.md` (§2.2, §2.3, §6, §7, §10 — major rewrites), `.kiro/specs/roki-mvp/design.md`. Tests: every existing e2e test under `crates/roki-daemon/tests/` refactors; new tests for cross-repo worker, allowlist rejection, single-webhook dispatch.
+  - **Locked decisions** (from `.kiro/specs/roki-mvp/design-agent-driven-repo-selection.md`):
+    1. Tool name = `roki_open_worktree`. Daemon-owned semantics, namespaced like `linear_graphql`.
+    2. Tool input = `{ repo: string }` only. Branch is hard-locked to the issue id verbatim — no agent override.
+    3. Repo allowlist enforcement is STRICT. The tool refuses any `repo` not in `[[repos]]`; returns a typed `RepoNotInAllowlist { repo, allowed }` error to the agent.
+    4. Tool is idempotent: second call with the same `repo` for the same worker returns the existing path without re-running `wt switch --create`.
+    5. Session tempdir lives at `~/Library/Caches/roki/sessions/<issue>` on macOS / `~/.cache/roki/sessions/<issue>` on Linux (via the `dirs` crate or equivalent XDG resolver).
+    6. Single workspace-level `WORKFLOW.md` configured at `[workflow].path`. Per-repo policy override is removed.
+    7. Admission filter = admit every Linear issue update. The agent decides whether to do work; WORKFLOW.md gates handle the cheap "this isn't for me" exit.
+    8. CleanExit advances to `AwaitingReview` regardless of whether the agent ever called `roki_open_worktree` — a worker that never opened a worktree is still a valid no-op path.
+    9. Restart recovery walks BOTH session tempdirs AND every configured repo's `git worktree list --porcelain` (filtered to issue-id-shaped branch names via the operator-configurable regex `^[A-Z]+-\d+$`).
+    10. The `Workspace` trait is dropped. Concrete types `SessionManager` (tempdir lifecycle) and `WorktreeRegistry` (per-worker worktree tracking) replace it.
+    11. Cleanup on `Cleaning` is daemon-side: walks `WorktreeRegistry` for the worker and calls `wt.remove` on each (subject to existing pre-cleanup hooks). On `TerminalFailure`, all worktrees AND the session tempdir are retained.
+  - **Schema delta (breaking)**:
+    - REMOVE `RepoConfig.id`, `RepoConfig.scope`, `RepoConfig.webhook_secret_env`, `RepoConfig.webhook_secret`, `RepoConfig.workflow_path`. After 7.1, `RepoConfig` is `{ repo: String }` only.
+    - REMOVE the `LinearScope` enum and the `routing.rs` module entirely.
+    - ADD `[linear]` config block: `token_env: Option<String>` (defaults to `"LINEAR_API_TOKEN"`), `webhook_secret_env: String` (required), `endpoint: Option<String>` (test-only override; production omits).
+    - ADD `[workflow]` config block: `path: PathBuf` (required, single workspace-level policy file).
+    - REJECT duplicate `[[repos]]` entries with the same `repo` value at config load (hard refusal naming the offending entry).
+  - **State-machine impact**:
+    - `(repo, issue)` collapses to `(issue,)`. `RepoId` stays as a type for `WorktreeRegistry` keying but is no longer in the state-machine key. Update `ActorRecord` keying, `TransitionEvent.repo` becomes `Option<RepoId>` populated post-tool-call (or removed entirely if the field has no observable consumers — implementer's call, but document it in the SPEC.md update).
+    - `Queued → Active` no longer pre-creates a worktree. Instead it creates a session tempdir via `SessionManager::create_session(issue)` and that becomes the worker's CWD.
+    - `Cleaning → [*]` iterates the worker's `WorktreeRegistry` entries and calls `wt.remove` on each (one-by-one, log per-arc, subject to pre-cleanup hooks); then removes the session tempdir.
+    - `TrackerBridge` dedup keys collapse from `(repo, issue, target_state)` to `(issue, target_state)`.
+  - **Webhook handler (single-route)**:
+    - URL: `POST /linear/webhook` (no per-repo path segment).
+    - HMAC verify against `[linear].webhook_secret_env` (single workspace-level secret).
+    - Decode → `NormalizedIssue` (no repo association at this point).
+    - Forward to orchestrator's `tracker_inbox` keyed by `IssueId`.
+    - Spawn a worker for any new `IssueId` that isn't already in flight; the orchestrator never consults `[[repos]]` at admission time.
+  - **Single `LinearTracker`**:
+    - One poller for the entire Linear workspace (not per repo). Honor the existing global `polling_cadence` and 5-min cap.
+    - No `scope` filtering. Every issue the API token can see produces a `NormalizedIssue` event.
+  - **New agent tool `roki_open_worktree`**:
+    - Registered in the agent's tool registry alongside `linear_graphql`.
+    - Description (verbatim, render in the agent's tool surface): "Open a git worktree for the current Linear issue in one of the configured repos. The daemon resolves the repo via ghq, creates a worktree branch named after the issue id via wt, and returns the absolute path. Idempotent — calling twice with the same repo returns the same path. Use this once per repo you intend to modify; cross-repo tickets call this multiple times."
+    - Input: `{ repo: string }` only. Strict allowlist.
+    - Output: `{ path: string, repo: string, branch: string }` where `branch == issue.id`.
+    - Errors (typed; route through existing tool-error taxonomy): `RepoNotInAllowlist { repo, allowed: [string] }`, `GhqResolutionFailed { repo, reason }`, `WorktreeCreationFailed { repo, branch, reason }`.
+    - Handler flow: validate allowlist → `ghq.ensure_cloned(repo)` → `wt.switch_create(repo_path, issue.as_str())` → register `(worker_id, repo, branch, worktree_path)` in `WorktreeRegistry` → return path.
+    - Idempotency: handler checks `WorktreeRegistry` first; if `(worker_id, repo)` already exists, returns the existing path without invoking `ghq`/`wt`.
+  - **Restart recovery (folds task 5.2 into 7.1)**:
+    - Walk session tempdirs under `~/Library/Caches/roki/sessions/` (or platform equivalent).
+    - For each configured `[[repos]]` entry, run `git worktree list --porcelain` and filter to branches matching the operator-configurable regex (default `^[A-Z]+-\d+$`).
+    - Reconcile every distinct issue id discovered (from either source) against Linear via the existing `RecoveryLinearReader` trait. Provide a production `LinearTracker`-backed impl as part of this task.
+    - Decision matrix expanded: `ResumeActive` (issue active in Linear, session+worktree(s) on disk), `OrphanedSession` (session tempdir but no Linear state and no worktree), `OrphanedWorktree` (worktree but no session), `FreshQueued` (Linear issue active, nothing on disk → fresh worker), `NoOp` (Linear issue terminal, nothing on disk).
+  - **Doc updates (same change set per §16)**:
+    - `SPEC.md` §2.2 — drop the workspace-root + per-repo workflow_path bullets; add `[linear]` and `[workflow]` block descriptions; describe `[[repos]]` as the agent allowlist.
+    - `SPEC.md` §2.3 — replace the deterministic-precedence-rule section with "agent-driven repo selection via `roki_open_worktree`."
+    - `SPEC.md` §6 — replace the worktree path section with "session tempdir layout + `WorktreeRegistry` semantics + lifecycle invariants (open via tool, remove on Cleaning, retain on TerminalFailure)."
+    - `SPEC.md` §7 — add `roki_open_worktree` to the registry table with input/output/error shape.
+    - `SPEC.md` §10 — rewrite the recovery section to walk both session tempdirs and worktrees per the new four/five-cell matrix.
+    - `.kiro/specs/roki-mvp/design.md` — fold the agent-driven model into the architecture-prose; show the new component breakdown (`SessionManager`, `WorktreeRegistry`, `RokiOpenWorktreeTool`).
+  - **Refusal modes**: `[linear].webhook_secret_env` not set → hard refusal; `[workflow].path` missing or unreadable → hard refusal; no `[[repos]]` entries → WARN log, daemon starts but every `roki_open_worktree` call returns `RepoNotInAllowlist`; `wt`/`ghq`/`claude` absent → hard refusal (existing); duplicate `repo` in `[[repos]]` → hard refusal at config load; agent specifies a `repo` not in the allowlist → tool error to agent (worker continues).
+  - Observable completion: (a) all tests across `cargo test --workspace`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all -- --check` clean; (b) every refactored e2e test passes deterministically across 3 sequential reps; (c) new cross-repo test where one worker opens worktrees in two configured repos passes; (d) new allowlist-rejection test where the agent specifies a non-allowlisted repo asserts the typed error and that no worktree was created; (e) `crates/roki-daemon/src/routing.rs` is gone from the file tree; (f) `RepoConfig` shrinks to a single field; (g) SPEC.md §2.2/§2.3/§6/§7/§10 reflect the new model; (h) restart recovery test exercises all five matrix cells with both session tempdirs and worktrees pre-seeded.
+  - _Depends: 6.1, 5.1_
+  - _Requirements: 2.1, 2.4, 4.1, 4.2, 4.5, 7.1, 7.2, 8.2, 10.1, 10.2_
+  - _Design: `.kiro/specs/roki-mvp/design-agent-driven-repo-selection.md`_
+
 - [ ] 6. Workspace model migration: switch from sandbox dirs to git worktrees
 
 - [x] 6.1 Replace the sandbox-dir workspace model with `wt` + `ghq` git worktrees
