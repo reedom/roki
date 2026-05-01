@@ -61,8 +61,11 @@ fn empty_payload() -> Value {
 }
 
 fn scope_watch() -> ScopeWatch {
-    // TODO(7.1c): drop this scaffolding when the single workspace tracker
-    // collapses. Post-7.1a `ScopeWatch` carries only the repo stamp.
+    // Post-task-7.1c `ScopeWatch` is a build-compat shim that stamps a
+    // `RepoId` onto emitted `NormalizedIssue` events. The orchestrator
+    // already ignores `NormalizedIssue.repo`. The shim is removed in 7.1f
+    // when the bootstrap rewrite switches `runtime.rs` to a single
+    // workspace-level constructor.
     ScopeWatch {
         repo: RepoId::new("core"),
     }
@@ -245,7 +248,6 @@ async fn valid_payload_normalizes_to_normalized_issue() {
     assert_eq!(one.description, "the first issue body");
     assert_eq!(one.state, IssueState::Active);
     assert_eq!(one.labels, vec!["bug".to_string(), "p1".to_string()]);
-    assert_eq!(one.team_or_scope, "ENG");
     assert_eq!(one.repo.as_str(), "core");
 
     let two = by_id
@@ -311,11 +313,119 @@ async fn graphql_request_carries_authorization_header_and_query_body() {
         .get("query")
         .and_then(Value::as_str)
         .expect("body has `query`");
-    // The query targets Linear's `issues` field with a team filter; we don't
-    // pin the exact text but require it to be a query operation that names
-    // the resource and the team scope.
+    // Post-task-7.1c the query targets Linear's `issues` field with a state
+    // filter only — there is no team-or-scope narrowing because the agent
+    // decides on its first turn whether the ticket is in scope.
     assert!(
-        query.contains("issues") && query.contains("team"),
-        "query should target the issues resource scoped by team; got: {query}",
+        query.contains("issues"),
+        "query should target the issues resource; got: {query}",
+    );
+    assert!(
+        !query.contains("team"),
+        "query must not request the team field; got: {query}",
+    );
+    let variables = body.get("variables").expect("body has `variables`");
+    assert!(
+        variables["filter"]["team"].is_null(),
+        "filter must not narrow by team; got: {variables}",
+    );
+}
+
+#[tokio::test]
+async fn workspace_poll_emits_one_event_per_issue_regardless_of_repo_count() {
+    // Task 7.1c required test (3): the single workspace tracker emits
+    // exactly one event per Linear issue per poll, regardless of how many
+    // `[[repos]]` entries the operator configured. Pre-task-7.1c the
+    // bootstrap spawned one `LinearTracker` per repo entry which produced
+    // duplicates across the workspace; post-7.1c each `LinearTracker`
+    // collapses to a single workspace polling loop. Even an individual
+    // tracker constructed with multiple `scopes` entries (the runtime's
+    // per-repo loop pattern) MUST NOT amplify the workspace stream.
+    let server = MockServer::start().await;
+
+    Mock::given(method("POST"))
+        .and(path("/graphql"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(payload_with_two_issues()))
+        .mount(&server)
+        .await;
+
+    let endpoint = format!("{}/graphql", server.uri());
+    // Configure with three "repos worth" of scope entries to mimic the
+    // pre-7.1c per-repo bootstrap. The post-7.1c tracker MUST treat
+    // additional entries as decorative — the polling loop runs once.
+    let many_scopes = vec![
+        ScopeWatch {
+            repo: RepoId::new("repo-one"),
+        },
+        ScopeWatch {
+            repo: RepoId::new("repo-two"),
+        },
+        ScopeWatch {
+            repo: RepoId::new("repo-three"),
+        },
+    ];
+    // Cadence is set high so the test observes exactly one poll within the
+    // sampling window: this isolates the "events per poll" dimension we
+    // actually want to assert.
+    let config = LinearTrackerConfig {
+        endpoint,
+        cadence: Duration::from_secs(10),
+        scopes: many_scopes,
+        token: SecretString::new(TEST_TOKEN),
+        rate_limit: Arc::new(NoopRateLimit),
+    };
+
+    let (tx, mut rx) = mpsc::channel(32);
+    let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
+    let tracker = LinearTracker::new(config);
+    let handle = tokio::spawn(async move { tracker.run(tx, shutdown_rx).await });
+
+    // Wait deterministically for the first poll's two events. With
+    // `scopes.len() == 3` a regression would deliver six events on this
+    // single poll, so we deliberately try to drain a third event with a
+    // brief grace window after the second arrives.
+    let mut received: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    for _ in 0..2 {
+        let event = tokio::time::timeout(Duration::from_secs(3), rx.recv())
+            .await
+            .expect("first-poll event arrives within 3s")
+            .expect("channel open");
+        *received
+            .entry(event.issue.as_str().to_string())
+            .or_insert(0) += 1;
+    }
+    // Grace window: any extra duplicate that a per-scope-spawning tracker
+    // would produce arrives effectively immediately because all three
+    // hypothetical loops would race on the wiremock response. 250ms is
+    // generous compared to the wiremock turnaround time observed in the
+    // companion polling tests.
+    let extra = tokio::time::timeout(Duration::from_millis(250), rx.recv()).await;
+    let extras_seen = match extra {
+        Ok(Some(_)) => 1,
+        _ => 0,
+    };
+
+    let _ = shutdown_tx.send(());
+    let _ = handle.await.expect("tracker task joins");
+
+    let polls = server.received_requests().await.unwrap_or_default().len();
+    assert_eq!(
+        polls, 1,
+        "test expected exactly one poll within the sampling window; got {polls}",
+    );
+    let eng_one = received.get("ENG-1").copied().unwrap_or(0);
+    let eng_two = received.get("ENG-2").copied().unwrap_or(0);
+    assert_eq!(
+        eng_one, 1,
+        "ENG-1 must be emitted exactly once per poll regardless of `scopes.len()`",
+    );
+    assert_eq!(
+        eng_two, 1,
+        "ENG-2 must be emitted exactly once per poll regardless of `scopes.len()`",
+    );
+    assert_eq!(
+        extras_seen, 0,
+        "tracker must not amplify the workspace stream by repo count; \
+         saw {extras_seen} duplicate event(s) after the expected pair",
     );
 }

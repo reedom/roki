@@ -26,7 +26,6 @@ fn issue(repo: &str, issue: &str, state: IssueState) -> NormalizedIssue {
         description: String::new(),
         state,
         labels: Vec::new(),
-        team_or_scope: "ENG".to_string(),
     }
 }
 

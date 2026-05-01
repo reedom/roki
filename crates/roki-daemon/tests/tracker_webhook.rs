@@ -93,13 +93,11 @@ async fn correctly_signed_payload_emits_normalized_issue() {
     assert_eq!(response.status(), StatusCode::NO_CONTENT);
 
     let received = rx.recv().await.expect("normalized issue dispatched");
-    assert_eq!(received.repo, RepoId::new("core"));
     assert_eq!(received.issue, IssueId::new("ENG-123"));
     assert_eq!(received.title, "Fix the thing");
     assert_eq!(received.description, "Body text");
     assert_eq!(received.state, IssueState::Active);
     assert_eq!(received.labels, vec!["bug".to_string(), "p1".to_string()]);
-    assert_eq!(received.team_or_scope, "ENG");
 }
 
 #[tokio::test]
@@ -193,6 +191,56 @@ async fn non_issue_event_types_are_acknowledged_without_dispatch() {
 
     assert_eq!(response.status(), StatusCode::NO_CONTENT);
     assert!(rx.try_recv().is_err());
+}
+
+#[tokio::test]
+async fn hmac_mismatch_short_circuits_before_deserialization() {
+    // Task 7.1c requirement (3): the single workspace HMAC secret rejects
+    // mismatched signatures BEFORE the JSON body is parsed. We exercise this
+    // by sending malformed JSON with a bad signature: if the handler tried
+    // to deserialize first the response would be 400 (malformed JSON);
+    // instead we must observe 401 (HMAC rejection short-circuits earlier).
+    let (tx, mut rx) = mpsc::channel(8);
+    let app = router_default(make_state(tx));
+
+    let body_bytes = b"this is not json at all".to_vec();
+    let bogus_signature = hmac_hex(b"not-the-real-secret", &body_bytes);
+
+    let response = app
+        .oneshot(signed_body_request(body_bytes, &bogus_signature))
+        .await
+        .expect("oneshot");
+
+    assert_eq!(
+        response.status(),
+        StatusCode::UNAUTHORIZED,
+        "HMAC verification must fail closed before body is parsed",
+    );
+    assert!(rx.try_recv().is_err());
+}
+
+#[tokio::test]
+async fn single_workspace_route_accepts_correct_hmac() {
+    // Task 7.1c requirement (1)+(2): there is exactly one webhook route at
+    // `POST /linear/webhook` and it accepts payloads signed with the
+    // workspace-level HMAC secret. The route MUST NOT include a per-repo
+    // path segment.
+    assert_eq!(DEFAULT_WEBHOOK_PATH, "/linear/webhook");
+
+    let (tx, mut rx) = mpsc::channel(8);
+    let app = router_default(make_state(tx));
+
+    let body_bytes = serde_json::to_vec(&issue_payload()).unwrap();
+    let signature = hmac_hex(TEST_SECRET.as_bytes(), &body_bytes);
+
+    let response = app
+        .oneshot(signed_body_request(body_bytes, &signature))
+        .await
+        .expect("oneshot");
+
+    assert_eq!(response.status(), StatusCode::NO_CONTENT);
+    let received = rx.recv().await.expect("normalized issue dispatched");
+    assert_eq!(received.issue, IssueId::new("ENG-123"));
 }
 
 #[tokio::test]

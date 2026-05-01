@@ -22,11 +22,13 @@
 //! * a `tokio::sync::oneshot::Receiver<()>` shutdown channel;
 //! * an `mpsc::Sender<NormalizedIssue>` sink the orchestrator drains.
 //!
-//! TODO(7.1c): collapse the per-scope poller into a single workspace-level
-//! poller. Post-7.1a the daemon no longer carries a `LinearScope` filter; the
-//! tracker now polls active issues without scope-narrowing variables. The
-//! actual collapse to a single tracker (and the removal of [`ScopeWatch`])
-//! lands in 7.1c.
+//! Post-task-7.1c the per-scope filter is gone: the adapter polls every
+//! active issue the API token can see and the agent decides on its first
+//! turn whether the ticket is in scope. [`ScopeWatch`] survives only as a
+//! build-compat shim that stamps a `RepoId` onto emitted [`NormalizedIssue`]
+//! events — the orchestrator already ignores `NormalizedIssue.repo`. The
+//! shim disappears with the bootstrap rewrite in 7.1f, when `runtime.rs`
+//! switches to a single workspace-level constructor.
 
 use std::sync::Arc;
 use std::sync::Mutex;
@@ -63,13 +65,14 @@ const MAX_BACKOFF: Duration = Duration::from_secs(300);
 /// Default request timeout for the underlying reqwest client.
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 
-/// One Linear poller scope the tracker should watch.
+/// Build-compat shim carrying the `RepoId` stamp the tracker writes onto
+/// emitted [`NormalizedIssue`] events.
 ///
-/// TODO(7.1c): collapse into a single workspace-level poller. Post-7.1a the
-/// `LinearScope` filter was removed (agent-driven repo selection means the
-/// daemon no longer pre-classifies issues by team/label). The `repo` field
-/// is retained as an interim stamp for `NormalizedIssue.repo` until 7.1b
-/// rekeys the orchestrator on `IssueId` alone.
+/// Post-task-7.1c the polling adapter does NOT filter by team or label; it
+/// queries every active issue the API token can see. The orchestrator
+/// already ignores `NormalizedIssue.repo`. This struct exists only so the
+/// 7.1f bootstrap rewrite in `runtime.rs` can be done as a single follow-up
+/// without an intermediate breaking change.
 #[derive(Debug, Clone)]
 pub struct ScopeWatch {
     pub repo: RepoId,
@@ -167,117 +170,126 @@ impl ScopeShared {
 /// Construct with [`LinearTracker::new`] and drive with [`LinearTracker::run`].
 /// The constructor takes ownership of the config so the runtime cannot mutate
 /// the cadence or endpoint behind the loop's back.
+///
+/// Post-task-7.1c the tracker spawns exactly one workspace-level polling
+/// loop regardless of how many entries appear in [`LinearTrackerConfig`]'s
+/// `scopes` field — the agent-driven design eliminated per-scope
+/// pre-classification (see design-agent-driven-repo-selection.md). The
+/// first scope's `repo` is used as the build-compat stamp on emitted
+/// [`NormalizedIssue`] events; the orchestrator already ignores
+/// `NormalizedIssue.repo`.
 pub struct LinearTracker {
     endpoint: String,
     cadence: Duration,
-    scopes: Vec<ScopeWatch>,
+    /// Single workspace-level polling target. The first entry from
+    /// `LinearTrackerConfig.scopes` is consumed; additional entries are
+    /// dropped because the post-task-7.1c poller queries the entire Linear
+    /// workspace the API token can see.
+    scope: ScopeWatch,
     token: SecretString,
     rate_limit: Arc<dyn RateLimitState>,
     http: reqwest::Client,
-    /// Per-scope shared state, aligned with `scopes`. Cloned into the
-    /// handle so nudges reach every scope.
-    scope_states: Vec<Arc<ScopeShared>>,
+    /// Single workspace-level shared state. Cloned into the [`LinearTrackerHandle`]
+    /// so nudges reach the workspace poller.
+    scope_state: Arc<ScopeShared>,
 }
 
 impl LinearTracker {
     /// Build a tracker. The cadence is clamped to the documented hard cap of
-    /// 5 minutes per scope; a trace warning is emitted when the operator's
-    /// value is reduced so the operator can see the clamp in logs.
+    /// 5 minutes (Requirement 3.2); a trace warning is emitted when the
+    /// operator's value is reduced so the operator can see the clamp in
+    /// logs.
+    ///
+    /// `config.scopes` is consumed for build-compat with the pre-7.1c
+    /// per-repo bootstrap. Only the first scope's `repo` is honoured (as
+    /// the stamp written into emitted [`NormalizedIssue.repo`]); a tracker
+    /// constructed with no scopes uses an empty `RepoId` stamp.
     pub fn new(config: LinearTrackerConfig) -> Self {
         let cadence = clamp_cadence(config.cadence);
         let http = reqwest::Client::builder()
             .timeout(REQUEST_TIMEOUT)
             .build()
             .unwrap_or_else(|_| reqwest::Client::new());
-        let scope_states = (0..config.scopes.len())
-            .map(|_| Arc::new(ScopeShared::new()))
-            .collect();
+        let scope = config.scopes.into_iter().next().unwrap_or(ScopeWatch {
+            repo: RepoId::new(""),
+        });
+        let scope_state = Arc::new(ScopeShared::new());
         Self {
             endpoint: config.endpoint,
             cadence,
-            scopes: config.scopes,
+            scope,
             token: config.token,
             rate_limit: config.rate_limit,
             http,
-            scope_states,
+            scope_state,
         }
     }
 
-    /// Build a [`TrackerRefresh`] handle that shares per-scope state with
-    /// this tracker. The handle can be cloned freely and remains usable for
-    /// the lifetime of the running loop; nudges issued after the loop
-    /// terminates simply have no observable effect.
+    /// Build a [`TrackerRefresh`] handle that shares the workspace
+    /// poller's state with this tracker. The handle can be cloned freely
+    /// and remains usable for the lifetime of the running loop; nudges
+    /// issued after the loop terminates simply have no observable effect.
     pub fn refresh_handle(&self) -> LinearTrackerHandle {
         LinearTrackerHandle {
-            scope_states: self.scope_states.clone(),
+            scope_states: vec![Arc::clone(&self.scope_state)],
         }
     }
 
-    /// Run the polling loop until `shutdown` resolves. One cadence timer per
-    /// scope; the timers share a single `mpsc::Sender` so the orchestrator
-    /// sees a fully-multiplexed stream of [`NormalizedIssue`] events.
+    /// Run the workspace polling loop until `shutdown` resolves.
+    ///
+    /// The post-task-7.1c tracker spawns exactly one polling loop. Issues
+    /// across the entire Linear workspace are forwarded into the shared
+    /// `mpsc::Sender` so the orchestrator sees one event per issue per
+    /// poll regardless of how many `[[repos]]` entries the operator
+    /// configured.
     pub async fn run(
         self,
         sink: mpsc::Sender<NormalizedIssue>,
         shutdown: oneshot::Receiver<()>,
     ) -> Result<(), TrackerError> {
-        let mut tasks = Vec::with_capacity(self.scopes.len());
-
-        // Fan out one async loop per scope. Each loop owns its own
-        // `next_due` deadline so a slow scope never starves a fast one.
         let endpoint = Arc::new(self.endpoint);
         let token = Arc::new(self.token);
         let rate_limit = self.rate_limit.clone();
         let http = self.http.clone();
         let cadence = self.cadence;
+        let scope = self.scope.clone();
+        let state = Arc::clone(&self.scope_state);
 
-        // Wrap the shutdown receiver in a broadcast so each per-scope task
-        // can observe it independently.
+        // Bridge the oneshot shutdown into a broadcast receiver so the
+        // workspace loop sees the cancellation through the same code path
+        // the legacy per-scope loops used. This preserves task 5.1's
+        // shutdown-observability contract: tracker tasks remain wired
+        // into the same mechanism `await_workers_with_window` drives.
         let (shutdown_broadcast, _) = tokio::sync::broadcast::channel::<()>(1);
         let shutdown_signal = shutdown_broadcast.clone();
         let shutdown_pump = tokio::spawn(async move {
-            // Single waiter on the oneshot; broadcast on completion.
             let _ = shutdown.await;
             let _ = shutdown_signal.send(());
         });
 
-        for (scope, state) in self
-            .scopes
-            .into_iter()
-            .zip(self.scope_states.iter().cloned())
-        {
-            let endpoint = Arc::clone(&endpoint);
-            let token = Arc::clone(&token);
-            let rate_limit = Arc::clone(&rate_limit);
-            let http = http.clone();
-            let sink = sink.clone();
-            let mut shutdown_rx = shutdown_broadcast.subscribe();
+        let mut shutdown_rx = shutdown_broadcast.subscribe();
+        let workspace_sink = sink.clone();
+        let task = tokio::spawn(async move {
+            run_scope(
+                scope,
+                state,
+                endpoint,
+                token,
+                rate_limit,
+                http,
+                cadence,
+                workspace_sink,
+                &mut shutdown_rx,
+            )
+            .await;
+        });
 
-            let task = tokio::spawn(async move {
-                run_scope(
-                    scope,
-                    state,
-                    endpoint,
-                    token,
-                    rate_limit,
-                    http,
-                    cadence,
-                    sink,
-                    &mut shutdown_rx,
-                )
-                .await;
-            });
-            tasks.push(task);
-        }
-
-        // Drop the cloned sink so consumers see channel close on shutdown.
+        // Drop the bootstrap-held sender so the bridge sees channel close
+        // when the workspace loop exits.
         drop(sink);
 
-        // Wait for shutdown to propagate, then await every scope task.
         let _ = shutdown_pump.await;
-        for task in tasks {
-            let _ = task.await;
-        }
+        let _ = task.await;
         Ok(())
     }
 }
@@ -571,18 +583,21 @@ fn clamp_cadence(cadence: Duration) -> Duration {
     cadence
 }
 
-/// GraphQL query that fetches the active-issue slice for one scope.
+/// GraphQL query that fetches the active-issue slice for the entire
+/// workspace the API token can see.
 ///
 /// The query intentionally requests just the fields [`NormalizedIssue`]
 /// needs (Requirement 3.4) so we do not pull more from Linear than necessary.
-const ACTIVE_ISSUES_QUERY: &str = "query ActiveIssues($filter: IssueFilter, $first: Int) {\n  issues(filter: $filter, first: $first) {\n    nodes {\n      id\n      identifier\n      title\n      description\n      state { type name }\n      labels { nodes { name } }\n      team { key }\n    }\n  }\n}";
+/// Post-task-7.1c the query no longer narrows by team/label — the daemon
+/// admits every active issue and the agent's first turn decides whether the
+/// ticket is in scope (see design-agent-driven-repo-selection.md).
+const ACTIVE_ISSUES_QUERY: &str = "query ActiveIssues($filter: IssueFilter, $first: Int) {\n  issues(filter: $filter, first: $first) {\n    nodes {\n      id\n      identifier\n      title\n      description\n      state { type name }\n      labels { nodes { name } }\n    }\n  }\n}";
 
 /// Build the `IssueFilter` for the workspace poller.
 ///
-/// TODO(7.1c): post-7.1a the daemon no longer pre-classifies issues by
-/// team/label. The polling tracker requests every active issue the API
-/// token can see; the agent decides on its first turn whether the ticket
-/// is in scope. The `LinearScope`-keyed filter shape is gone.
+/// Post-task-7.1c the daemon no longer pre-classifies issues by team or
+/// label. The polling tracker requests every active issue the API token can
+/// see; the agent decides on its first turn whether the ticket is in scope.
 fn active_issues_variables() -> Value {
     let active_states = json!({ "type": { "in": ["unstarted", "started"] } });
     let filter = json!({ "state": active_states });
@@ -603,10 +618,6 @@ fn node_to_normalized(node: IssueNode, scope: &ScopeWatch) -> NormalizedIssue {
         .labels
         .map(|l| l.nodes.into_iter().map(|n| n.name).collect::<Vec<_>>())
         .unwrap_or_default();
-    // TODO(7.1c): drop `team_or_scope` from `NormalizedIssue` along with the
-    // single-tracker collapse. Post-7.1a there is no scope-fallback string;
-    // the team key is best-effort from the response and otherwise empty.
-    let team_or_scope = node.team.map(|t| t.key).unwrap_or_default();
     let state = IssueState::from_linear_type(node.state.kind.as_deref().unwrap_or(""));
 
     NormalizedIssue {
@@ -616,7 +627,6 @@ fn node_to_normalized(node: IssueNode, scope: &ScopeWatch) -> NormalizedIssue {
         description: node.description.unwrap_or_default(),
         state,
         labels,
-        team_or_scope,
     }
 }
 
@@ -657,8 +667,6 @@ struct IssueNode {
     state: StateField,
     #[serde(default)]
     labels: Option<LabelsEnvelope>,
-    #[serde(default)]
-    team: Option<TeamField>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -679,11 +687,6 @@ struct LabelsEnvelope {
 #[derive(Debug, Deserialize)]
 struct LabelNode {
     name: String,
-}
-
-#[derive(Debug, Deserialize)]
-struct TeamField {
-    key: String,
 }
 
 /// Internal poll-loop error taxonomy. Distinct from [`TrackerError`] because
@@ -760,14 +763,26 @@ mod tests {
 
     #[test]
     fn active_issues_variables_filters_only_by_active_state() {
-        // Post-7.1a: the per-scope team/label filter is gone; the daemon
-        // polls every active issue and lets the agent decide which tickets
-        // are in scope. TODO(7.1c): folded into single workspace tracker.
+        // Post-task-7.1c: the per-scope team/label filter is gone; the
+        // daemon polls every active issue the API token can see and the
+        // agent decides which tickets are in scope on its first turn.
         let vars = active_issues_variables();
         assert_eq!(vars["filter"]["state"]["type"]["in"][0], "unstarted");
         assert_eq!(vars["filter"]["state"]["type"]["in"][1], "started");
         assert!(vars["filter"]["team"].is_null());
         assert!(vars["filter"]["labels"].is_null());
+    }
+
+    #[test]
+    fn active_issues_query_does_not_request_team_field() {
+        // Defence in depth around the single-tracker collapse: the GraphQL
+        // query MUST NOT request `team` on each issue. Post-task-7.1c
+        // `NormalizedIssue` does not carry a team field; requesting it
+        // would be wasteful and would re-introduce the pre-classification
+        // pattern the agent-driven design eliminated.
+        assert!(!ACTIVE_ISSUES_QUERY.contains("team"));
+        assert!(ACTIVE_ISSUES_QUERY.contains("issues"));
+        assert!(ACTIVE_ISSUES_QUERY.contains("identifier"));
     }
 
     #[test]
@@ -785,7 +800,6 @@ mod tests {
             labels: Some(LabelsEnvelope {
                 nodes: vec![LabelNode { name: "bug".into() }],
             }),
-            team: Some(TeamField { key: "ENG".into() }),
         };
         let normalized = node_to_normalized(node, &scope);
         assert_eq!(normalized.repo.as_str(), "core");
@@ -794,13 +808,12 @@ mod tests {
         assert_eq!(normalized.description, "body");
         assert_eq!(normalized.state, IssueState::Active);
         assert_eq!(normalized.labels, vec!["bug".to_string()]);
-        assert_eq!(normalized.team_or_scope, "ENG");
     }
 
     #[test]
-    fn node_to_normalized_emits_empty_team_when_response_lacks_team() {
-        // Post-7.1a: with no scope-derived fallback, an absent team field
-        // produces an empty `team_or_scope`. TODO(7.1c): drop the field.
+    fn node_to_normalized_handles_minimal_payload() {
+        // An issue payload missing optional fields normalises to empty
+        // strings / vectors; the bucketed state still falls through.
         let scope = dummy_scope_watch();
         let node = IssueNode {
             id: None,
@@ -812,10 +825,8 @@ mod tests {
                 name: None,
             },
             labels: None,
-            team: None,
         };
         let normalized = node_to_normalized(node, &scope);
-        assert_eq!(normalized.team_or_scope, "");
         assert_eq!(normalized.state, IssueState::Other);
         assert_eq!(normalized.description, "");
         assert!(normalized.labels.is_empty());

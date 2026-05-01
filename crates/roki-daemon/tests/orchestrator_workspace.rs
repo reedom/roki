@@ -82,7 +82,6 @@ fn sample_issue(repo: &str, issue: &str, state: TrackerIssueState) -> Normalized
         description: "test".to_string(),
         state,
         labels: Vec::new(),
-        team_or_scope: "ENG".to_string(),
     }
 }
 

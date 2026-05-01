@@ -207,7 +207,6 @@ mod tests {
             description: String::new(),
             state,
             labels: Vec::new(),
-            team_or_scope: "ENG".to_string(),
         }
     }
 

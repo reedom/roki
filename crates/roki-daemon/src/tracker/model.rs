@@ -6,19 +6,22 @@
 //! machine live in `orchestrator/state.rs`; this enum is the tracker-side view.
 //!
 //! [`NormalizedIssue`] is the structured issue contract emitted by every
-//! tracker (polling today, webhook in task 2.6). Fields mirror design.md
-//! "TrackerAdapter":
+//! tracker (polling and webhook). Fields mirror design.md "TrackerAdapter":
 //!
-//! * `repo` — the routed `RepoId` for this issue (the tracker today is
-//!   parameterised per scope so it knows the repo at emit time; the
-//!   orchestrator-side router will replace this when overlapping scopes land
-//!   in task 1.5).
+//! * `repo` — vestigial after task 7.1c. Post-7.1 the daemon no longer
+//!   pre-classifies issues by repo; the agent picks the repo on its first
+//!   turn through the `roki_open_worktree` tool. The orchestrator already
+//!   ignores this field (see `orchestrator::core::dispatch_tracker_event`).
+//!   It is retained as a build-compat stamp until 7.1f rewrites the
+//!   bootstrap; a future task will drop it.
 //! * `issue` — the Linear human-readable identifier (`ENG-123`).
 //! * `title`, `description` — display fields.
 //! * `state` — bucketed state (Requirement 3.4).
 //! * `labels` — every label name attached to the issue (Requirement 3.4).
-//! * `team_or_scope` — the Linear team key the issue belongs to
-//!   (Requirement 3.4: "team or scope identifier").
+//!
+//! Task 7.1c dropped the `team_or_scope` field. Post-agent-driven-selection
+//! the daemon does not need a team-or-scope identifier on the event because
+//! it does not pre-route on it; the agent reads the issue and decides.
 
 use crate::orchestrator::state::{IssueId, RepoId};
 
@@ -26,7 +29,7 @@ use crate::orchestrator::state::{IssueId, RepoId};
 ///
 /// The tracker MUST NOT leak Linear's full state taxonomy upstream — the
 /// orchestrator only needs to know which lifecycle bucket an issue currently
-/// occupies so it can drive the per-`(repo, issue)` state machine.
+/// occupies so it can drive the per-issue state machine.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum IssueState {
     /// Linear `unstarted` / `started` types — the issue is in active
@@ -63,16 +66,19 @@ impl IssueState {
 ///
 /// The shape is the contract pinned by Requirement 3.4 and design.md. The
 /// orchestrator subscribes to a stream of these and treats them as
-/// idempotent on `(repo, issue, state)`.
+/// idempotent on `(issue, state)` post-task-7.1b.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NormalizedIssue {
+    /// Vestigial repo stamp. The orchestrator ignores this field; agent-driven
+    /// repo selection (task 7.1) decided the daemon no longer pre-classifies
+    /// issues by repo. Retained as a build-compat field until the bootstrap
+    /// rewrite in 7.1f removes the per-repo construction call sites.
     pub repo: RepoId,
     pub issue: IssueId,
     pub title: String,
     pub description: String,
     pub state: IssueState,
     pub labels: Vec<String>,
-    pub team_or_scope: String,
 }
 
 #[cfg(test)]

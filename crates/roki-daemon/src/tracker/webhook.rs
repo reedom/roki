@@ -52,35 +52,57 @@ type HmacSha256 = Hmac<Sha256>;
 
 /// Shared state injected into the axum handler.
 ///
-/// `repo` is the [`RepoId`] the receiver associates with every emitted
-/// [`NormalizedIssue`]. design.md's "TrackerAdapter — Service Interface"
-/// notes that the polling poller knows the repo per scope at construction
-/// time; the webhook receiver follows the same convention pending the
-/// orchestrator-side router (task 1.5 / 3.x). `team_or_scope_fallback` is
-/// used when a Linear payload omits a `team.key` field — it matches the
-/// fallback the polling adapter applies (`scope` team key or empty string).
+/// Post-task-7.1c the webhook receiver no longer pre-routes by repo — the
+/// agent picks the repo on its first turn through `roki_open_worktree`
+/// (see design-agent-driven-repo-selection.md). The single workspace-level
+/// HMAC secret in `[linear].webhook_secret_env` keys the entire workspace.
+///
+/// `repo` is the vestigial stamp the receiver writes into the emitted
+/// [`NormalizedIssue.repo`] field for downstream build-compat with
+/// `runtime.rs`. The orchestrator already ignores it. The 7.1f bootstrap
+/// rewrite will switch every call site to [`WebhookState::new_workspace`]
+/// and the field will disappear at that point.
 #[derive(Clone)]
 pub struct WebhookState {
     secret: SecretString,
     repo: RepoId,
-    team_or_scope_fallback: String,
     sink: mpsc::Sender<NormalizedIssue>,
 }
 
 impl WebhookState {
-    /// Build a new [`WebhookState`].
+    /// Build a [`WebhookState`] with a vestigial repo stamp.
+    ///
+    /// Retained for build-compat with `runtime.rs` until the 7.1f bootstrap
+    /// rewrite. New call sites should use [`Self::new_workspace`].
+    ///
+    /// The `_team_or_scope_fallback` argument is accepted for source
+    /// compatibility but is ignored: post-task-7.1c the receiver does not
+    /// emit a team-or-scope identifier on the [`NormalizedIssue`].
     pub fn new(
         secret: SecretString,
         repo: RepoId,
-        team_or_scope_fallback: impl Into<String>,
+        _team_or_scope_fallback: impl Into<String>,
         sink: mpsc::Sender<NormalizedIssue>,
     ) -> Self {
-        Self {
-            secret,
-            repo,
-            team_or_scope_fallback: team_or_scope_fallback.into(),
-            sink,
-        }
+        Self::with_repo_stamp(secret, repo, sink)
+    }
+
+    /// Build a workspace-level [`WebhookState`].
+    ///
+    /// This is the constructor the 7.1f bootstrap rewrite will adopt: a
+    /// single workspace-level HMAC secret with no per-repo stamp at all
+    /// (the emitted `NormalizedIssue` still carries an empty `RepoId` so
+    /// the existing `NormalizedIssue` shape stays compilable through 7.1f).
+    pub fn new_workspace(secret: SecretString, sink: mpsc::Sender<NormalizedIssue>) -> Self {
+        Self::with_repo_stamp(secret, RepoId::new(""), sink)
+    }
+
+    fn with_repo_stamp(
+        secret: SecretString,
+        repo: RepoId,
+        sink: mpsc::Sender<NormalizedIssue>,
+    ) -> Self {
+        Self { secret, repo, sink }
     }
 }
 
@@ -201,10 +223,6 @@ fn normalize(envelope: WebhookEnvelope, state: &WebhookState) -> NormalizedIssue
                 .collect::<Vec<_>>()
         })
         .unwrap_or_default();
-    let team_or_scope = data
-        .team
-        .map(|t| t.key)
-        .unwrap_or_else(|| state.team_or_scope_fallback.clone());
     let bucket = IssueState::from_linear_type(data.state.kind.as_deref().unwrap_or(""));
 
     NormalizedIssue {
@@ -214,7 +232,6 @@ fn normalize(envelope: WebhookEnvelope, state: &WebhookState) -> NormalizedIssue
         description: data.description.unwrap_or_default(),
         state: bucket,
         labels,
-        team_or_scope,
     }
 }
 
@@ -240,8 +257,6 @@ struct WebhookIssueData {
     state: WebhookStateField,
     #[serde(default)]
     labels: Option<WebhookLabelsEnvelope>,
-    #[serde(default)]
-    team: Option<WebhookTeamField>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -259,11 +274,6 @@ struct WebhookLabelsEnvelope {
 #[derive(Debug, Deserialize)]
 struct WebhookLabelNode {
     name: String,
-}
-
-#[derive(Debug, Deserialize)]
-struct WebhookTeamField {
-    key: String,
 }
 
 #[cfg(test)]

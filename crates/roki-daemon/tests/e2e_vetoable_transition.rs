@@ -152,7 +152,6 @@ fn issue_event(repo: &str, issue: &str, state: TrackerIssueState) -> NormalizedI
         description: String::new(),
         state,
         labels: Vec::new(),
-        team_or_scope: "ENG".to_string(),
     }
 }
 

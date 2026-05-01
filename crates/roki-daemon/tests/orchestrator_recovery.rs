@@ -94,7 +94,6 @@ fn linear_active(repo: &str, issue: &str) -> ((RepoId, IssueId), NormalizedIssue
         description: String::new(),
         state: TrackerIssueState::Active,
         labels: Vec::new(),
-        team_or_scope: "ENG".to_string(),
     };
     (key, value)
 }

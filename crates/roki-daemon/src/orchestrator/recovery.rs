@@ -351,7 +351,6 @@ fn synthetic_active_event(
         description: String::new(),
         state: TrackerIssueState::Active,
         labels: Vec::new(),
-        team_or_scope: String::new(),
     }
 }
 
@@ -378,7 +377,6 @@ mod tests {
             description: String::new(),
             state: TrackerIssueState::Active,
             labels: Vec::new(),
-            team_or_scope: "ENG".to_string(),
         };
         (k, v)
     }
