@@ -39,7 +39,7 @@ use tokio::sync::mpsc;
 use tracing::{debug, warn};
 
 use crate::config::SecretString;
-use crate::orchestrator::state::{IssueId, RepoId};
+use crate::orchestrator::state::IssueId;
 use crate::tracker::model::{IssueState, NormalizedIssue};
 
 /// Default webhook path matching design.md's API Contract row.
@@ -57,52 +57,28 @@ type HmacSha256 = Hmac<Sha256>;
 /// (see design-agent-driven-repo-selection.md). The single workspace-level
 /// HMAC secret in `[linear].webhook_secret_env` keys the entire workspace.
 ///
-/// `repo` is the vestigial stamp the receiver writes into the emitted
-/// [`NormalizedIssue.repo`] field for downstream build-compat with
-/// `runtime.rs`. The orchestrator already ignores it. The 7.1f bootstrap
-/// rewrite will switch every call site to [`WebhookState::new_workspace`]
-/// and the field will disappear at that point.
+/// Workspace-level webhook state (post-7.1f).
+///
+/// The legacy per-repo `repo` stamp and the `_team_or_scope_fallback`
+/// constructor argument were both dropped: the agent picks the repo at
+/// runtime via `roki_open_worktree`, so a daemon-side stamp on the
+/// emitted `NormalizedIssue` conveyed nothing the orchestrator could rely
+/// on. Construct via [`Self::new_workspace`].
 #[derive(Clone)]
 pub struct WebhookState {
     secret: SecretString,
-    repo: RepoId,
     sink: mpsc::Sender<NormalizedIssue>,
 }
 
 impl WebhookState {
-    /// Build a [`WebhookState`] with a vestigial repo stamp.
-    ///
-    /// Retained for build-compat with `runtime.rs` until the 7.1f bootstrap
-    /// rewrite. New call sites should use [`Self::new_workspace`].
-    ///
-    /// The `_team_or_scope_fallback` argument is accepted for source
-    /// compatibility but is ignored: post-task-7.1c the receiver does not
-    /// emit a team-or-scope identifier on the [`NormalizedIssue`].
-    pub fn new(
-        secret: SecretString,
-        repo: RepoId,
-        _team_or_scope_fallback: impl Into<String>,
-        sink: mpsc::Sender<NormalizedIssue>,
-    ) -> Self {
-        Self::with_repo_stamp(secret, repo, sink)
-    }
-
     /// Build a workspace-level [`WebhookState`].
     ///
-    /// This is the constructor the 7.1f bootstrap rewrite will adopt: a
-    /// single workspace-level HMAC secret with no per-repo stamp at all
-    /// (the emitted `NormalizedIssue` still carries an empty `RepoId` so
-    /// the existing `NormalizedIssue` shape stays compilable through 7.1f).
+    /// One HMAC secret, one webhook route, one sink — the 7.1f bootstrap
+    /// composes exactly one of these for the entire daemon. Per the
+    /// agent-driven design, no per-repo stamp is emitted on the
+    /// [`NormalizedIssue`].
     pub fn new_workspace(secret: SecretString, sink: mpsc::Sender<NormalizedIssue>) -> Self {
-        Self::with_repo_stamp(secret, RepoId::new(""), sink)
-    }
-
-    fn with_repo_stamp(
-        secret: SecretString,
-        repo: RepoId,
-        sink: mpsc::Sender<NormalizedIssue>,
-    ) -> Self {
-        Self { secret, repo, sink }
+        Self { secret, sink }
     }
 }
 
@@ -211,7 +187,7 @@ async fn handle_webhook(
     StatusCode::NO_CONTENT
 }
 
-fn normalize(envelope: WebhookEnvelope, state: &WebhookState) -> NormalizedIssue {
+fn normalize(envelope: WebhookEnvelope, _state: &WebhookState) -> NormalizedIssue {
     let WebhookEnvelope { data, .. } = envelope;
     let labels = data
         .labels
@@ -226,7 +202,6 @@ fn normalize(envelope: WebhookEnvelope, state: &WebhookState) -> NormalizedIssue
     let bucket = IssueState::from_linear_type(data.state.kind.as_deref().unwrap_or(""));
 
     NormalizedIssue {
-        repo: state.repo.clone(),
         issue: IssueId::new(data.identifier),
         title: data.title,
         description: data.description.unwrap_or_default(),

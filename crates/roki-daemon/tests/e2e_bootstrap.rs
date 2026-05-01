@@ -1,16 +1,18 @@
-//! End-to-end bootstrap smoke test (task 5.1).
+//! End-to-end bootstrap smoke test (task 5.1, re-enabled by 7.1f).
 //!
 //! Drives `runtime::run_with_shutdown` against a synthesised config that
-//! points at a wiremock Linear server, mounts a per-repo webhook route, and
-//! supervises the `fake_claude` example binary. The test asserts that:
+//! points at a wiremock Linear server, mounts the single workspace-level
+//! webhook route, and supervises the `fake_claude` example binary. The
+//! test asserts that:
 //!
 //! 1. The bootstrap composes every component end-to-end (config → logging →
-//!    workflow loader → workspace → orchestrator → tracker pollers → axum
-//!    webhook server) without panicking.
+//!    workflow loader → session/worktree state → orchestrator → tracker →
+//!    axum webhook server) without panicking.
 //! 2. The axum server actually binds the configured port — the test connects
 //!    a TCP socket to the bound address.
-//! 3. A correctly-signed Linear webhook posted to `/linear/webhook/<repo-id>`
-//!    is accepted (HTTP 204) and forwarded into the orchestrator.
+//! 3. A correctly-signed Linear webhook posted to the single workspace-level
+//!    `/linear/webhook` route is accepted (HTTP 204) and forwarded into
+//!    the orchestrator.
 //! 4. The orchestrator drives the issue through the documented happy-path
 //!    transition prefix (`Discovered -> Queued -> Active ->
 //!    AwaitingReview`).
@@ -20,8 +22,9 @@
 //!
 //! Determinism notes:
 //!
-//! * Secrets (Linear token + webhook HMAC secret) live in tempfiles or in
-//!   the literal `webhook_secret` config field. The workspace lint
+//! * Secrets are file-backed: the Linear API token via `[linear].token_file`
+//!   and the webhook HMAC secret via the post-7.1f
+//!   `[linear].webhook_secret_file` test seam. The workspace lint
 //!   `unsafe_code = "forbid"` blocks `std::env::set_var`, so the test
 //!   sidesteps env-var mutation entirely.
 //! * Server port is discovered via `TcpListener::bind("127.0.0.1:0")` and
@@ -128,6 +131,26 @@ fn started_payload() -> Value {
     })
 }
 
+fn completed_payload() -> Value {
+    json!({
+        "data": {
+            "issues": {
+                "nodes": [
+                    {
+                        "id": "uuid-1",
+                        "identifier": TEST_ISSUE_ID,
+                        "title": "bootstrap smoke",
+                        "description": "drive the daemon end-to-end",
+                        "state": { "type": "completed", "name": "Done" },
+                        "labels": { "nodes": [] },
+                        "team": { "key": "ENG" }
+                    }
+                ]
+            }
+        }
+    })
+}
+
 /// Linear webhook envelope that mirrors the fixture used by
 /// `tests/tracker_webhook.rs` so the bootstrap path exercises the same
 /// post-signature decode shape the receiver was tested against in 2.6.
@@ -164,25 +187,31 @@ fn write_fixtures(
     workflow_path: &Path,
     config_path: &Path,
     linear_token_path: &Path,
+    webhook_secret_path: &Path,
     bind_port: u16,
 ) {
     std::fs::write(workflow_path, minimal_workflow()).expect("write workflow");
     std::fs::write(linear_token_path, TEST_LINEAR_TOKEN).expect("write linear token");
+    std::fs::write(webhook_secret_path, TEST_WEBHOOK_SECRET).expect("write webhook secret");
 
     let claude_binary = fake_claude_path().to_str().expect("utf-8 fake_claude path");
     let workflow_path_str = workflow_path.to_str().expect("utf-8 workflow path");
     let token_file_str = linear_token_path.to_str().expect("utf-8 token file");
+    let webhook_secret_path_str = webhook_secret_path
+        .to_str()
+        .expect("utf-8 webhook secret path");
 
-    // The bootstrap will resolve the repo path at runtime via `ghq`. Tests
-    // that ride `runtime::run_with_shutdown` therefore require `wt` and
-    // `ghq` on PATH AND a real ghq-managed checkout for `owner/{repo}`.
-    // TODO(7.1f): post-7.1a the workspace-level webhook secret is resolved
-    // from `[linear].webhook_secret_env`, and the workspace-level workflow
-    // policy from `[workflow].path`. Setting an env var here is blocked by
-    // the crate's `unsafe_code = "forbid"` lint, so this fixture writes the
-    // new shape but the test itself is currently `#[ignore]`-d until the
-    // bootstrap is reshimmed by 7.1f to accept a test-injectable secret.
-    let _ = TEST_WEBHOOK_SECRET; // silence dead-code lints until 7.1f.
+    // The bootstrap resolves the repo path at runtime via `ghq`. Tests that
+    // ride `runtime::run_with_shutdown` therefore require `wt` and `ghq` on
+    // PATH AND a real ghq-managed checkout for `owner/{repo}`.
+    //
+    // Post-7.1f the webhook secret is read from the new
+    // `[linear].webhook_secret_file` test seam (the workspace lint
+    // `unsafe_code = "forbid"` blocks `std::env::set_var` in tests, so an
+    // env-var-backed secret is unreachable from this test). The
+    // `webhook_secret_env` field is set to a deterministic name so the
+    // bootstrap surfaces a meaningful error if the file seam is ever
+    // dropped — but the file path always wins.
     let toml = format!(
         r#"
 polling_cadence_seconds = 60
@@ -197,6 +226,7 @@ port = {bind_port}
 token_file = "{token_file_str}"
 endpoint = "{server_uri}/graphql"
 webhook_secret_env = "ROKI_BOOTSTRAP_TEST_WEBHOOK_SECRET"
+webhook_secret_file = "{webhook_secret_path_str}"
 
 [workflow]
 path = "{workflow_path_str}"
@@ -312,10 +342,6 @@ fn hmac_hex(secret: &[u8], body: &[u8]) -> String {
 }
 
 #[tokio::test]
-#[ignore = "TODO(7.1f): bootstrap requires the workspace-level webhook secret \
-            env-var, but the crate's unsafe_code lint forbids std::env::set_var \
-            in tests. Re-enable when 7.1f reshims the bootstrap with a \
-            test-injectable secret seam."]
 async fn bootstrap_drives_issue_through_documented_happy_path() {
     if !bootstrap_prerequisites_ready(TEST_REPO_ID) {
         eprintln!(
@@ -324,6 +350,11 @@ async fn bootstrap_drives_issue_through_documented_happy_path() {
         return;
     }
     // ---- Fake Linear ---------------------------------------------------
+    // Progressive-mount pattern (5.1 follow-up c): start with the
+    // `started` payload so the orchestrator drives Discovered → Queued →
+    // Active → AwaitingReview, then `server.reset()` and mount the
+    // `completed` payload so the actor advances through TerminalSuccess
+    // → Cleaning end-to-end.
     let server = MockServer::start().await;
     Mock::given(method("POST"))
         .and(path("/graphql"))
@@ -338,6 +369,7 @@ async fn bootstrap_drives_issue_through_documented_happy_path() {
     let config_dir = TempDir::new().expect("config tempdir");
     let config_path = config_dir.path().join("roki.toml");
     let linear_token_path = config_dir.path().join("linear-token");
+    let webhook_secret_path = config_dir.path().join("webhook-secret");
 
     let bind_port = pick_free_port();
     write_fixtures(
@@ -345,6 +377,7 @@ async fn bootstrap_drives_issue_through_documented_happy_path() {
         &workflow_path,
         &config_path,
         &linear_token_path,
+        &webhook_secret_path,
         bind_port,
     );
 
@@ -386,7 +419,9 @@ async fn bootstrap_drives_issue_through_documented_happy_path() {
     );
 
     // ---- Post a signed Linear webhook ----------------------------------
-    let url = format!("http://127.0.0.1:{bind_port}/linear/webhook/{TEST_REPO_ID}");
+    // Post-7.1f: the daemon mounts the single workspace-level
+    // `/linear/webhook` route — no per-repo URL fan-out.
+    let url = format!("http://127.0.0.1:{bind_port}/linear/webhook");
     let body_bytes = serde_json::to_vec(&webhook_envelope()).expect("encode envelope");
     let signature = hmac_hex(TEST_WEBHOOK_SECRET.as_bytes(), &body_bytes);
 
@@ -423,26 +458,51 @@ async fn bootstrap_drives_issue_through_documented_happy_path() {
         recorder.log.lock().await,
     );
 
-    // The documented prefix of the happy-path sequence must be present in
-    // order. The suffix (`AwaitingReview -> TerminalSuccess -> Cleaning`)
-    // requires the tracker to flip to `completed`, which the smoke test
-    // does not orchestrate.
+    // ---- 5.1 follow-up (c): exercise the bootstrap-driven cleanup arc -
+    // Reset the wiremock and mount the terminal payload so the polling
+    // tracker flips the issue to `completed`. The orchestrator advances
+    // `AwaitingReview → TerminalSuccess → Cleaning` end-to-end.
+    server.reset().await;
+    Mock::given(method("POST"))
+        .and(path("/graphql"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(completed_payload()))
+        .mount(&server)
+        .await;
+
+    let recorder_for_cleaning = recorder.clone();
+    let reached_cleaning = await_cond(Duration::from_secs(30), || {
+        let log = recorder_for_cleaning.log.try_lock();
+        match log {
+            Ok(entries) => entries.iter().any(|ev| ev.next == WorkerState::Cleaning),
+            Err(_) => false,
+        }
+    })
+    .await;
+    assert!(
+        reached_cleaning,
+        "actor must reach Cleaning; recorded so far: {:?}",
+        recorder.log.lock().await,
+    );
+
+    // The documented full happy-path sequence must be present in order.
     let log = recorder.log.lock().await.clone();
     let pairs: Vec<(WorkerState, WorkerState)> =
         log.iter().map(|ev| (ev.previous, ev.next)).collect();
-    let expected_prefix = [
+    let expected = [
         (WorkerState::Discovered, WorkerState::Queued),
         (WorkerState::Queued, WorkerState::Active),
         (WorkerState::Active, WorkerState::AwaitingReview),
+        (WorkerState::AwaitingReview, WorkerState::TerminalSuccess),
+        (WorkerState::TerminalSuccess, WorkerState::Cleaning),
     ];
     assert!(
-        expected_prefix.len() <= pairs.len(),
-        "bootstrap must commit at least the happy-path prefix; got {pairs:?}",
+        expected.len() <= pairs.len(),
+        "bootstrap must commit the full happy-path; got {pairs:?}",
     );
     assert_eq!(
-        &pairs[..expected_prefix.len()],
-        &expected_prefix[..],
-        "bootstrap-driven transitions must match the documented happy-path prefix",
+        &pairs[..expected.len()],
+        &expected[..],
+        "bootstrap-driven transitions must match the documented happy-path",
     );
     for ev in &log {
         assert_eq!(ev.issue.as_str(), TEST_ISSUE_ID);

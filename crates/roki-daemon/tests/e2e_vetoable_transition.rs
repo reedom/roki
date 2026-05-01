@@ -56,9 +56,7 @@ use roki_daemon::orchestrator::core::{EngineLauncher, LaunchError, Orchestrator}
 use roki_daemon::orchestrator::events::{EventBus, SubscriberError, TransitionSubscriber};
 use roki_daemon::orchestrator::hooks::HookRegistry;
 use roki_daemon::orchestrator::read::OrchestratorRead;
-use roki_daemon::orchestrator::state::{
-    IssueId, RepoId, TransitionEvent, VetoDecision, WorkerState,
-};
+use roki_daemon::orchestrator::state::{IssueId, TransitionEvent, VetoDecision, WorkerState};
 use roki_daemon::shutdown::ShutdownSignal;
 use roki_daemon::tracker::model::{IssueState as TrackerIssueState, NormalizedIssue};
 mod common;
@@ -146,9 +144,8 @@ impl TransitionSubscriber for RecordingObserver {
     }
 }
 
-fn issue_event(repo: &str, issue: &str, state: TrackerIssueState) -> NormalizedIssue {
+fn issue_event(_repo: &str, issue: &str, state: TrackerIssueState) -> NormalizedIssue {
     NormalizedIssue {
-        repo: RepoId::new(repo),
         issue: IssueId::new(issue),
         title: "vetoable transition test".to_string(),
         description: String::new(),

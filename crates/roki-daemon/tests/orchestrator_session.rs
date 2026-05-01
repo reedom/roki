@@ -69,7 +69,6 @@ impl TransitionSubscriber for RecordingObserver {
 
 fn issue_event(state: TrackerIssueState) -> NormalizedIssue {
     NormalizedIssue {
-        repo: RepoId::new("any-repo"),
         issue: IssueId::new("ENG-42"),
         title: String::new(),
         description: String::new(),

@@ -18,25 +18,15 @@
 //!   from either side stays in `TerminalSuccess`);
 //! * shuts down cooperatively when [`ShutdownSignal::wait`] resolves.
 //!
-//! ## What this module does NOT do (post-7.1b)
-//!
-//! Workspace lifecycle wiring (session-tempdir creation on `Queued -> Active`
-//! and worktree teardown on `Cleaning`) is replaced with NoOp shims pending
-//! task 7.1d (`SessionManager` + `WorktreeRegistry`). The NoOp shims keep
-//! the actor advancing through the lifecycle so unit tests for the
-//! retry-budget loop, vetoable-transition gating, and pre-cleanup hooks all
-//! exercise the same arcs they did pre-7.1b. Anything that touched real
-//! `wt`/`ghq` plumbing has been pulled out and tagged `// TODO(7.1d):`.
-//!
 //! ## Boundary
 //!
 //! The orchestrator depends on a small [`EngineLauncher`] trait rather than a
 //! concrete adapter so the integration test in `tests/orchestrator_core.rs`
-//! can stub engine launches without spawning real subprocesses. The
-//! `workspace: Arc<dyn Workspace>` field is retained as a placeholder for
-//! restart recovery's `list_existing` call (see [`Orchestrator::with_recovery`]);
-//! the worker actor itself no longer calls `ensure`/`remove`. Task 7.1d
-//! drops the `Workspace` trait dependency entirely.
+//! can stub engine launches without spawning real subprocesses. Workspace
+//! lifecycle is owned by [`SessionManager`] (per-issue tempdir) and
+//! [`WorktreeRegistry`] (per-issue worktrees opened by the agent via
+//! `roki_open_worktree`). The legacy `Workspace` trait was dropped in
+//! task 7.1d.
 //!
 //! [`ClaudeEngineAdapter::launch`] already matches the [`EngineLauncher`]
 //! signature so a wrapper impl can be added without breaking core.
@@ -61,12 +51,12 @@ use crate::orchestrator::recovery::{
     run_recovery,
 };
 use crate::orchestrator::state::{
-    CorrelationId, IssueId, RepoId, TransitionEvent, TransitionTrigger, VetoDecision, WorkerState,
+    CorrelationId, IssueId, TransitionEvent, TransitionTrigger, VetoDecision, WorkerState,
 };
 use crate::permissions::{PermissionMode, PermissionSource, ResolvedPermission};
 use crate::session::SessionManager;
 use crate::shutdown::ShutdownSignal;
-use crate::tools::WtTool;
+use crate::tools::{WorkerToolFactory, WtTool};
 use crate::tracker::model::{IssueState as TrackerIssueState, NormalizedIssue};
 use crate::workflow::{ElicitationsMode, SandboxMode};
 use crate::worktrees::WorktreeRegistry;
@@ -223,6 +213,13 @@ pub struct Orchestrator {
     /// the millisecond range so retry traces complete deterministically in
     /// well under one second (task 3.7).
     engine_policy: EnginePolicy,
+    /// Optional factory that produces a per-worker tool registry on each
+    /// engine launch (task 7.1f). When `None` the orchestrator launches
+    /// the engine without an attached registry — the catalog is empty and
+    /// no agent tool dispatch path is wired. Production callers always
+    /// supply a [`crate::tools::DefaultWorkerToolFactory`] so each worker
+    /// sees `linear_graphql` and a per-issue `roki_open_worktree`.
+    tool_factory: Option<Arc<dyn WorkerToolFactory>>,
 }
 
 impl Orchestrator {
@@ -262,7 +259,18 @@ impl Orchestrator {
             state: Arc::new(RwLock::new(HashMap::new())),
             poisoned: Arc::new(RwLock::new(HashSet::new())),
             engine_policy: EnginePolicy::default(),
+            tool_factory: None,
         }
+    }
+
+    /// Attach a [`WorkerToolFactory`] (task 7.1f). The orchestrator
+    /// invokes the factory on every engine launch to compose a per-worker
+    /// tool registry containing `linear_graphql` AND the per-issue
+    /// `roki_open_worktree` tool.
+    #[must_use]
+    pub fn with_tool_factory(mut self, factory: Arc<dyn WorkerToolFactory>) -> Self {
+        self.tool_factory = Some(factory);
+        self
     }
 
     /// Replace the per-orchestrator [`EnginePolicy`] with `policy`.
@@ -470,6 +478,7 @@ impl Orchestrator {
             wt: Arc::clone(&self.wt),
             engine_policy: self.engine_policy,
             shutdown: self.shutdown.clone(),
+            tool_factory: self.tool_factory.clone(),
         };
         tokio::spawn(async move { actor.run(rx).await });
     }
@@ -512,6 +521,11 @@ struct WorkerActor {
     /// Cloned shutdown signal so the actor can abort a Backoff sleep cleanly
     /// when the orchestrator is asked to wind down (Requirement 1.3).
     shutdown: ShutdownSignal,
+    /// Per-worker tool factory propagated from the orchestrator. The
+    /// actor consults it on every [`launch_once`] call to compose a fresh
+    /// `Arc<dyn Registry>` carrying both `linear_graphql` and the
+    /// per-issue `roki_open_worktree` tool.
+    tool_factory: Option<Arc<dyn WorkerToolFactory>>,
 }
 
 impl WorkerActor {
@@ -821,11 +835,21 @@ impl WorkerActor {
     ) -> Option<WorkerOutcome> {
         let (events_tx, mut events_rx) = mpsc::channel::<SupervisedEvent>(64);
         let engine = Arc::clone(&self.engine);
+        // Task 7.1f: build the per-worker tool registry. The factory
+        // produces a fresh `Arc<dyn Registry>` carrying every daemon-wide
+        // tool plus a per-issue `OpenWorktreeTool`. The catalog snapshot
+        // is forwarded into the worker's prelude so the agent sees both
+        // `linear_graphql` and `roki_open_worktree`.
+        let tool_catalog = match self.tool_factory.as_deref() {
+            Some(factory) => factory.build_for_issue(&self.key).catalog(),
+            None => Vec::new(),
+        };
         let ctx = build_worker_context(
             self.key.clone(),
             correlation,
             workspace_dir.to_path_buf(),
             self.engine_policy,
+            tool_catalog,
         );
         let launch_handle = tokio::spawn(async move { engine.launch(ctx, events_tx).await });
 
@@ -1140,29 +1164,23 @@ impl WorkerActor {
 /// [`crate::engine::ClaudeEngineAdapter`] would already accept and let the
 /// orchestrator core land without crossing into 3.4 / 3.5 territory.
 ///
-/// The [`WorkerContext`] still carries a `repo: RepoId` field for backwards
-/// compatibility with the engine prelude surface (`engine/claude.rs` is
-/// outside this task's boundary). We populate it with a placeholder value
-/// because the state-machine no longer keys by repo and the agent itself
-/// chooses the repo via `roki_open_worktree`. 7.1f removes this field from
-/// `WorkerContext` when the engine surface is rewritten alongside the
-/// bootstrap finalization.
+/// Post-7.1f: the legacy `repo: RepoId` field was dropped from
+/// `WorkerContext`. The agent picks the repo at runtime via
+/// `roki_open_worktree`, so an actor-level repo stamp on the worker
+/// context conveyed nothing the agent could rely on.
 fn build_worker_context(
     issue: IssueId,
     correlation: CorrelationId,
     workspace_dir: PathBuf,
     policy: EnginePolicy,
+    tool_catalog: Vec<crate::tools::ToolDescriptor>,
 ) -> WorkerContext {
     WorkerContext {
-        // TODO(7.1f): drop `repo` from `WorkerContext` when the engine
-        // surface is rewritten. The agent picks the repo at runtime via
-        // `roki_open_worktree`, so an actor-level placeholder is correct.
-        repo: RepoId::new(""),
         issue,
         correlation_id: correlation,
         workspace_dir,
         prompt: String::new(),
-        tool_catalog: Vec::new(),
+        tool_catalog,
         permission: ResolvedPermission {
             mode: PermissionMode::Allowlist {
                 settings_path: PathBuf::new(),
@@ -1272,7 +1290,6 @@ mod tests {
 
     fn issue_event(state: TrackerIssueState) -> NormalizedIssue {
         NormalizedIssue {
-            repo: RepoId::new("repo-a"),
             issue: IssueId::new("ENG-1"),
             title: String::new(),
             description: String::new(),

@@ -46,7 +46,10 @@ repositories, and supervises a long-lived `claude --print --output-format
 stream-json` subprocess that performs the implementation work for that issue.
 The daemon is a passive observer of tracker state and an active controller of
 subprocess lifecycle and workspace filesystem state. It is multi-repo from day
-one: workspaces are keyed by the tuple `(repo, issue)`.
+one: per-issue runtime state is keyed by `IssueId` alone, and the agent picks
+which repo(s) to operate in by calling `roki_open_worktree` (§7). Repo
+association is captured by the `WorktreeRegistry` per worker (§2.3), not on
+the state-machine key.
 
 ### 1.2 What roki explicitly does NOT do
 
@@ -74,8 +77,13 @@ narrow adapter ports:
 - **Tracker adapter** — read-only Linear adapter (webhook hot path, polling
   fallback, 429 backoff).
 - **Engine adapter** — launches and supervises the `claude` subprocess.
-- **Workspace manager** — per-`(repo, issue)` directory lifecycle with path
-  safety.
+- **Session tempdir manager** — per-`IssueId` session directory lifecycle
+  rooted at `dirs::cache_dir()/roki/sessions/<issue>`, with path-safety
+  enforcement so the daemon never writes outside that root.
+- **Worktree registry** — per-worker mapping `IssueId →
+  Vec<(RepoId, BranchName, PathBuf)>` recording every git worktree the agent
+  has opened via `roki_open_worktree`. Multi-repo work for one issue surfaces
+  here, not on the state-machine key.
 - **Workflow loader** — reads, validates, and hot-reloads `WORKFLOW.md`.
 - **Agent tool registry** — exposes the audited tool surface to the agent.
 
@@ -90,9 +98,11 @@ roki is symphony-aligned: in-memory orchestrator with no persistent database,
 recovery driven by re-reading the tracker and the filesystem on restart,
 `WORKFLOW.md` as the user-facing policy boundary, long-lived stdio agent
 session per active issue. roki diverges from symphony in being multi-repo
-from day one (workspaces keyed by `(repo, issue)`) and in publishing stable
-extension points (this document) so dependent specs can plug in without
-forking the orchestrator.
+from day one — one `IssueId` worker can open worktrees against multiple
+configured repos via `roki_open_worktree`, with the resulting
+`(RepoId, BranchName, PathBuf)` tuples accumulated on the per-worker
+`WorktreeRegistry` (§2.3) — and in publishing stable extension points (this
+document) so dependent specs can plug in without forking the orchestrator.
 
 ---
 
@@ -124,23 +134,36 @@ The configuration must declare:
   `<host>/<owner>/<repo>`); the daemon refuses to start when two entries
   declare the same identifier and names the offending entry. The local
   checkout path is resolved at runtime via `ghq list -p` (cloning on miss
-  via `ghq get`); workspaces are git worktrees laid out by the external
-  `wt` CLI (see §6). Operators must install both `wt` and `ghq` on
-  `$PATH`; absence of either at startup is a hard refusal. An empty
-  allowlist starts the daemon with a WARN log; every `roki_open_worktree`
-  invocation then returns a typed allowlist-rejection error to the agent.
-- **A workspace-level `[linear]` block** carrying the Linear API token
-  source (`token_env`, defaults to `LINEAR_API_TOKEN`; or `token_file`
-  for file-backed tokens), the workspace-level webhook secret env-var
-  name (`webhook_secret_env`, required), and an optional
-  `endpoint` override (test-only — production callers leave this unset
-  so the daemon hits `https://api.linear.app/graphql`). The daemon
-  refuses to start if the API token or the webhook secret cannot be
-  resolved.
+  via `ghq get`) when the agent calls `roki_open_worktree` (§7);
+  workspaces are git worktrees laid out by the external `wt` CLI (see §6).
+  Operators must install both `wt` and `ghq` on `$PATH`; absence of either
+  at startup is a hard refusal. An empty allowlist starts the daemon with
+  a WARN log; every `roki_open_worktree` invocation then returns a typed
+  `RepoNotInAllowlist` error to the agent. The daemon does NOT pre-classify
+  Linear issues by repo — repo selection is the agent's first-turn decision
+  via `roki_open_worktree` (§2.3).
+- **A workspace-level `[linear]` block** carrying:
+  - `token_env` (defaults to `LINEAR_API_TOKEN`) or `token_file`
+    (file-backed alternative) for the Linear API token;
+  - `webhook_secret_env` (required) declaring the env-var name resolving
+    to the workspace-level webhook HMAC secret;
+  - an optional `endpoint` override (test-only — production callers leave
+    this unset so the daemon hits `https://api.linear.app/graphql`).
+
+  The daemon refuses to start if the API token or the webhook secret
+  cannot be resolved. Both the token and the webhook secret are added to
+  the redaction list before any structured event is emitted.
 - **A workspace-level `[workflow]` block** carrying the path to the
   single workspace-level `WORKFLOW.md` policy file (`path`, required).
   The same policy applies regardless of which configured repo(s) the
   agent operates in. Missing or unreadable paths are a hard refusal.
+  Per-repo `WORKFLOW.md` overrides are NOT supported (locked decision
+  #6 in `design-agent-driven-repo-selection.md`).
+- **An optional `[recovery]` block** carrying the operator-configurable
+  `issue_branch_pattern` regex (default `^[A-Z]+-\d+$`). The restart
+  recovery walk filters `git worktree list --porcelain` branches against
+  this pattern when admitting them as candidate `IssueId`s (§12). An
+  invalid regex is a hard refusal at config load.
 - **A permission strategy**: either an allowlist (the path to a Claude Code
   settings file) or the explicit dangerous-fallback flag (see §13). If
   neither is configured, the daemon refuses to start. The dangerous fallback
@@ -156,18 +179,32 @@ The configuration must declare:
   hard refusal at startup.
 - **A log level** and **log destination** (stdout, file, or both).
 
-### 2.3 Multi-repo routing
+### 2.3 Agent-driven repo selection
 
-When two configured repositories declare overlapping Linear scopes, the
-daemon routes each Linear issue to exactly one repository according to a
-deterministic precedence rule and logs the decision. If a configured
-repository path does not exist or is not a Git working tree, the daemon
-marks that repository unhealthy, refuses to schedule work for it, and
-continues serving the remaining repositories.
+The daemon does NOT pre-classify Linear issues by repository. Every
+Linear issue update the API token can see is admitted into the
+orchestrator: one polling `LinearTracker` queries the entire workspace,
+and one `POST /linear/webhook` route receives signed webhooks against
+the single workspace-level HMAC secret. The orchestrator spawns a worker
+for every new `IssueId` it observes.
 
-All per-issue runtime state is keyed by the tuple
-`(repository identifier, issue identifier)` so that the same issue replicated
-across repositories produces independent workspaces and workers.
+On the worker's first turn the agent reads the ticket and decides
+whether (and in which configured repo(s)) to do work, calling the
+`roki_open_worktree` tool (§7) once per repo it intends to modify. The
+tool enforces the `[[repos]]` allowlist strictly: a `repo` not in the
+allowlist returns a typed `RepoNotInAllowlist { repo, allowed }` error
+without touching `ghq` or `wt`. Cross-repo tickets call the tool
+multiple times; the per-issue `WorktreeRegistry` (§6) tracks every
+worktree the agent opened so the cleanup walk can tear them all down.
+
+A worker that legitimately decides "this isn't for me" and exits cleanly
+without ever calling `roki_open_worktree` is a valid no-op path: the
+agent's `CleanExit` advances the actor through `Active → AwaitingReview`
+regardless of whether any worktree was opened (locked decision #8).
+
+All per-issue runtime state is keyed by `IssueId` alone. Repo
+association moves onto the post-tool-call `WorktreeRegistry`; downstream
+specs that need a repo correlation read it from there.
 
 ### 2.4 What the daemon owns vs. what the agent owns
 
@@ -295,7 +332,7 @@ the absence of unknown keys under another spec's reserved sub-namespace.
 ### 4.1 States
 
 A conformant implementation maintains an in-memory state machine per
-`(repo, issue)` over the following nine states:
+`IssueId` over the following nine states:
 
 | State | Meaning |
 | --- | --- |
@@ -446,25 +483,72 @@ warn log; subsequent lines parse independently.
 
 ## 6. Workspace Path Layout
 
-### 6.1 Path layout
+### 6.1 Per-issue session tempdir
 
-Workspaces are real git worktrees of the configured source repository,
-not bare sandbox directories. For a repo whose ghq identifier is
-`<owner>/<repo>`, the local checkout sits at the path `ghq list -p`
-returns (typically `<ghq_root>/<host>/<owner>/<repo>`); the per-issue
-worktree is created as a sibling of that checkout:
+On every `Queued → Active` transition the daemon creates a per-issue
+session tempdir under the platform cache directory:
 
-```text
-{repo_path}/../{repo_name}.{branch_sanitized}
-```
+- macOS: `~/Library/Caches/roki/sessions/<issue>`
+- Linux: `~/.cache/roki/sessions/<issue>`
 
-The branch name is the Linear issue id verbatim. The sanitizer in §6.2
-is applied to the branch component of the path; the original issue id is
-preserved as the branch name itself wherever the underlying VCS allows
-it. Each `(repo, issue)` worktree is independent, even across
-repositories that share the same Linear scope.
+Resolved via `dirs::cache_dir`. The tempdir is the worker's current
+working directory — there is no git in it. The agent decides which (if
+any) configured repo(s) to operate in via `roki_open_worktree` (§7).
 
-### 6.2 Sanitization rules
+### 6.2 `WorktreeRegistry` semantics
+
+The daemon maintains an in-memory `WorktreeRegistry` keyed by
+`IssueId`. Each entry carries `(RepoId, BranchName, PathBuf)` and is
+populated when:
+
+- the agent calls `roki_open_worktree(repo)` and the daemon resolves
+  the repo via `ghq`, creates the branch via `wt switch --create
+  <issue-id>`, and registers the resulting path; OR
+- restart recovery (§12) walks `git worktree list --porcelain` for each
+  configured repo, filters branches against `[recovery].issue_branch_pattern`
+  (default `^[A-Z]+-\d+$`), and re-registers any pre-existing
+  agent-opened worktree for active issues.
+
+Worktree paths are produced by the external `wt` CLI; the branch name
+is the Linear issue id verbatim (locked decision #2 — no agent
+override). Cross-repo tickets append additional registry entries; the
+agent calls the tool once per repo it intends to modify, and the
+registry preserves insertion order so cleanup runs in the same order
+the agent opened the worktrees.
+
+### 6.3 Lifecycle invariants
+
+- **Open**: worktrees are created only via `roki_open_worktree`. The
+  daemon never pre-creates one for the agent.
+- **Idempotent**: the agent may call `roki_open_worktree(repo)` twice
+  for the same repo on the same issue; the second call returns the
+  existing path without re-running `ghq`/`wt` (locked decision #4).
+- **Cleaning**: on `Cleaning → [*]` the daemon walks the registry
+  entries for the issue (in insertion order), calls `wt remove
+  <worktree_path>` on each, then removes the session tempdir. Per-arc
+  failures are logged with the offending path and poison the issue per
+  Requirement 4.5; the daemon does not abort the cleanup loop on the
+  first failure — every worktree is given a chance.
+- **TerminalFailure**: BOTH the registry entries AND the session
+  tempdir are retained for forensic inspection. The daemon simply
+  skips the cleanup walk (locked decision #6 / #11).
+- **Pre-cleanup hooks**: registered pre-cleanup hooks evaluate before
+  the cleanup walk; a `Deny` from any hook keeps the actor in
+  `TerminalSuccess` and the registry untouched.
+
+### 6.4 Repo path resolution
+
+The local checkout for a configured ghq identifier lives at the path
+`ghq list -p <repo>` returns. The daemon resolves this lazily — once at
+recovery scan time and once per `roki_open_worktree(repo)` invocation
+that is not short-circuited by the registry. If `ghq` cannot resolve or
+clone the configured identifier, the tool surfaces a typed
+`GhqResolutionFailed { repo, reason }` error to the agent (the worker
+continues; the agent can recover by choosing a different repo or
+exiting). Operators MUST install both `wt` and `ghq` on `$PATH`;
+absence at startup is a hard refusal.
+
+### 6.5 Branch sanitization
 
 The sanitization rule lives inside the `wt` adapter and is the only
 sanitizer applied to issue identifiers when they are mapped to branch /
@@ -474,38 +558,9 @@ worktree path components:
    this class is replaced with `-`.
 2. **Reject collisions**: two distinct issue ids that sanitize to the
    same worktree path under the same repo are not permitted
-   simultaneously; the second `ensure` is rejected with a typed
-   identifier-collision error.
-
-The pre-task-6.1 path-safety rules (descendant-of-workspace-root,
-canonicalization escape rejection, `.`/`..` traversal sentinels) no
-longer apply: the worktree path is computed deterministically from the
-repo path returned by `ghq` and is created only by `wt switch --create`,
-so a smuggled `..` segment in an issue id collapses to `-` via
-sanitization rather than being interpreted as a path component.
-
-### 6.3 Lifecycle invariants
-
-- Workspace creation happens on the first transition into an active
-  state via `wt switch --create <branch>` against the resolved repo
-  path (deterministically the `Queued -> Active` edge in the reference
-  implementation).
-- The worker subprocess MUST run with the worktree as its current
-  working directory.
-- Workspace deletion happens only after `Cleaning -> [*]` via
-  `wt remove <worktree_path>`, that is, only after every registered
-  pre-cleanup hook returns `Allow` and the worker has exited.
-  `wt remove` does NOT delete the underlying branch, so the operator
-  can still `git checkout <issue-id>` from the source repo to inspect
-  the agent's history if a follow-up task is required.
-- `TerminalFailure` retains BOTH the worktree directory AND the branch
-  for inspection — the daemon simply does not call `wt remove`.
-- If `ghq` cannot resolve or clone the configured identifier, the
-  daemon marks that repo unhealthy and refuses to schedule work for it
-  while continuing to serve other repos. If `wt switch --create` or
-  `wt remove` fails for a specific `(repo, issue)`, the daemon logs the
-  failure with the offending path and refuses to start additional work
-  for that `(repo, issue)` until operator intervention.
+   simultaneously; the second `wt switch --create` is rejected with a
+   typed identifier-collision error surfaced through
+   `WorktreeCreationFailed`.
 
 ---
 
@@ -550,6 +605,38 @@ errors include at minimum:
   secret.
 - `DUPLICATE_TOOL { name }` — registration rejected.
 - `UNKNOWN_TOOL { name }` — dispatch under an unregistered name.
+- `REPO_NOT_IN_ALLOWLIST { repo, allowed }` — `roki_open_worktree`
+  invoked with a `repo` not declared in `[[repos]]`.
+- `GHQ_RESOLUTION_FAILED { repo, reason }` — `roki_open_worktree` could
+  not resolve or clone the repo via `ghq`.
+- `WORKTREE_CREATION_FAILED { repo, branch, reason }` —
+  `roki_open_worktree` could not create the worktree branch via `wt`
+  (e.g., the branch already exists at a conflicting worktree).
+
+### 7.6 Tool registry
+
+A conformant daemon registers AT LEAST the following tools into every
+per-issue worker's registry. The daemon constructs one registry per
+worker because some tools (notably `roki_open_worktree`) are bound to a
+single `IssueId` at construction time.
+
+| Name | Stable kebab-style identifier | Input shape | Output shape | Errors |
+| --- | --- | --- | --- | --- |
+| `linear_graphql` | `linear-graphql` | `{ query: string, variables: object }` | Linear GraphQL response payload (unmodified except for credential redaction) | `MULTIPLE_OPERATIONS`, `INVALID_INPUT`, `RATE_LIMITED`, `LINEAR_HTTP_ERROR`, `REDACTION_FAILED` |
+| `roki_open_worktree` | `roki_open_worktree` | `{ repo: string }` (`repo` MUST be declared in `[[repos]]`) | `{ path: string, repo: string, branch: string }` where `branch == issue.id` | `REPO_NOT_IN_ALLOWLIST`, `GHQ_RESOLUTION_FAILED`, `WORKTREE_CREATION_FAILED`, `INVALID_INPUT` |
+
+`roki_open_worktree`'s description (verbatim, render in the agent's
+tool surface): *"Open a git worktree for the current Linear issue in
+one of the configured repos. The daemon resolves the repo via ghq,
+creates a worktree branch named after the issue id via wt, and returns
+the absolute path. Idempotent — calling twice with the same repo
+returns the same path. Use this once per repo you intend to modify;
+cross-repo tickets call this multiple times."*
+
+Idempotency: a second invocation with the same `repo` for the same
+worker MUST return the path of the existing registry entry without
+invoking `ghq` or `wt`. Allowlist enforcement runs BEFORE any external
+invocation so a hijacked agent cannot induce arbitrary `ghq get` work.
 
 ### 7.4 Extensibility
 
@@ -707,15 +794,15 @@ The engine adapter enforces:
 - **Continuation retry**: when a worker exits cleanly with the issue still
   in `Active`, the daemon waits **one second** (`CLEAN_EXIT_RETRY_DELAY`) and
   attempts one continuation retry by relaunching a new subprocess for the
-  same `(repo, issue)`.
+  same `IssueId`.
 - **Exponential backoff**: when a worker exits non-cleanly or after
   exhausting its turn budget, the daemon applies exponential backoff before
-  the next launch attempt for the same `(repo, issue)`. The computed delay
+  the next launch attempt for the same `IssueId`. The computed delay
   is always clamped to **`[10s, 300s]`** (`BACKOFF_FLOOR` and
   `BACKOFF_CEILING`) regardless of operator overrides, so a misconfigured
   `WORKFLOW.md` cannot produce a delay outside the documented envelope.
 - **Retry budget (`max_attempts`)**: only `NonCleanExit` outcomes consume
-  the per-`(repo, issue)` retry budget configured by `max_attempts`
+  the per-`IssueId` retry budget configured by `max_attempts`
   (default `3`, range `1..=10`). When a `NonCleanExit` occurs and the
   budget remains, the worker actor drives `Active → Backoff →
   Active` and re-launches; when the budget is exhausted, it routes
@@ -743,29 +830,39 @@ land before any subsystem holds resources:
 
 1. Load the config from `--config <path>` (default `./roki.toml`). Apply
    CLI overrides for `--bind`, `--port`, and `--dangerously-skip-permissions`.
-2. Resolve every secret (Linear API token plus per-repo webhook secret) and
+2. Resolve secrets — the Linear API token AND the single workspace-level
+   webhook HMAC secret (resolved from `[linear].webhook_secret_env`, with
+   `[linear].webhook_secret_file` as a test-injectable seam) — and
    reinitialise the redaction-aware logging pipeline with the resolved
-   secret list.
+   secret list. Both secrets are added to the redaction list before any
+   structured event is emitted.
 3. Install OS signal handlers wired to a single `ShutdownSignal`.
 4. Resolve the `claude` binary (`claude_binary` config override → `$PATH`
-   discovery → hard refusal with an actionable message).
-5. Build per-repo `WorkflowLoader`s with debounced hot-reload, the
-   workspace manager, the permission resolver, and the engine adapter.
+   discovery → hard refusal with an actionable message). Refuse to start
+   if `wt` or `ghq` is not on `$PATH`.
+5. Load the single workspace-level `WORKFLOW.md` from `[workflow].path`
+   with debounced hot-reload; build the `SessionManager`,
+   `WorktreeRegistry`, `PermissionResolver`, the `RealWt` and `RealGhq`
+   adapters, and the engine adapter.
 6. Build the orchestrator with `EnginePolicy::from_workflow(&policy)`
-   resolved from the parsed `WORKFLOW.md`.
-7. For each repo, spawn a `LinearTracker` (poll task) and build a
-   `WebhookState`; mount the route at `/linear/webhook/<sanitised-repo-id>`
-   on a single `axum::Router`.
-8. Bind the HTTP server at `[server].bind:[server].port` (default
-   `127.0.0.1:7878`). A bind failure is a hard refusal naming the
-   conflicting address.
+   resolved from the parsed `WORKFLOW.md` and run the restart-recovery
+   scan (§12). Attach a per-worker tool factory carrying the daemon-wide
+   `linear_graphql` plus the `[[repos]]` allowlist so each per-issue
+   worker registry contains both `linear_graphql` AND a per-issue
+   `roki_open_worktree`.
+7. Start one workspace-level `LinearTracker` (no per-repo fan-out; the
+   poller queries every active issue the API token can see).
+8. Mount a single `POST /linear/webhook` route on a single `axum::Router`
+   with a workspace-level `WebhookState`. Bind the HTTP server at
+   `[server].bind:[server].port` (default `127.0.0.1:7878`). A bind
+   failure is a hard refusal naming the conflicting address.
 9. Funnel polling and webhook outputs through the `TrackerBridge` into the
    orchestrator inbox.
 10. Drive `tokio::select!` on the shared `ShutdownSignal` across the
-    orchestrator, the bridge, the server, and every tracker. On shutdown
-    the trackers receive their oneshot signal, then the bridge and the
-    server are awaited through `await_workers_with_window` with the
-    documented 30s shutdown window.
+    orchestrator, the bridge, the server, and the single tracker. On
+    shutdown the tracker receives its oneshot signal, then the bridge
+    and the server are awaited through `await_workers_with_window` with
+    the documented 30s shutdown window.
 
 The bootstrap MUST NOT block on Linear connectivity at startup. Trackers
 retry their first poll asynchronously, so the webhook server comes up
@@ -784,18 +881,18 @@ listed here triggers the contract-change rule in §16.
 
 A read-only projection trait exposing:
 
-- `snapshot()` — return a self-contained owned snapshot of the per-`(repo,
-  issue)` state for every tracked worker. The snapshot is safe to serialize
-  to JSON and ship over a wire.
-- `issue(repo, issue)` — return the projection for a single `(repo, issue)`,
-  or `None` if no worker for that key is being tracked.
+- `snapshot()` — return a self-contained owned snapshot of the per-`IssueId`
+  state for every tracked worker. The snapshot is safe to serialize to JSON
+  and ship over a wire.
+- `issue(&IssueId)` — return the projection for a single `IssueId`, or
+  `None` if no worker for that key is being tracked.
 
 The trait is read-only by construction:
 
 - Every method takes an immutable `&self`. There is no mutator method.
 - Returned types are owned clones of internal projections; consumers cannot
   reach back into orchestrator state through them.
-- Implementations MUST NOT panic on unknown `(repo, issue)` keys.
+- Implementations MUST NOT panic on unknown `IssueId` keys.
 
 The snapshot wire shape is versioned. The MVP version string is `"v1"`; it
 is bumped only on a breaking change to the JSON shape. Additive fields do
@@ -928,38 +1025,51 @@ paragraph so that any search for either path lands on this section.
 
 ### 12.1 Recovery without persistent storage
 
-The daemon writes no per-issue runtime state to disk except the workspace
-contents the agent itself produces and the structured logs the daemon
-emits. There is no SQLite, sled, or sidecar state file.
+The daemon writes no per-issue runtime state to disk except the session
+tempdirs and worktrees the agent's tools produce and the structured
+logs the daemon emits. There is no SQLite, sled, or sidecar state file.
 
 ### 12.2 Recovery scan
 
-On daemon start, the orchestrator runs a one-shot reconciliation:
+On daemon start, the orchestrator runs a one-shot reconciliation against
+two on-disk surfaces and Linear:
 
-1. **Inventory the workspace root**. List every directory under
-   `<workspace_root>/<repo>/<issue>/` and produce a set of `(repo, issue)`
-   keys.
-2. **Re-fetch the corresponding Linear issue state** for each scope the
-   daemon serves.
-3. **Classify** each key in the union of both sets per the matrix below.
+1. **Walk session tempdirs** under `dirs::cache_dir()/roki/sessions/`.
+   Each subdirectory names a candidate `IssueId`.
+2. **Walk every configured `[[repos]]` entry's worktrees**. For each
+   repo, run `git worktree list --porcelain` against the path
+   `ghq list -p` returns. Filter the resulting branches against the
+   operator-configurable regex `[recovery].issue_branch_pattern`
+   (default `^[A-Z]+-\d+$`). Each surviving branch names a candidate
+   `IssueId` plus its worktree path.
+3. **Re-fetch every distinct `IssueId`** discovered from either surface
+   against Linear via the production `LinearRecoveryReader` (a thin
+   client over the same Linear GraphQL surface the polling tracker uses).
+4. **Classify** each candidate per the matrix below.
 
-### 12.3 Recovery decision matrix
+### 12.3 Recovery decision matrix (5 cells)
 
-| Workspace exists | Linear issue is active | Decision | Action |
-| --- | --- | --- | --- |
-| yes | yes | `ResumeActive` | Emit a synthetic active event into the tracker inbox; the worker actor re-uses the workspace and resumes the active-state lifecycle. |
-| yes | no | `OrphanedWorkspace` | Retain the workspace, emit a structured warn naming the path, do NOT spawn a worker. |
-| no | yes | `FreshQueued` | Create the workspace and enter `Queued` so the active-state lifecycle proceeds normally. |
-| no | no | `NoOp` | Absent on both sides; do nothing. |
+| Linear state | Session tempdir | Worktree(s) | Decision | Action |
+| --- | --- | --- | --- | --- |
+| Active | yes | yes (or no) | `ResumeActive` | Re-register every discovered worktree into `WorktreeRegistry`, then post a synthetic active event into the tracker inbox; the worker actor resumes the active-state lifecycle without re-creating the session tempdir. |
+| Terminal / Unknown | yes | no | `OrphanedSession` | Schedule the session tempdir for cleanup. The orchestrator does NOT spawn a worker. |
+| Terminal / Unknown / Canceled | no (or yes) | yes | `OrphanedWorktree { retain }` | If Linear state is `Canceled` or the issue's last lifecycle marker is a TerminalFailure, set `retain = true` and leave the worktree on disk for forensic inspection. Otherwise set `retain = false` and schedule the worktree for cleanup via `wt remove`. The session tempdir is removed when the corresponding `OrphanedSession` decision fires for the same issue. |
+| Active | no | no | `FreshQueued` | Create a fresh session tempdir and post a synthetic active event so the worker spawns and re-derives any worktrees via `roki_open_worktree`. Reachable when an issue moves to active in Linear after the daemon was offline; bulk-fetched via `LinearRecoveryReader::active_issues`. |
+| Terminal / Unknown | no | no | `NoOp` | Absent on both sides; do nothing. |
 
-`OrphanedWorkspace` directories are never deleted automatically — operator
-intervention is required.
+`retain = true` `OrphanedWorktree` decisions are never deleted
+automatically — the operator inspects the worktree, then either
+`wt remove`s it manually or `git checkout`s the branch from the source
+repo for a follow-up task.
 
 ### 12.4 Disk-write budget
 
 Recovery honours the daemon's disk-write budget by never persisting a
-sidecar state file. The only filesystem touch the recovery scan performs is
-through the workspace adapter when a `FreshQueued` decision is realised.
+sidecar state file. The only filesystem touches the recovery scan
+performs are (a) the session tempdir read for the inventory step, (b)
+the `git worktree list --porcelain` invocation per configured repo, and
+(c) the per-decision realisations (session tempdir create on
+`FreshQueued`, `wt remove` on `OrphanedWorktree { retain: false }`).
 
 ---
 
@@ -1092,7 +1202,10 @@ one of the following:
 
 Every structured event MUST include:
 
-- The `(repo, issue)` key when one applies.
+- The `IssueId` when one applies. When the worker has opened one or more
+  worktrees, the relevant `RepoId`(s) MAY be joined in from the
+  `WorktreeRegistry` and emitted alongside `IssueId`; events that predate any
+  `roki_open_worktree` call carry `IssueId` only.
 - A correlation identifier for the originating worker invocation.
 
 ### 15.3 Redaction

@@ -604,16 +604,16 @@ fn active_issues_variables() -> Value {
     json!({ "filter": filter, "first": 100 })
 }
 
-fn normalize(payload: GraphQlResponse, scope: &ScopeWatch) -> Vec<NormalizedIssue> {
+fn normalize(payload: GraphQlResponse, _scope: &ScopeWatch) -> Vec<NormalizedIssue> {
     payload
         .data
         .into_iter()
         .flat_map(|d| d.issues.nodes.into_iter())
-        .map(|node| node_to_normalized(node, scope))
+        .map(node_to_normalized)
         .collect()
 }
 
-fn node_to_normalized(node: IssueNode, scope: &ScopeWatch) -> NormalizedIssue {
+fn node_to_normalized(node: IssueNode) -> NormalizedIssue {
     let labels = node
         .labels
         .map(|l| l.nodes.into_iter().map(|n| n.name).collect::<Vec<_>>())
@@ -621,7 +621,6 @@ fn node_to_normalized(node: IssueNode, scope: &ScopeWatch) -> NormalizedIssue {
     let state = IssueState::from_linear_type(node.state.kind.as_deref().unwrap_or(""));
 
     NormalizedIssue {
-        repo: scope.repo.clone(),
         issue: IssueId::new(node.identifier),
         title: node.title,
         description: node.description.unwrap_or_default(),
@@ -801,8 +800,8 @@ mod tests {
                 nodes: vec![LabelNode { name: "bug".into() }],
             }),
         };
-        let normalized = node_to_normalized(node, &scope);
-        assert_eq!(normalized.repo.as_str(), "core");
+        let _ = scope; // post-7.1f: scope is no longer threaded into node_to_normalized
+        let normalized = node_to_normalized(node);
         assert_eq!(normalized.issue.as_str(), "ENG-7");
         assert_eq!(normalized.title, "title");
         assert_eq!(normalized.description, "body");
@@ -826,7 +825,8 @@ mod tests {
             },
             labels: None,
         };
-        let normalized = node_to_normalized(node, &scope);
+        let _ = scope;
+        let normalized = node_to_normalized(node);
         assert_eq!(normalized.state, IssueState::Other);
         assert_eq!(normalized.description, "");
         assert!(normalized.labels.is_empty());

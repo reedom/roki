@@ -248,7 +248,8 @@ async fn valid_payload_normalizes_to_normalized_issue() {
     assert_eq!(one.description, "the first issue body");
     assert_eq!(one.state, IssueState::Active);
     assert_eq!(one.labels, vec!["bug".to_string(), "p1".to_string()]);
-    assert_eq!(one.repo.as_str(), "core");
+    // Post-7.1f: NormalizedIssue.repo was dropped — the agent picks the
+    // repo at runtime via roki_open_worktree.
 
     let two = by_id
         .get("ENG-2")

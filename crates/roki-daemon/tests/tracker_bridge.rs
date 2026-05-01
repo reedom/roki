@@ -13,14 +13,13 @@
 
 use std::time::Duration;
 
-use roki_daemon::orchestrator::state::{IssueId, RepoId};
+use roki_daemon::orchestrator::state::IssueId;
 use roki_daemon::orchestrator::tracker_bridge::TrackerBridge;
 use roki_daemon::tracker::model::{IssueState, NormalizedIssue};
 use tokio::sync::mpsc;
 
-fn issue(repo: &str, issue: &str, state: IssueState) -> NormalizedIssue {
+fn issue(_repo: &str, issue: &str, state: IssueState) -> NormalizedIssue {
     NormalizedIssue {
-        repo: RepoId::new(repo),
         issue: IssueId::new(issue),
         title: String::new(),
         description: String::new(),

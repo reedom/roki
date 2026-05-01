@@ -24,7 +24,7 @@ use roki_daemon::config::SecretString;
 use roki_daemon::engine::claude::{ClaudeEngineAdapter, SupervisedEvent, WorkerContext};
 use roki_daemon::engine::policy::EnginePolicy;
 use roki_daemon::engine::stream::EngineLifecycleEvent;
-use roki_daemon::orchestrator::state::{CorrelationId, IssueId, RepoId};
+use roki_daemon::orchestrator::state::{CorrelationId, IssueId};
 use roki_daemon::permissions::{PermissionMode, PermissionSource, ResolvedPermission};
 use roki_daemon::tools::linear_graphql::LinearGraphqlTool;
 use roki_daemon::tools::{InMemoryRegistry, NoopRateLimit, Registry};
@@ -91,7 +91,6 @@ fn allowlist_permission() -> ResolvedPermission {
 
 fn worker_context(workspace: PathBuf) -> WorkerContext {
     WorkerContext {
-        repo: RepoId::new("repo-tools"),
         issue: IssueId::new("ENG-tools-1"),
         correlation_id: CorrelationId::from_uuid(Uuid::nil()),
         workspace_dir: workspace,

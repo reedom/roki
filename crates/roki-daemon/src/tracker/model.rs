@@ -8,22 +8,17 @@
 //! [`NormalizedIssue`] is the structured issue contract emitted by every
 //! tracker (polling and webhook). Fields mirror design.md "TrackerAdapter":
 //!
-//! * `repo` — vestigial after task 7.1c. Post-7.1 the daemon no longer
-//!   pre-classifies issues by repo; the agent picks the repo on its first
-//!   turn through the `roki_open_worktree` tool. The orchestrator already
-//!   ignores this field (see `orchestrator::core::dispatch_tracker_event`).
-//!   It is retained as a build-compat stamp until 7.1f rewrites the
-//!   bootstrap; a future task will drop it.
 //! * `issue` — the Linear human-readable identifier (`ENG-123`).
 //! * `title`, `description` — display fields.
 //! * `state` — bucketed state (Requirement 3.4).
 //! * `labels` — every label name attached to the issue (Requirement 3.4).
 //!
-//! Task 7.1c dropped the `team_or_scope` field. Post-agent-driven-selection
-//! the daemon does not need a team-or-scope identifier on the event because
-//! it does not pre-route on it; the agent reads the issue and decides.
+//! Task 7.1c dropped the `team_or_scope` field; task 7.1f dropped the
+//! vestigial `repo` field. Post-agent-driven-selection the daemon does not
+//! pre-classify issues by repo — the agent reads the ticket on its first
+//! turn and calls `roki_open_worktree` with the chosen repo.
 
-use crate::orchestrator::state::{IssueId, RepoId};
+use crate::orchestrator::state::IssueId;
 
 /// Bucketed lifecycle state surfaced by the tracker.
 ///
@@ -69,11 +64,6 @@ impl IssueState {
 /// idempotent on `(issue, state)` post-task-7.1b.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NormalizedIssue {
-    /// Vestigial repo stamp. The orchestrator ignores this field; agent-driven
-    /// repo selection (task 7.1) decided the daemon no longer pre-classifies
-    /// issues by repo. Retained as a build-compat field until the bootstrap
-    /// rewrite in 7.1f removes the per-repo construction call sites.
-    pub repo: RepoId,
     pub issue: IssueId,
     pub title: String,
     pub description: String,

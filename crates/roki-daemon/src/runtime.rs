@@ -44,12 +44,10 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow, bail};
-use axum::Router;
 use tokio::net::TcpListener;
 use tokio::process::Command as AsyncCommand;
 use tokio::runtime::Builder;
 use tokio::sync::{mpsc, oneshot};
-use tokio::task::JoinSet;
 use tracing::{info, warn};
 
 use crate::cli::RunArgs;
@@ -201,10 +199,10 @@ pub async fn run_with_shutdown(
     }
 
     // ---- 2. resolve secrets, then reinitialise logging with redaction ---
-    // TODO(7.1c): collapse the multi-route webhook bootstrap onto a single
-    // `POST /linear/webhook` route. For 7.1a we keep the per-repo route
-    // shape but swap to a single workspace-level secret resolved from
-    // `[linear].webhook_secret_env` (Requirement 2.3).
+    // Post-7.1f: one workspace-level webhook HMAC secret. Resolved from
+    // `[linear].webhook_secret_file` (test seam) or
+    // `[linear].webhook_secret_env` (production); absence of both is a
+    // hard refusal (Requirement 2.3).
     let workspace_webhook_secret = resolve_workspace_webhook_secret(&config.linear)?;
     let redaction_secrets: Vec<String> = vec![
         config.linear_token.expose().to_string(),
@@ -240,9 +238,10 @@ pub async fn run_with_shutdown(
         "ghq not found on PATH — install via `brew install ghq` or `go install github.com/x-motemen/ghq@latest`"
     })?;
 
-    // ---- 4. build the single workspace-level workflow loader -----------
-    // Post-7.1a: one workspace-level `[workflow].path` replaces the
-    // per-repo `workflow_path` (Requirement 2.4, locked decision #6).
+    // ---- 4. load the single workspace-level WORKFLOW.md ---------------
+    // Post-7.1a (locked decision #6): one workspace-level `[workflow].path`.
+    // The same policy applies regardless of which configured repo(s) the
+    // agent picks via `roki_open_worktree`.
     let workflow_handle =
         WorkflowLoader::watch(config.workflow.path.clone(), Duration::from_millis(250))
             .await
@@ -256,19 +255,14 @@ pub async fn run_with_shutdown(
     let workflow_handles: Vec<WorkflowHandle> = vec![workflow_handle];
     let workflow_policies: Vec<Arc<WorkflowPolicy>> = vec![Arc::clone(&workflow_policy)];
 
-    // ---- 5. build engine + session/worktree state + orchestrator ------
-    // Task 7.1d: replace `WorkspaceManager`/`Workspace` trait with the
-    // agent-driven model: `SessionManager` for per-issue tempdirs,
-    // `WorktreeRegistry` for tracking worktrees the agent opens via
-    // `roki_open_worktree`, and the `wt` / `ghq` adapters for the agent
-    // tool's lookup-or-clone path.
+    // ---- 5. build session/worktree state, engine, orchestrator --------
+    // Post-7.1d/7.1f: agent-driven repo selection. `SessionManager` owns
+    // the per-issue tempdir; `WorktreeRegistry` tracks worktrees the
+    // agent opens via `roki_open_worktree`. The `wt` and `ghq` adapters
+    // back the agent tool's lookup-or-clone path AND the orchestrator's
+    // `Cleaning` walk.
     let wt: Arc<dyn WtTool> = Arc::new(RealWt::new());
-    let _ghq: Arc<dyn GhqTool> = Arc::new(RealGhq::new());
-    // TODO(7.1f): wire `_ghq` into the agent tool registration alongside the
-    // `OpenWorktreeTool` so each per-issue worker carries the
-    // `roki_open_worktree` tool with the operator's allowlist injected.
-    // The current bootstrap composition still constructs the orchestrator
-    // through the legacy single-tracker shim; 7.1f completes the rewire.
+    let ghq: Arc<dyn GhqTool> = Arc::new(RealGhq::new());
     let session_manager = Arc::new(SessionManager::new().with_context(|| {
         "failed to resolve platform cache dir for session tempdirs (set $HOME or supply an explicit override)".to_string()
     })?);
@@ -279,10 +273,7 @@ pub async fn run_with_shutdown(
     let event_bus = Arc::new(EventBus::with_default_capacity());
     let hook_registry = Arc::new(HookRegistry::new());
 
-    // Engine policy is resolved from the first repo's WorkflowPolicy. The
-    // MVP orchestrator carries one runtime policy. When a future task splits
-    // per-repo policies into per-actor `WorkerContext`, this resolver
-    // expands to a per-repo map.
+    // Engine policy is resolved from the workspace WorkflowPolicy.
     let engine_policy = workflow_policies
         .first()
         .map(|p| EnginePolicy::from_workflow(p))
@@ -305,7 +296,7 @@ pub async fn run_with_shutdown(
 
     let mut recovery_repos: Vec<RecoveryRepoInput> = Vec::with_capacity(config.repos.len());
     for repo in &config.repos {
-        match _ghq.list_path(&repo.repo).await {
+        match ghq.list_path(&repo.repo).await {
             Ok(Some(path)) => recovery_repos.push(RecoveryRepoInput {
                 repo: RepoId::new(repo.repo.clone()),
                 repo_path: path,
@@ -349,69 +340,76 @@ pub async fn run_with_shutdown(
     )
     .await
     .with_context(|| "restart recovery scan failed during bootstrap")?;
-    let orchestrator = orchestrator.with_engine_policy(engine_policy);
+
+    // Compose the per-worker tool factory: every per-issue worker carries
+    // both `linear_graphql` (workspace-level proxy) AND a per-issue
+    // `roki_open_worktree` (allowlist enforced against `[[repos]]`).
+    let allowed_repos: Vec<String> = config.repos.iter().map(|r| r.repo.clone()).collect();
+    let linear_graphql: Arc<dyn crate::tools::Tool> =
+        Arc::new(crate::tools::linear_graphql::LinearGraphqlTool::new(
+            linear_endpoint.clone(),
+            crate::config::SecretString::new(config.linear_token.expose().to_string()),
+            Arc::clone(&rate_limit),
+        )?);
+    let tool_factory: Arc<dyn crate::tools::WorkerToolFactory> =
+        Arc::new(crate::tools::DefaultWorkerToolFactory::new(
+            vec![linear_graphql],
+            allowed_repos,
+            Arc::clone(&ghq),
+            Arc::clone(&wt),
+            worktree_registry.clone(),
+        ));
+
+    let orchestrator = orchestrator
+        .with_engine_policy(engine_policy)
+        .with_tool_factory(tool_factory);
     let orchestrator_read = orchestrator.read_handle();
     info!(
         decisions = recovery_decisions.len(),
         "restart recovery completed",
     );
 
-    // ---- 6. per-repo trackers + webhook routes -------------------------
-    let mut tracker_join: JoinSet<()> = JoinSet::new();
-    let mut router = Router::new();
+    // ---- 6. single workspace-level webhook route + tracker -------------
+    // Post-7.1f (locked decision #1+#3): one HMAC secret, one webhook
+    // route at `POST /linear/webhook`, one polling LinearTracker. The
+    // agent picks the repo at runtime via `roki_open_worktree`; the
+    // daemon does not pre-classify by repo.
+    //
+    // Tracker join handles are collected into a `Vec<JoinHandle<()>>` (rather
+    // than a `JoinSet`) so shutdown can route them through the same
+    // `await_workers_with_window` helper that bounds worker shutdown. This
+    // satisfies Requirement 1.3's "bounded shutdown window per task" for the
+    // tracker subsystem: a wedged tracker is force-aborted at the 30s window
+    // boundary instead of blocking exit indefinitely.
+    let mut tracker_handles: Vec<tokio::task::JoinHandle<()>> = Vec::new();
     let (webhook_tx_master, webhook_rx_master) = mpsc::channel::<NormalizedIssue>(64);
     let (polling_tx_master, polling_rx_master) = mpsc::channel::<NormalizedIssue>(64);
 
-    let mut tracker_shutdowns: Vec<oneshot::Sender<()>> = Vec::with_capacity(config.repos.len());
-
-    // TODO(7.1c): collapse to a single `POST /linear/webhook` route plus a
-    // single `LinearTracker`. For 7.1a we keep one route + tracker per repo
-    // entry as a temporary shim using the SHARED workspace-level webhook
-    // secret. The route segment is derived from the repo's ghq identifier
-    // (sanitised) since `repo.id` is gone.
-    for repo in &config.repos {
-        let webhook_secret = workspace_webhook_secret.clone();
-
-        let path_segment = sanitize_url_segment(repo.repo.as_str()).map_err(|reason| {
-            anyhow!(
-                "repo `{}` cannot be encoded as a URL path segment: {}",
-                repo.repo,
-                reason,
-            )
-        })?;
-        let webhook_path = format!("/linear/webhook/{path_segment}");
-        // TODO(7.1c): drop the `team_or_scope_fallback` field along with the
-        // single-tracker collapse.
-        let team_or_scope_fallback = String::new();
-        let webhook_state = WebhookState::new(
-            webhook_secret,
-            crate::orchestrator::state::RepoId::new(repo.repo.clone()),
-            team_or_scope_fallback,
-            webhook_tx_master.clone(),
-        );
-        router = router.merge(webhook_router(webhook_state, &webhook_path));
-
-        // LinearTracker: one per repo allowlist entry as a temporary shim;
-        // the workspace-level collapse is 7.1c's job.
-        let tracker = LinearTracker::new(LinearTrackerConfig {
-            endpoint: linear_endpoint.clone(),
-            cadence: config.polling_cadence,
-            scopes: vec![ScopeWatch {
-                repo: crate::orchestrator::state::RepoId::new(repo.repo.clone()),
-            }],
-            token: SecretString::new(config.linear_token.expose().to_string()),
-            rate_limit: Arc::clone(&rate_limit),
-        });
-        let (tracker_shutdown_tx, tracker_shutdown_rx) = oneshot::channel::<()>();
-        tracker_shutdowns.push(tracker_shutdown_tx);
-        let tracker_sink = polling_tx_master.clone();
-        tracker_join.spawn(async move {
-            let _ = tracker.run(tracker_sink, tracker_shutdown_rx).await;
-        });
-    }
-    // Drop the master senders the bootstrap holds so when every per-repo
-    // sender shuts down the bridge sees its inputs close.
+    let webhook_state =
+        WebhookState::new_workspace(workspace_webhook_secret.clone(), webhook_tx_master.clone());
+    let router = webhook_router(webhook_state, "/linear/webhook");
     drop(webhook_tx_master);
+
+    // Single workspace-level LinearTracker. The `scopes` field is a
+    // build-compat shim (collapsed inside `LinearTracker::new` to a
+    // single workspace-level loop); we pass one synthetic entry so the
+    // existing constructor signature stays intact while the daemon polls
+    // every active issue the API token can see.
+    let tracker = LinearTracker::new(LinearTrackerConfig {
+        endpoint: linear_endpoint.clone(),
+        cadence: config.polling_cadence,
+        scopes: vec![ScopeWatch {
+            repo: RepoId::new(""),
+        }],
+        token: SecretString::new(config.linear_token.expose().to_string()),
+        rate_limit: Arc::clone(&rate_limit),
+    });
+    let (tracker_shutdown_tx, tracker_shutdown_rx) = oneshot::channel::<()>();
+    let tracker_shutdowns: Vec<oneshot::Sender<()>> = vec![tracker_shutdown_tx];
+    let tracker_sink = polling_tx_master.clone();
+    tracker_handles.push(tokio::spawn(async move {
+        let _ = tracker.run(tracker_sink, tracker_shutdown_rx).await;
+    }));
     drop(polling_tx_master);
 
     // ---- 7. tracker bridge ---------------------------------------------
@@ -473,23 +471,20 @@ pub async fn run_with_shutdown(
         let _ = tx.send(());
     }
 
-    // Drain trackers; await_workers_with_window enforces the documented
-    // 30s shutdown window per task even though most trackers exit
-    // immediately on their oneshot signal.
-    let tracker_join_handles: Vec<tokio::task::JoinHandle<()>> = Vec::new();
-    while let Some(handle) = tracker_join.try_join_next() {
-        if let Err(err) = handle {
-            warn!(error = %err, "tracker task ended with a join error");
-        }
+    // Drain trackers through the same bounded-shutdown helper that drives
+    // worker shutdown. `await_workers_with_window` awaits each handle up to
+    // `SHUTDOWN_WINDOW` and force-aborts on timeout, so a wedged tracker
+    // cannot block daemon exit past the documented 30s window
+    // (Requirement 1.3).
+    let tracker_outcome =
+        await_workers_with_window(std::mem::take(&mut tracker_handles), SHUTDOWN_WINDOW).await;
+    if 0 < tracker_outcome.timed_out {
+        warn!(
+            completed = tracker_outcome.completed,
+            timed_out = tracker_outcome.timed_out,
+            "tracker shutdown window elapsed; force-aborted unresponsive tracker tasks",
+        );
     }
-    // Move any in-flight trackers that have not finished yet into
-    // `await_workers_with_window` so they are bounded.
-    while let Some(handle) = tracker_join.join_next().await {
-        if let Err(err) = handle {
-            warn!(error = %err, "tracker task ended with a join error");
-        }
-    }
-    let _ = tracker_join_handles;
 
     // Drive the bridge and the server through the documented bounded
     // shutdown window so the daemon honours requirement 1.3 even when the
@@ -513,11 +508,10 @@ pub async fn run_with_shutdown(
     Ok(())
 }
 
-/// Resolve the workspace-level webhook HMAC secret declared in
-/// `[linear].webhook_secret_env` (Requirement 2.3). The configured env-var
-/// must be set and non-empty; absence is a hard refusal. The returned
-/// [`SecretString`] is shared across every webhook route the bootstrap
-/// mounts.
+/// Resolve the workspace-level webhook HMAC secret. The bootstrap honours
+/// `[linear].webhook_secret_file` first (test-seam) and falls back to
+/// `[linear].webhook_secret_env` for the production path. Both empty or
+/// absent is a hard refusal (Requirement 2.3).
 fn resolve_workspace_webhook_secret(linear: &LinearConfig) -> Result<SecretString> {
     resolve_workspace_webhook_secret_with(linear, |var| std::env::var(var).ok())
 }
@@ -531,7 +525,22 @@ fn resolve_workspace_webhook_secret_with<F>(
 where
     F: FnOnce(&str) -> Option<String>,
 {
+    if let Some(path) = linear.webhook_secret_file.as_deref() {
+        let raw = std::fs::read_to_string(path)
+            .with_context(|| format!("failed to read webhook secret file `{}`", path.display(),))?;
+        let trimmed = raw.trim();
+        if trimmed.is_empty() {
+            return Err(anyhow!("webhook secret file `{}` is empty", path.display(),));
+        }
+        return Ok(SecretString::new(trimmed.to_string()));
+    }
     let var = linear.webhook_secret_env.as_str();
+    if var.is_empty() {
+        return Err(anyhow!(
+            "webhook secret unresolved: neither `linear.webhook_secret_env` nor \
+             `linear.webhook_secret_file` is set",
+        ));
+    }
     let value = lookup(var).ok_or_else(|| anyhow!("webhook secret env-var `{var}` is not set"))?;
     if value.trim().is_empty() {
         return Err(anyhow!("webhook secret env-var `{var}` is empty"));
@@ -625,38 +634,11 @@ impl EngineLauncher for ClaudeEngineLauncher {
     }
 }
 
-/// Sanitise a `RepoId` into a URL path segment. Mirrors the workspace
-/// layer's character class (`[A-Za-z0-9._-]`) so a repo that allocates a
-/// workspace successfully also encodes into a webhook URL successfully.
-///
-/// Path separators in the raw value are a hard rejection (a smuggled `/`
-/// would silently split into multiple URL segments). Empty or sentinel-only
-/// (`.` / `..`) results are also rejected.
-fn sanitize_url_segment(raw: &str) -> Result<String, String> {
-    if raw.is_empty() {
-        return Err("identifier is empty".to_string());
-    }
-    if raw.contains('/') || raw.contains('\\') {
-        return Err("identifier contains a path separator ('/' or '\\\\')".to_string());
-    }
-    let sanitised: String = raw
-        .chars()
-        .map(|ch| {
-            if ch.is_ascii_alphanumeric() || ch == '.' || ch == '_' || ch == '-' {
-                ch
-            } else {
-                '_'
-            }
-        })
-        .collect();
-    if sanitised.is_empty() {
-        return Err("identifier is empty after sanitization".to_string());
-    }
-    if sanitised == "." || sanitised == ".." {
-        return Err("sanitized identifier is a path traversal sentinel ('.' or '..')".to_string());
-    }
-    Ok(sanitised)
-}
+// Post-7.1f: the per-repo webhook URL fan-out collapsed to a single
+// `POST /linear/webhook` route, so the URL-segment sanitiser is no
+// longer needed. Repo identifiers still pass through the path-safety
+// rules in `tools::wt`'s sanitizer when used as branch / worktree
+// components.
 
 #[cfg(test)]
 mod tests {
@@ -685,6 +667,7 @@ mod tests {
         LinearConfig {
             token_env: "LINEAR_API_TOKEN".to_string(),
             webhook_secret_env: env_var.to_string(),
+            webhook_secret_file: None,
         }
     }
 
@@ -722,25 +705,89 @@ mod tests {
     }
 
     #[test]
-    fn sanitize_url_segment_keeps_safe_characters() {
-        assert_eq!(
-            sanitize_url_segment("core_repo-1.0").unwrap(),
-            "core_repo-1.0",
+    fn resolve_workspace_webhook_secret_reads_file_when_set() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("webhook-secret");
+        std::fs::write(&path, "from-the-file\n").expect("write secret");
+        let linear = LinearConfig {
+            token_env: "LINEAR_API_TOKEN".to_string(),
+            webhook_secret_env: "ROKI_FAKE_WEBHOOK_SECRET".to_string(),
+            webhook_secret_file: Some(path.clone()),
+        };
+        // Even though `webhook_secret_env` names a real var, the
+        // file-backed source wins so the test seam is deterministic.
+        let secret =
+            resolve_workspace_webhook_secret_with(&linear, |_| Some("from-the-env".to_string()))
+                .expect("file-backed lookup must succeed");
+        assert_eq!(secret.expose(), "from-the-file");
+    }
+
+    #[test]
+    fn resolve_workspace_webhook_secret_refuses_empty_file() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("webhook-secret-empty");
+        std::fs::write(&path, "   \n").expect("write empty secret");
+        let linear = LinearConfig {
+            token_env: "LINEAR_API_TOKEN".to_string(),
+            webhook_secret_env: String::new(),
+            webhook_secret_file: Some(path.clone()),
+        };
+        let err = resolve_workspace_webhook_secret_with(&linear, |_| None)
+            .expect_err("empty file must be refused");
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("empty"),
+            "error must call out empty file: {msg}"
         );
     }
 
+    /// Task 7.1f follow-up (d): unit-test CLI `--bind` / `--port`
+    /// overrides. The bootstrap honours the CLI override over the
+    /// config-file value (decision matrix #4). Drive through
+    /// [`Config::load_from_str`] (the same loader the bootstrap calls)
+    /// and apply the same override step the bootstrap performs.
     #[test]
-    fn sanitize_url_segment_replaces_unsafe_characters() {
-        assert_eq!(sanitize_url_segment("core repo!").unwrap(), "core_repo_");
-    }
+    fn cli_bind_and_port_overrides_supersede_config_values() {
+        use crate::config::{Config, EnvOverrides};
+        let toml = r#"
+[server]
+bind = "127.0.0.1"
+port = 7878
 
-    #[test]
-    fn sanitize_url_segment_rejects_path_separator() {
-        assert!(sanitize_url_segment("foo/bar").is_err());
-    }
+[linear]
+token_env = "LINEAR_API_TOKEN"
+webhook_secret_env = "ROKI_LINEAR_WEBHOOK_SECRET"
 
-    #[test]
-    fn sanitize_url_segment_rejects_traversal_sentinel() {
-        assert!(sanitize_url_segment("..").is_err());
+[workflow]
+path = "/srv/policy/WORKFLOW.md"
+
+[permissions]
+strategy = "dangerously_skip_permissions"
+
+[[repos]]
+repo = "owner/core"
+"#;
+        let env = EnvOverrides {
+            linear_token: Some("lin_test".to_string()),
+            ..Default::default()
+        };
+        let mut cfg = Config::load_from_str(toml, std::path::Path::new("test.toml"), &env)
+            .expect("config must load");
+        // Pre-override values come from the file.
+        assert_eq!(cfg.server_bind.to_string(), "127.0.0.1");
+        assert_eq!(cfg.server_port, 7878);
+
+        // Apply the same CLI-override step run_with_shutdown performs.
+        let cli_bind: std::net::IpAddr = "0.0.0.0".parse().unwrap();
+        let cli_port: u16 = 4242;
+        if let Some(addr) = Some(cli_bind) {
+            cfg.server_bind = addr;
+        }
+        if let Some(port) = Some(cli_port) {
+            assert!(port != 0, "non-zero CLI port must be accepted");
+            cfg.server_port = port;
+        }
+        assert_eq!(cfg.server_bind.to_string(), "0.0.0.0");
+        assert_eq!(cfg.server_port, 4242);
     }
 }

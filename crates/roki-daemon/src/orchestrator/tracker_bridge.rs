@@ -197,11 +197,9 @@ mod tests {
     //! integration test at `tests/tracker_bridge.rs`.
 
     use super::*;
-    use crate::orchestrator::state::RepoId;
 
-    fn ev(repo: &str, issue: &str, state: IssueState) -> NormalizedIssue {
+    fn ev(_repo: &str, issue: &str, state: IssueState) -> NormalizedIssue {
         NormalizedIssue {
-            repo: RepoId::new(repo),
             issue: IssueId::new(issue),
             title: String::new(),
             description: String::new(),

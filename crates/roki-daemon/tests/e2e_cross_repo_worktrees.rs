@@ -27,7 +27,7 @@ use roki_daemon::engine::{SupervisedEvent, WorkerContext};
 use roki_daemon::orchestrator::core::{EngineLauncher, LaunchError, Orchestrator};
 use roki_daemon::orchestrator::events::{EventBus, SubscriberError, TransitionSubscriber};
 use roki_daemon::orchestrator::hooks::HookRegistry;
-use roki_daemon::orchestrator::state::{IssueId, RepoId, TransitionEvent, WorkerState};
+use roki_daemon::orchestrator::state::{IssueId, TransitionEvent, WorkerState};
 use roki_daemon::session::SessionManager;
 use roki_daemon::shutdown::ShutdownSignal;
 use roki_daemon::tools::{GhqTool, OpenWorktreeTool, Tool, WtTool};
@@ -87,7 +87,6 @@ impl TransitionSubscriber for RecordingObserver {
 
 fn issue_event(state: TrackerIssueState) -> NormalizedIssue {
     NormalizedIssue {
-        repo: RepoId::new("any-repo"),
         issue: IssueId::new("ENG-7"),
         title: String::new(),
         description: String::new(),

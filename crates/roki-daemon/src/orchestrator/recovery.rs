@@ -625,7 +625,6 @@ fn synthetic_active_event(issue: &IssueId, payload: Option<&NormalizedIssue>) ->
         };
     }
     NormalizedIssue {
-        repo: RepoId::new(""),
         issue: issue.clone(),
         title: String::new(),
         description: String::new(),

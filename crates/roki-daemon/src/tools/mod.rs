@@ -46,6 +46,98 @@ pub trait Tool: Send + Sync {
     async fn call(&self, input: serde_json::Value) -> Result<serde_json::Value, ToolError>;
 }
 
+#[cfg(test)]
+mod factory_tests {
+    //! Unit tests for [`DefaultWorkerToolFactory`] (task 7.1f).
+
+    use super::*;
+    use crate::orchestrator::state::IssueId;
+    use crate::worktrees::WorktreeRegistry;
+    use async_trait::async_trait;
+    use std::path::{Path, PathBuf};
+
+    struct StubGhq;
+    #[async_trait]
+    impl ghq::GhqTool for StubGhq {
+        async fn list_path(&self, _full: &str) -> Result<Option<PathBuf>, ghq::GhqError> {
+            Ok(None)
+        }
+        async fn ensure_cloned(&self, _full: &str) -> Result<PathBuf, ghq::GhqError> {
+            Ok(PathBuf::new())
+        }
+    }
+
+    struct StubWt;
+    #[async_trait]
+    impl wt::WtTool for StubWt {
+        async fn switch_create(
+            &self,
+            _repo_path: &Path,
+            _branch: &str,
+        ) -> Result<PathBuf, wt::WtError> {
+            Ok(PathBuf::new())
+        }
+        async fn remove(&self, _worktree_path: &Path) -> Result<(), wt::WtError> {
+            Ok(())
+        }
+        async fn list_porcelain(
+            &self,
+            _repo_path: &Path,
+        ) -> Result<Vec<wt::WorktreePorcelainEntry>, wt::WtError> {
+            Ok(Vec::new())
+        }
+    }
+
+    /// Build a stub `linear_graphql` tool for the registry test. The real
+    /// `LinearGraphqlTool::new` requires a live `reqwest::Client` builder
+    /// which is fine in test env, but we keep the stub minimal to avoid
+    /// cross-test interference.
+    struct StubLinearGraphql;
+    #[async_trait]
+    impl Tool for StubLinearGraphql {
+        fn name(&self) -> &'static str {
+            "linear-graphql"
+        }
+        fn description(&self) -> &'static str {
+            "stub"
+        }
+        fn input_schema(&self) -> &'static str {
+            "{}"
+        }
+        fn output_schema(&self) -> &'static str {
+            "{}"
+        }
+        async fn call(&self, _input: serde_json::Value) -> Result<serde_json::Value, ToolError> {
+            Ok(serde_json::Value::Null)
+        }
+    }
+
+    #[test]
+    fn per_worker_registry_carries_linear_graphql_and_roki_open_worktree() {
+        // Task 7.1f acceptance: the per-worker registry produced by
+        // `DefaultWorkerToolFactory::build_for_issue` must carry both
+        // tools every worker is expected to see, named exactly per the
+        // SPEC.md §7 contract.
+        let factory = DefaultWorkerToolFactory::new(
+            vec![Arc::new(StubLinearGraphql) as Arc<dyn Tool>],
+            vec!["owner/core".to_string()],
+            Arc::new(StubGhq),
+            Arc::new(StubWt),
+            WorktreeRegistry::new(),
+        );
+        let registry = factory.build_for_issue(&IssueId::new("ENG-1"));
+        let names: Vec<&str> = registry.catalog().iter().map(|d| d.name).collect();
+        assert!(
+            names.contains(&"linear-graphql"),
+            "per-worker registry must contain linear-graphql; got {names:?}",
+        );
+        assert!(
+            names.contains(&"roki_open_worktree"),
+            "per-worker registry must contain roki_open_worktree; got {names:?}",
+        );
+    }
+}
+
 /// Catalog entry for a single registered tool. The catalog is serialised as
 /// part of the worker launch payload, so the field names are part of the
 /// daemon ↔ worker contract.
@@ -77,6 +169,102 @@ pub trait Registry: Send + Sync {
         name: &str,
         input: serde_json::Value,
     ) -> Result<serde_json::Value, ToolError>;
+}
+
+/// Build a per-worker [`Registry`] populated with every tool the agent
+/// for `issue` should see.
+///
+/// The orchestrator constructs one registry per worker because some tools
+/// (notably [`roki_open_worktree::OpenWorktreeTool`]) are bound to a single
+/// `IssueId` at construction time — the tool's identity carries the issue
+/// the agent is working on so the registry surface is naturally scoped to
+/// the worker that owns it.
+///
+/// Implementations populate the returned [`InMemoryRegistry`] with the
+/// daemon-wide tools (e.g. `linear_graphql`) plus a fresh
+/// `OpenWorktreeTool` constructed for `issue`. The factory is invoked at
+/// `Orchestrator::launch_once` time (task 7.1f); production callers
+/// inject [`DefaultWorkerToolFactory`].
+pub trait WorkerToolFactory: Send + Sync + 'static {
+    /// Produce a registry populated with every tool the worker for `issue`
+    /// should see. The returned `Arc<dyn Registry>` is forwarded to the
+    /// engine adapter so its catalog snapshot reaches the worker
+    /// subprocess and tool dispatch is routed through the same instance.
+    fn build_for_issue(&self, issue: &crate::orchestrator::state::IssueId) -> Arc<dyn Registry>;
+}
+
+/// Default worker tool factory used by the daemon's bootstrap.
+///
+/// Composes the per-worker registry from:
+///
+/// * a single shared `linear_graphql` tool instance (stateless across
+///   workers), AND
+/// * a fresh `OpenWorktreeTool` bound to the worker's [`IssueId`] and
+///   carrying the operator's `[[repos]]` allowlist.
+///
+/// Tests and downstream specs may register additional read-only tools by
+/// extending the `daemon_tools` field at construction time.
+pub struct DefaultWorkerToolFactory {
+    /// Daemon-wide tools that are stateless across workers (e.g. the
+    /// `linear_graphql` proxy). Registered into every per-worker registry.
+    daemon_tools: Vec<Arc<dyn Tool>>,
+    /// Operator's `[[repos]]` allowlist, propagated to each per-worker
+    /// `OpenWorktreeTool`. Strict allowlist enforcement runs against
+    /// this slice before any external invocation.
+    allowed_repos: Vec<String>,
+    /// `ghq` adapter shared across workers; the per-worker
+    /// `OpenWorktreeTool` borrows from this `Arc`.
+    ghq: Arc<dyn ghq::GhqTool>,
+    /// `wt` adapter shared across workers.
+    wt: Arc<dyn wt::WtTool>,
+    /// Process-wide [`crate::worktrees::WorktreeRegistry`] cloned into
+    /// each per-worker tool so the orchestrator's `Cleaning` walk and the
+    /// agent's `roki_open_worktree` calls observe a single source of
+    /// truth.
+    worktree_registry: crate::worktrees::WorktreeRegistry,
+}
+
+impl DefaultWorkerToolFactory {
+    pub fn new(
+        daemon_tools: Vec<Arc<dyn Tool>>,
+        allowed_repos: Vec<String>,
+        ghq: Arc<dyn ghq::GhqTool>,
+        wt: Arc<dyn wt::WtTool>,
+        worktree_registry: crate::worktrees::WorktreeRegistry,
+    ) -> Self {
+        Self {
+            daemon_tools,
+            allowed_repos,
+            ghq,
+            wt,
+            worktree_registry,
+        }
+    }
+}
+
+impl WorkerToolFactory for DefaultWorkerToolFactory {
+    fn build_for_issue(&self, issue: &crate::orchestrator::state::IssueId) -> Arc<dyn Registry> {
+        let registry = InMemoryRegistry::new();
+        for tool in &self.daemon_tools {
+            // Duplicate names would be a bootstrap-time configuration bug;
+            // the operator declared two tools with the same `name`. Surface
+            // it loudly during construction rather than at runtime.
+            registry
+                .register(Arc::clone(tool))
+                .expect("daemon-wide tool registration must not collide");
+        }
+        let open = Arc::new(roki_open_worktree::OpenWorktreeTool::new(
+            issue.clone(),
+            self.allowed_repos.clone(),
+            Arc::clone(&self.ghq),
+            Arc::clone(&self.wt),
+            self.worktree_registry.clone(),
+        ));
+        registry
+            .register(open)
+            .expect("OpenWorktreeTool registration must not collide with daemon tools");
+        Arc::new(registry)
+    }
 }
 
 /// In-memory tool registry. Cheap to clone via `Arc` and safe to share between

@@ -59,7 +59,6 @@ impl StubLinearReader {
             .copied()
             .unwrap_or(RecoveryIssueLifecycle::Unknown);
         let payload = NormalizedIssue {
-            repo: RepoId::new(""),
             issue: issue.clone(),
             title: format!("recovery-{}", issue.as_str()),
             description: String::new(),

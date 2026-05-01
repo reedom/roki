@@ -13,7 +13,7 @@ use axum::body::{Body, to_bytes};
 use axum::http::{Request, StatusCode};
 use hmac::{Hmac, Mac};
 use roki_daemon::config::SecretString;
-use roki_daemon::orchestrator::state::{IssueId, RepoId};
+use roki_daemon::orchestrator::state::IssueId;
 use roki_daemon::tracker::model::IssueState;
 use roki_daemon::tracker::webhook::{
     DEFAULT_WEBHOOK_PATH, LINEAR_SIGNATURE_HEADER, WebhookState, router_default,
@@ -53,12 +53,7 @@ fn hmac_hex(secret: &[u8], body: &[u8]) -> String {
 }
 
 fn make_state(sink: mpsc::Sender<roki_daemon::tracker::model::NormalizedIssue>) -> WebhookState {
-    WebhookState::new(
-        SecretString::new(TEST_SECRET),
-        RepoId::new("core"),
-        "ENG",
-        sink,
-    )
+    WebhookState::new_workspace(SecretString::new(TEST_SECRET), sink)
 }
 
 fn issue_payload() -> serde_json::Value {

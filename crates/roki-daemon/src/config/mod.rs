@@ -119,6 +119,14 @@ pub struct Config {
 /// the single workspace-level HMAC secret. `token_env` is preserved for
 /// observability — the actual token is wrapped in [`SecretString`] on
 /// [`Config::linear_token`].
+///
+/// `webhook_secret_file` is an optional file-backed alternative (parallel
+/// to `token_env`/`token_file` for the API token) used by integration
+/// tests that cannot mutate the process environment because the workspace
+/// `unsafe_code = "forbid"` lint blocks `std::env::set_var`. When both
+/// `webhook_secret_env` and `webhook_secret_file` are present, the file
+/// wins so a test fixture can override an env var lingering from another
+/// test. Production callers leave `webhook_secret_file` unset.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LinearConfig {
     /// Env-var name that holds the Linear API token. Defaults to
@@ -129,6 +137,14 @@ pub struct LinearConfig {
     /// Required (Requirement 2.3); the bootstrap resolves the actual
     /// secret value at startup.
     pub webhook_secret_env: String,
+
+    /// Optional path to a file containing the workspace-level webhook HMAC
+    /// secret (single-line UTF-8). When set, takes precedence over
+    /// `webhook_secret_env`. Test-only seam: workspace `unsafe_code` lint
+    /// forbids `std::env::set_var` in tests, so file-backed injection is
+    /// the only way for an integration test to drive the bootstrap with a
+    /// known secret.
+    pub webhook_secret_file: Option<PathBuf>,
 }
 
 /// Resolved workspace-level workflow configuration (post-7.1a).
@@ -240,9 +256,20 @@ struct LinearFile {
     endpoint: Option<String>,
 
     /// Env-var name that holds the workspace-level webhook HMAC secret.
-    /// Required (Requirement 2.3, post-7.1a).
+    /// Required (Requirement 2.3, post-7.1a) unless a `webhook_secret_file`
+    /// is provided.
     #[serde(default)]
     webhook_secret_env: Option<String>,
+
+    /// Optional file-backed override for the workspace-level webhook
+    /// HMAC secret. When present, the bootstrap reads the secret from
+    /// this file and the env-var lookup is skipped. Test-only seam: the
+    /// workspace `unsafe_code = "forbid"` lint blocks `std::env::set_var`
+    /// in tests, so file-backed injection is the only way for an
+    /// integration test to drive the bootstrap with a deterministic
+    /// secret.
+    #[serde(default)]
+    webhook_secret_file: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -551,32 +578,46 @@ fn resolve_recovery_block(recovery: Option<&RecoveryFile>) -> Result<RecoveryCon
 }
 
 /// Resolve the workspace-level `[linear]` block. Per Requirement 2.3 the
-/// webhook secret env-var name is required; absence is a hard refusal that
-/// names the offending field.
+/// webhook secret source is required: the operator MUST declare either
+/// `webhook_secret_env` (production) or `webhook_secret_file` (test seam);
+/// absence of both is a hard refusal that names the offending field.
 fn resolve_linear_block(linear: Option<&LinearFile>) -> Result<LinearConfig, ConfigError> {
     let Some(linear) = linear else {
         return Err(ConfigError::MissingField {
             field: "linear.webhook_secret_env".to_string(),
         });
     };
-    let Some(webhook_secret_env) = linear.webhook_secret_env.as_deref() else {
-        return Err(ConfigError::MissingField {
-            field: "linear.webhook_secret_env".to_string(),
-        });
+    let webhook_secret_file = linear.webhook_secret_file.clone();
+    let webhook_secret_env = match linear.webhook_secret_env.as_deref() {
+        Some(value) => {
+            if value.trim().is_empty() {
+                return Err(ConfigError::InvalidField {
+                    field: "linear.webhook_secret_env".to_string(),
+                    reason: "must not be empty".to_string(),
+                });
+            }
+            value.to_string()
+        }
+        None => {
+            // No env-var name supplied. Accept the absence only when the
+            // test seam supplied a file-backed override; otherwise refuse
+            // and name the canonical field.
+            if webhook_secret_file.is_none() {
+                return Err(ConfigError::MissingField {
+                    field: "linear.webhook_secret_env".to_string(),
+                });
+            }
+            String::new()
+        }
     };
-    if webhook_secret_env.trim().is_empty() {
-        return Err(ConfigError::InvalidField {
-            field: "linear.webhook_secret_env".to_string(),
-            reason: "must not be empty".to_string(),
-        });
-    }
     let token_env = linear
         .token_env
         .clone()
         .unwrap_or_else(|| DEFAULT_LINEAR_TOKEN_ENV.to_string());
     Ok(LinearConfig {
         token_env,
-        webhook_secret_env: webhook_secret_env.to_string(),
+        webhook_secret_env,
+        webhook_secret_file,
     })
 }
 

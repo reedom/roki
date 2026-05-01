@@ -49,7 +49,7 @@ use tokio::time;
 
 use crate::engine::policy::{EnginePolicy, StallReason, WorkerOutcome};
 use crate::engine::stream::{EngineLifecycleEvent, parse_line};
-use crate::orchestrator::state::{CorrelationId, IssueId, RepoId};
+use crate::orchestrator::state::{CorrelationId, IssueId};
 use crate::permissions::{PermissionMode, ResolvedPermission};
 use crate::tools::{Registry, ToolDescriptor, ToolError};
 
@@ -83,9 +83,14 @@ const STALL_TICK_INTERVAL: Duration = Duration::from_millis(100);
 /// names are part of the daemon ↔ agent contract: every additive optional
 /// field flows through the same prelude-forwarding mechanism without
 /// reinterpretation.
+///
+/// Post-7.1f: the legacy `repo: RepoId` field was dropped. The agent picks
+/// the repo at runtime via `roki_open_worktree` so a daemon-side repo
+/// stamp on the worker context conveyed nothing the agent could rely on.
+/// Downstream specs that need a repo correlation read it from the
+/// post-tool-call `WorktreeRegistry` snapshot instead.
 #[derive(Debug, Clone)]
 pub struct WorkerContext {
-    pub repo: RepoId,
     pub issue: IssueId,
     pub correlation_id: CorrelationId,
     pub workspace_dir: PathBuf,
@@ -111,13 +116,19 @@ pub struct WorkerContext {
 /// older agent reading a newer envelope sees only the keys it knows. The
 /// `version` field exists so downstream specs can detect the envelope shape
 /// without sniffing for keys.
+///
+/// Post-7.1f: the legacy `repo` field was dropped. The agent decides which
+/// repo to operate in via `roki_open_worktree`, so a pre-tool-call repo
+/// stamp would be misleading. Schema version is preserved at `1` because
+/// the field was documented as "purely contextual; the MVP agent does not
+/// rely on these"; downstream specs that depended on it move to reading
+/// the post-tool-call `WorktreeRegistry`.
 #[derive(Debug, Clone, Serialize)]
 struct PreludePayload<'a> {
     /// Schema version of the prelude envelope.
     version: u32,
-    /// Repo and issue identifiers (purely contextual; the MVP agent does not
-    /// rely on these but downstream specs may correlate logs).
-    repo: &'a str,
+    /// Issue identifier (purely contextual; downstream specs may correlate
+    /// logs).
     issue: &'a str,
     /// Tool catalog snapshot.
     #[serde(rename = "tools")]
@@ -164,7 +175,6 @@ fn error_kind(err: &ToolError) -> &'static str {
 pub fn build_session_input(ctx: &WorkerContext) -> String {
     let payload = PreludePayload {
         version: PRELUDE_VERSION,
-        repo: ctx.repo.as_str(),
         issue: ctx.issue.as_str(),
         tools: &ctx.tool_catalog,
         additional_context: ctx.additional_context.as_ref(),
@@ -572,7 +582,6 @@ mod tests {
 
     fn ctx_with_additional(additional: Option<serde_json::Value>) -> WorkerContext {
         WorkerContext {
-            repo: RepoId::new("repo-x"),
             issue: IssueId::new("ENG-7"),
             correlation_id: CorrelationId::from_uuid(Uuid::nil()),
             workspace_dir: PathBuf::from("/tmp/roki-ws"),

@@ -36,7 +36,7 @@ use roki_daemon::engine::claude::{
 };
 use roki_daemon::engine::policy::{BackoffPolicy, EnginePolicy, StallReason, WorkerOutcome};
 use roki_daemon::engine::stream::EngineLifecycleEvent;
-use roki_daemon::orchestrator::state::{CorrelationId, IssueId, RepoId};
+use roki_daemon::orchestrator::state::{CorrelationId, IssueId};
 use roki_daemon::permissions::{PermissionMode, PermissionSource, ResolvedPermission};
 use roki_daemon::workflow::{ElicitationsMode, SandboxMode};
 
@@ -105,7 +105,6 @@ fn workspace_for(mode: &str) -> TempDir {
 
 fn worker_context(workspace: PathBuf, mode: &str) -> WorkerContext {
     WorkerContext {
-        repo: RepoId::new("repo-it"),
         issue: IssueId::new("ENG-1"),
         correlation_id: CorrelationId::from_uuid(Uuid::nil()),
         workspace_dir: workspace,

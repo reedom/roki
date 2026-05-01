@@ -48,7 +48,7 @@ use tracing::warn;
 
 use crate::config::SecretString;
 use crate::orchestrator::recovery::{RecoveryIssueLifecycle, RecoveryLinearReader};
-use crate::orchestrator::state::{IssueId, RepoId};
+use crate::orchestrator::state::IssueId;
 use crate::tools::RateLimitState;
 use crate::tracker::model::{IssueState as TrackerIssueState, NormalizedIssue};
 
@@ -289,7 +289,6 @@ fn node_to_normalized(node: IssueNode) -> NormalizedIssue {
         .unwrap_or_default();
     let state = TrackerIssueState::from_linear_type(node.state.kind.as_deref().unwrap_or(""));
     NormalizedIssue {
-        repo: RepoId::new(""),
         issue: IssueId::new(node.identifier),
         title: node.title,
         description: node.description.unwrap_or_default(),
