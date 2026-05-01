@@ -63,6 +63,13 @@ impl WtTool for MockWt {
         }
         Ok(())
     }
+
+    async fn list_porcelain(
+        &self,
+        _repo_path: &Path,
+    ) -> Result<Vec<roki_daemon::tools::wt::WorktreePorcelainEntry>, WtError> {
+        Ok(Vec::new())
+    }
 }
 
 /// Mock `GhqTool` that resolves a fixed map of identifiers to real local

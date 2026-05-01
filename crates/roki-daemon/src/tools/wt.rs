@@ -65,6 +65,76 @@ pub trait WtTool: Send + Sync {
     /// Does NOT delete the underlying branch — `wt remove` is documented to
     /// preserve branches per the locked design decisions.
     async fn remove(&self, worktree_path: &Path) -> Result<(), WtError>;
+
+    /// Enumerate the worktrees registered against the git repository at
+    /// `repo_path` by invoking `git worktree list --porcelain`. The
+    /// per-repo restart-recovery walk uses this to surface candidate
+    /// `(branch, path)` pairs (task 7.1e). The primary worktree (the
+    /// repo's main checkout) is included; callers filter by branch name.
+    async fn list_porcelain(
+        &self,
+        repo_path: &Path,
+    ) -> Result<Vec<WorktreePorcelainEntry>, WtError>;
+}
+
+/// Single entry in the parsed output of `git worktree list --porcelain`.
+///
+/// `branch` is `None` when the worktree is detached or bare; recovery
+/// only consumes entries whose branch name matches the
+/// operator-configurable issue-branch regex, so detached worktrees are
+/// silently ignored.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorktreePorcelainEntry {
+    pub path: PathBuf,
+    pub branch: Option<String>,
+}
+
+/// Parse the output of `git worktree list --porcelain` into structured
+/// entries. Exposed for unit testing without invoking git.
+pub fn parse_worktree_list_porcelain(raw: &str) -> Vec<WorktreePorcelainEntry> {
+    let mut entries: Vec<WorktreePorcelainEntry> = Vec::new();
+    let mut current_path: Option<PathBuf> = None;
+    let mut current_branch: Option<String> = None;
+    for line in raw.lines() {
+        if line.is_empty() {
+            if let Some(path) = current_path.take() {
+                entries.push(WorktreePorcelainEntry {
+                    path,
+                    branch: current_branch.take(),
+                });
+            }
+            current_branch = None;
+            continue;
+        }
+        if let Some(rest) = line.strip_prefix("worktree ") {
+            // Each `worktree <path>` header starts a new record. Flush any
+            // record we were accumulating without a trailing blank line
+            // (e.g., last record in the stream).
+            if let Some(path) = current_path.take() {
+                entries.push(WorktreePorcelainEntry {
+                    path,
+                    branch: current_branch.take(),
+                });
+            }
+            current_path = Some(PathBuf::from(rest));
+            current_branch = None;
+        } else if let Some(rest) = line.strip_prefix("branch ") {
+            // Format: `branch refs/heads/<name>`. Strip the refs/heads/
+            // prefix when present.
+            let name = rest.strip_prefix("refs/heads/").unwrap_or(rest).to_string();
+            current_branch = Some(name);
+        }
+        // Other porcelain lines (HEAD, bare, detached, locked, prunable)
+        // are ignored — recovery only needs path + branch.
+    }
+    // Flush trailing record if no terminating blank line.
+    if let Some(path) = current_path.take() {
+        entries.push(WorktreePorcelainEntry {
+            path,
+            branch: current_branch.take(),
+        });
+    }
+    entries
 }
 
 /// Sanitize a Linear issue id for safe use as a Git branch / worktree path
@@ -144,12 +214,37 @@ impl WtTool for RealWt {
         }
         Ok(())
     }
+
+    async fn list_porcelain(
+        &self,
+        repo_path: &Path,
+    ) -> Result<Vec<WorktreePorcelainEntry>, WtError> {
+        // The recovery walk shells out directly to `git` (rather than
+        // `wt`) because `git worktree list --porcelain` is the canonical
+        // surface and `wt` is a thin wrapper. The behaviour is invariant
+        // across `wt` versions, and depending on `git` keeps the
+        // implementation portable.
+        let output = Command::new("git")
+            .arg("-C")
+            .arg(repo_path)
+            .args(["worktree", "list", "--porcelain"])
+            .output()
+            .await
+            .map_err(|err| classify_io(err, "list_porcelain"))?;
+        if !output.status.success() {
+            return Err(WtError::NonZeroExit {
+                message: String::from_utf8_lossy(&output.stderr).trim().to_string(),
+            });
+        }
+        let raw = String::from_utf8_lossy(&output.stdout);
+        Ok(parse_worktree_list_porcelain(&raw))
+    }
 }
 
 fn classify_io(err: std::io::Error, op: &'static str) -> WtError {
     if err.kind() == std::io::ErrorKind::NotFound {
         WtError::NotFound {
-            message: format!("`wt` not found while running {op}"),
+            message: format!("required binary not found while running {op}"),
         }
     } else {
         WtError::Io {
@@ -207,6 +302,33 @@ mod tests {
         // than panic via a missing `parent`.
         let path = worktree_path_for(Path::new("/"), "ENG-1");
         assert!(matches!(path, Err(WtError::InvalidRepoPath { .. })));
+    }
+
+    #[test]
+    fn parse_porcelain_extracts_path_and_branch_pairs() {
+        // Two records separated by blank lines, each with a HEAD line that
+        // we ignore. The branch line strips the `refs/heads/` prefix.
+        let raw = "worktree /tmp/parent/repo\nHEAD aaaaa\nbranch refs/heads/main\n\nworktree /tmp/parent/repo.ENG-1\nHEAD bbbbb\nbranch refs/heads/ENG-1\n";
+        let entries = parse_worktree_list_porcelain(raw);
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].path, PathBuf::from("/tmp/parent/repo"));
+        assert_eq!(entries[0].branch.as_deref(), Some("main"));
+        assert_eq!(entries[1].path, PathBuf::from("/tmp/parent/repo.ENG-1"));
+        assert_eq!(entries[1].branch.as_deref(), Some("ENG-1"));
+    }
+
+    #[test]
+    fn parse_porcelain_handles_detached_worktree_with_no_branch() {
+        let raw = "worktree /tmp/repo\nHEAD aaaaa\ndetached\n";
+        let entries = parse_worktree_list_porcelain(raw);
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].path, PathBuf::from("/tmp/repo"));
+        assert_eq!(entries[0].branch, None);
+    }
+
+    #[test]
+    fn parse_porcelain_returns_empty_for_empty_input() {
+        assert!(parse_worktree_list_porcelain("").is_empty());
     }
 
     #[tokio::test]

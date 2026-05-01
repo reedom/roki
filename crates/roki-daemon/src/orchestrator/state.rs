@@ -61,7 +61,7 @@ use uuid::Uuid;
 /// shape, and downstream code already pattern-matches on `String`-equivalent
 /// newtypes only. The state machine itself does not key by `RepoId`; the type
 /// stays public for the agent-driven worktree allowlist that 7.1d wires.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct RepoId(String);
 
 impl RepoId {
@@ -75,7 +75,7 @@ impl RepoId {
 }
 
 /// Linear issue identifier (e.g. `ENG-42`).
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct IssueId(String);
 
 impl IssueId {

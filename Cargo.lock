@@ -1785,6 +1785,7 @@ dependencies = [
  "liquid",
  "notify",
  "notify-debouncer-mini",
+ "regex",
  "reqwest",
  "serde",
  "serde_json",

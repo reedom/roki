@@ -57,7 +57,8 @@ use crate::orchestrator::events::EventBus;
 use crate::orchestrator::hooks::{HookRegistry, PreCleanupContext};
 use crate::orchestrator::read::{IssueState, OrchestratorRead, SnapshotResponse};
 use crate::orchestrator::recovery::{
-    RecoveryDecision, RecoveryError, RecoveryLinearReader, run_recovery,
+    IssueBranchPattern, RecoveryDecision, RecoveryError, RecoveryLinearReader, RecoveryRepoInput,
+    run_recovery,
 };
 use crate::orchestrator::state::{
     CorrelationId, IssueId, RepoId, TransitionEvent, TransitionTrigger, VetoDecision, WorkerState,
@@ -68,7 +69,7 @@ use crate::shutdown::ShutdownSignal;
 use crate::tools::WtTool;
 use crate::tracker::model::{IssueState as TrackerIssueState, NormalizedIssue};
 use crate::workflow::{ElicitationsMode, SandboxMode};
-use crate::worktrees::{RecoveryListing, WorktreeRegistry};
+use crate::worktrees::WorktreeRegistry;
 
 /// Error type re-exported for the engine launcher trait so downstream test
 /// stubs and the real `ClaudeEngineAdapter` can both surface launch failures
@@ -295,7 +296,7 @@ impl Orchestrator {
     /// state.
     #[allow(
         clippy::too_many_arguments,
-        reason = "Orchestrator wiring requires every singleton plus the recovery sender and reader; collapsing into a builder would obscure the constructor's contract for the single caller (the daemon main)."
+        reason = "Orchestrator wiring requires every singleton plus the recovery sender, reader, repo list, and pattern; collapsing into a builder would obscure the constructor's contract for the single caller (the daemon main)."
     )]
     pub async fn with_recovery(
         session_manager: Arc<SessionManager>,
@@ -307,10 +308,20 @@ impl Orchestrator {
         shutdown: ShutdownSignal,
         tracker_inbox: mpsc::Receiver<NormalizedIssue>,
         recovery_sender: mpsc::Sender<NormalizedIssue>,
-        recovery_listing: &dyn RecoveryListing,
+        recovery_repos: &[RecoveryRepoInput],
+        recovery_pattern: &IssueBranchPattern,
         reader: &dyn RecoveryLinearReader,
     ) -> Result<(Self, Vec<RecoveryDecision>), RecoveryError> {
-        let decisions = run_recovery(recovery_listing, reader, &recovery_sender).await?;
+        let decisions = run_recovery(
+            session_manager.as_ref(),
+            recovery_repos,
+            recovery_pattern,
+            wt.as_ref(),
+            reader,
+            &worktree_registry,
+            &recovery_sender,
+        )
+        .await?;
         let orchestrator = Self::new(
             session_manager,
             worktree_registry,
@@ -1222,6 +1233,13 @@ mod tests {
 
             async fn remove(&self, _worktree_path: &Path) -> Result<(), WtError> {
                 Ok(())
+            }
+
+            async fn list_porcelain(
+                &self,
+                _repo_path: &Path,
+            ) -> Result<Vec<crate::tools::wt::WorktreePorcelainEntry>, WtError> {
+                Ok(Vec::new())
             }
         }
 

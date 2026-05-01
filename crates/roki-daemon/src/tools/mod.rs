@@ -23,7 +23,7 @@ pub mod wt;
 
 pub use ghq::{GhqError, GhqTool, RealGhq};
 pub use roki_open_worktree::OpenWorktreeTool;
-pub use wt::{RealWt, WtError, WtTool};
+pub use wt::{RealWt, WorktreePorcelainEntry, WtError, WtTool};
 
 /// Stable surface for an agent-callable tool. Implementations MUST keep
 /// `name`, `input_schema`, and `output_schema` immutable for the life of the

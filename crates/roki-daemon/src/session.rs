@@ -128,6 +128,47 @@ impl SessionManager {
         Ok(path)
     }
 
+    /// Enumerate every existing session tempdir under [`Self::root`] and
+    /// return the directory names as `IssueId`s.
+    ///
+    /// Returns an empty vec when the sessions root does not exist (a fresh
+    /// host has no `~/Library/Caches/roki/sessions/` until the daemon
+    /// creates its first session). Surfacing this as an empty result keeps
+    /// recovery's first-run path clean.
+    ///
+    /// Used by the restart-recovery walk (task 7.1e).
+    pub fn list_existing_sessions(&self) -> Result<Vec<IssueId>, SessionError> {
+        if !self.root.exists() {
+            return Ok(Vec::new());
+        }
+        let entries = std::fs::read_dir(&self.root).map_err(|source| SessionError::Io {
+            path: self.root.clone(),
+            source,
+        })?;
+        let mut issues: Vec<IssueId> = Vec::new();
+        for entry in entries {
+            let entry = entry.map_err(|source| SessionError::Io {
+                path: self.root.clone(),
+                source,
+            })?;
+            let path = entry.path();
+            if !path.is_dir() {
+                continue;
+            }
+            let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+                continue;
+            };
+            if name.is_empty() {
+                continue;
+            }
+            issues.push(IssueId::new(name));
+        }
+        // Stable lexicographic ordering so callers (recovery in particular)
+        // see deterministic results across runs.
+        issues.sort_by(|a, b| a.as_str().cmp(b.as_str()));
+        Ok(issues)
+    }
+
     /// Idempotently remove the session tempdir for `issue`. Treats a missing
     /// directory as success so callers can call this from a cleanup path
     /// without checking existence first.
@@ -223,6 +264,38 @@ mod tests {
         let probe = manager.session_path(&issue);
         assert_eq!(probe, root.path().join("ENG-3"));
         assert!(!probe.exists());
+    }
+
+    #[test]
+    fn list_existing_sessions_returns_empty_when_root_missing() {
+        let root = TempDir::new().expect("tempdir");
+        let inner = root.path().join("not-yet-created");
+        let manager = SessionManager::with_root(&inner);
+        let sessions = manager
+            .list_existing_sessions()
+            .expect("missing root must surface as empty list");
+        assert!(sessions.is_empty());
+    }
+
+    #[test]
+    fn list_existing_sessions_enumerates_all_subdirs_sorted() {
+        let root = TempDir::new().expect("tempdir");
+        let manager = SessionManager::with_root(root.path());
+        manager
+            .create_session(&IssueId::new("ENG-2"))
+            .expect("eng2");
+        manager
+            .create_session(&IssueId::new("ENG-10"))
+            .expect("eng10");
+        manager
+            .create_session(&IssueId::new("ABC-1"))
+            .expect("abc1");
+        // A spurious file at the root must be ignored.
+        std::fs::write(root.path().join("not-a-dir"), "").expect("write");
+
+        let sessions = manager.list_existing_sessions().expect("list");
+        let names: Vec<&str> = sessions.iter().map(|i| i.as_str()).collect();
+        assert_eq!(names, vec!["ABC-1", "ENG-10", "ENG-2"]);
     }
 
     #[test]

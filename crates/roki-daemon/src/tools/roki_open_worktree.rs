@@ -283,6 +283,13 @@ mod tests {
         async fn remove(&self, _worktree_path: &Path) -> Result<(), WtError> {
             Ok(())
         }
+
+        async fn list_porcelain(
+            &self,
+            _repo_path: &Path,
+        ) -> Result<Vec<crate::tools::wt::WorktreePorcelainEntry>, WtError> {
+            Ok(Vec::new())
+        }
     }
 
     fn build_tool(

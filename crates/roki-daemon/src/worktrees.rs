@@ -27,8 +27,6 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
-use async_trait::async_trait;
-
 use crate::orchestrator::state::{IssueId, RepoId};
 
 /// One entry in the [`WorktreeRegistry`]: the repo the agent opened, the
@@ -151,41 +149,13 @@ impl WorktreeRegistry {
     }
 }
 
-/// Restart-recovery surface (transitional between 7.1d and 7.1e).
-///
-/// 7.1e replaces this with the documented walk over both session tempdirs
-/// AND every configured repo's `git worktree list --porcelain`. Until then
-/// the in-memory [`WorktreeRegistry`] returns an empty Vec post-restart
-/// (the registry resets on process restart) so recovery emits zero
-/// `OrphanedWorktree` decisions on the production path; the test seam
-/// supplies a stub returning hand-rolled `(RepoId, IssueId, PathBuf)`
-/// tuples that exercise the matrix.
-#[async_trait]
-pub trait RecoveryListing: Send + Sync {
-    /// Every `(repo, issue, worktree_path)` triple recovery should
-    /// reconcile against Linear. The MVP impl returns an empty Vec; 7.1e
-    /// folds the disk-walk implementation.
-    async fn list_existing(&self) -> Result<Vec<(RepoId, IssueId, PathBuf)>, RecoveryListingError>;
-}
-
-/// Minimal error type for [`RecoveryListing`]. Stays narrow on purpose;
-/// 7.1e expands this when it folds in `git worktree list --porcelain`
-/// failure modes.
-#[derive(Debug, thiserror::Error)]
-pub enum RecoveryListingError {
-    #[error("recovery listing failed: {message}")]
-    Other { message: String },
-}
-
-#[async_trait]
-impl RecoveryListing for WorktreeRegistry {
-    async fn list_existing(&self) -> Result<Vec<(RepoId, IssueId, PathBuf)>, RecoveryListingError> {
-        // The registry is in-memory only; after a daemon restart it is
-        // empty by construction. 7.1e replaces this with the disk-walk
-        // recovery implementation.
-        Ok(Vec::new())
-    }
-}
+// Note: the transitional `RecoveryListing` trait owned by 7.1d (which
+// returned hand-rolled `(repo, issue, path)` triples for the recovery
+// matrix) was removed in 7.1e. Recovery now walks session tempdirs +
+// `git worktree list --porcelain` directly via `SessionManager` and
+// `WtTool::list_porcelain`; the in-memory `WorktreeRegistry` is
+// repopulated by `run_recovery` for `ResumeActive` decisions so the
+// post-recovery `Cleaning` arc still finds the surviving worktrees.
 
 #[cfg(test)]
 mod tests {

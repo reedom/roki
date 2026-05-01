@@ -105,6 +105,12 @@ pub struct Config {
     /// post-7.1a). The single `WORKFLOW.md` policy applies regardless of
     /// which configured repo(s) the agent picks.
     pub workflow: WorkflowConfig,
+
+    /// Restart-recovery configuration (Requirement 10.1, post-7.1e).
+    /// Carries the operator-configurable issue-branch regex used to
+    /// filter `git worktree list --porcelain` entries during the
+    /// startup recovery scan.
+    pub recovery: RecoveryConfig,
 }
 
 /// Resolved workspace-level Linear configuration (post-7.1a).
@@ -134,6 +140,21 @@ pub struct LinearConfig {
 pub struct WorkflowConfig {
     /// Filesystem path to the workspace-level `WORKFLOW.md`. Required.
     pub path: PathBuf,
+}
+
+/// Resolved restart-recovery configuration (post-7.1e).
+///
+/// Optional: when the operator omits the `[recovery]` block entirely the
+/// daemon uses [`crate::orchestrator::recovery::DEFAULT_ISSUE_BRANCH_PATTERN`]
+/// (`^[A-Z]+-\d+$`). When the operator provides a pattern, it is compiled
+/// at config-load time so an invalid regex is a hard refusal — the daemon
+/// will not start with a broken pattern.
+#[derive(Debug, Clone, Default)]
+pub struct RecoveryConfig {
+    /// Compiled issue-branch pattern. The recovery walk filters
+    /// `git worktree list --porcelain` branches against this regex when
+    /// admitting them as candidate `IssueId`s.
+    pub issue_branch_pattern: crate::orchestrator::recovery::IssueBranchPattern,
 }
 
 /// On-disk shape of the config file.
@@ -168,6 +189,19 @@ struct ConfigFile {
 
     #[serde(default)]
     workflow: Option<WorkflowFile>,
+
+    #[serde(default)]
+    recovery: Option<RecoveryFile>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RecoveryFile {
+    /// Operator-configurable issue-branch regex used to filter
+    /// `git worktree list --porcelain` branches. Default
+    /// (`^[A-Z]+-\d+$`) is applied when this key is absent.
+    #[serde(default)]
+    issue_branch_pattern: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -469,6 +503,7 @@ impl Config {
         let linear_endpoint = file.linear.as_ref().and_then(|f| f.endpoint.clone());
         let linear = resolve_linear_block(file.linear.as_ref())?;
         let workflow = resolve_workflow_block(file.workflow.as_ref())?;
+        let recovery = resolve_recovery_block(file.recovery.as_ref())?;
 
         Ok(Self {
             linear_token,
@@ -482,8 +517,37 @@ impl Config {
             linear_endpoint,
             linear,
             workflow,
+            recovery,
         })
     }
+}
+
+/// Resolve the optional `[recovery]` block. Absent keys fall back to
+/// the documented default pattern (`^[A-Z]+-\d+$`). An invalid regex is
+/// a hard refusal at config load time.
+fn resolve_recovery_block(recovery: Option<&RecoveryFile>) -> Result<RecoveryConfig, ConfigError> {
+    let Some(block) = recovery else {
+        return Ok(RecoveryConfig::default());
+    };
+    let Some(raw) = block.issue_branch_pattern.as_deref() else {
+        return Ok(RecoveryConfig::default());
+    };
+    if raw.trim().is_empty() {
+        return Err(ConfigError::InvalidField {
+            field: "recovery.issue_branch_pattern".to_string(),
+            reason: "must not be empty".to_string(),
+        });
+    }
+    let pattern =
+        crate::orchestrator::recovery::IssueBranchPattern::compile(raw).map_err(|err| {
+            ConfigError::InvalidField {
+                field: "recovery.issue_branch_pattern".to_string(),
+                reason: err.to_string(),
+            }
+        })?;
+    Ok(RecoveryConfig {
+        issue_branch_pattern: pattern,
+    })
 }
 
 /// Resolve the workspace-level `[linear]` block. Per Requirement 2.3 the
@@ -1327,6 +1391,68 @@ key = "ENG"
             }
             other => panic!("expected Parse error, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn recovery_block_defaults_when_absent() {
+        // Post-7.1e: the daemon picks up the documented default
+        // `^[A-Z]+-\d+$` when `[recovery]` is absent from config.
+        let cfg =
+            Config::load_from_str(valid_config_toml_71a(), &fixture_path(), &env_with_token())
+                .expect("post-7.1a config without [recovery] must load");
+        assert!(cfg.recovery.issue_branch_pattern.matches("ENG-1"));
+        assert!(!cfg.recovery.issue_branch_pattern.matches("foo/bar"));
+    }
+
+    #[test]
+    fn recovery_block_accepts_custom_pattern() {
+        let body = r#"
+[linear]
+token_env = "MY_LINEAR_TOKEN"
+webhook_secret_env = "ROKI_LINEAR_WEBHOOK_SECRET"
+
+[workflow]
+path = "/srv/policy/WORKFLOW.md"
+
+[permissions]
+strategy = "dangerously_skip_permissions"
+
+[recovery]
+issue_branch_pattern = "^issue-\\d+$"
+
+[[repos]]
+repo = "owner/core"
+"#;
+        let cfg = Config::load_from_str(body, &fixture_path(), &env_with_token())
+            .expect("custom recovery pattern must load");
+        assert!(cfg.recovery.issue_branch_pattern.matches("issue-42"));
+        assert!(!cfg.recovery.issue_branch_pattern.matches("ENG-1"));
+    }
+
+    #[test]
+    fn recovery_block_rejects_invalid_regex() {
+        // Hard refusal: an invalid regex must fail config load with the
+        // offending field named so the operator can fix the toml.
+        let body = r#"
+[linear]
+token_env = "MY_LINEAR_TOKEN"
+webhook_secret_env = "ROKI_LINEAR_WEBHOOK_SECRET"
+
+[workflow]
+path = "/srv/policy/WORKFLOW.md"
+
+[permissions]
+strategy = "dangerously_skip_permissions"
+
+[recovery]
+issue_branch_pattern = "[unclosed"
+
+[[repos]]
+repo = "owner/core"
+"#;
+        let err = Config::load_from_str(body, &fixture_path(), &env_with_token())
+            .expect_err("invalid regex must be refused at config load");
+        assert_eq!(err.field(), Some("recovery.issue_branch_pattern"));
     }
 
     #[test]

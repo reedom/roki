@@ -62,7 +62,10 @@ use crate::orchestrator::core::{
 };
 use crate::orchestrator::events::EventBus;
 use crate::orchestrator::hooks::HookRegistry;
+use crate::orchestrator::recovery::RecoveryRepoInput;
+use crate::orchestrator::state::RepoId;
 use crate::orchestrator::tracker_bridge::TrackerBridge;
+use crate::recovery_reader::LinearRecoveryReader;
 use crate::session::SessionManager;
 use crate::shutdown::{
     SHUTDOWN_WINDOW, ShutdownSignal, await_workers_with_window, install_signal_handlers,
@@ -286,7 +289,51 @@ pub async fn run_with_shutdown(
         .unwrap_or_default();
 
     let (inbox_tx, inbox_rx) = mpsc::channel::<NormalizedIssue>(64);
-    let orchestrator = Orchestrator::new(
+
+    // ---- 5b. resolve restart-recovery inputs ---------------------------
+    // Task 7.1e: rebuild the in-memory recovery surface by walking
+    // session tempdirs + per-repo `git worktree list --porcelain`. Each
+    // configured `[[repos]]` entry must resolve to a local checkout path
+    // via `ghq list -p`; missing checkouts are skipped (the repo may be
+    // configured but not yet cloned).
+    let rate_limit: Arc<dyn RateLimitState> = Arc::new(NoopRateLimit);
+    let linear_endpoint = config
+        .linear_endpoint
+        .clone()
+        .or_else(|| std::env::var("ROKI_LINEAR_ENDPOINT").ok())
+        .unwrap_or_else(|| DEFAULT_LINEAR_ENDPOINT.to_string());
+
+    let mut recovery_repos: Vec<RecoveryRepoInput> = Vec::with_capacity(config.repos.len());
+    for repo in &config.repos {
+        match _ghq.list_path(&repo.repo).await {
+            Ok(Some(path)) => recovery_repos.push(RecoveryRepoInput {
+                repo: RepoId::new(repo.repo.clone()),
+                repo_path: path,
+            }),
+            Ok(None) => {
+                info!(
+                    repo = %repo.repo,
+                    "configured repo has no local checkout; recovery walk will skip it",
+                );
+            }
+            Err(err) => {
+                warn!(
+                    repo = %repo.repo,
+                    error = %err,
+                    "ghq list -p failed; skipping repo in recovery walk",
+                );
+            }
+        }
+    }
+
+    let recovery_reader = LinearRecoveryReader::new(
+        linear_endpoint.clone(),
+        crate::config::SecretString::new(config.linear_token.expose().to_string()),
+        Arc::clone(&rate_limit),
+    );
+
+    let recovery_pattern = config.recovery.issue_branch_pattern.clone();
+    let (orchestrator, recovery_decisions) = Orchestrator::with_recovery(
         Arc::clone(&session_manager),
         worktree_registry.clone(),
         Arc::clone(&wt),
@@ -295,22 +342,25 @@ pub async fn run_with_shutdown(
         Arc::clone(&hook_registry),
         shutdown.clone(),
         inbox_rx,
+        inbox_tx.clone(),
+        &recovery_repos,
+        &recovery_pattern,
+        &recovery_reader,
     )
-    .with_engine_policy(engine_policy);
+    .await
+    .with_context(|| "restart recovery scan failed during bootstrap")?;
+    let orchestrator = orchestrator.with_engine_policy(engine_policy);
     let orchestrator_read = orchestrator.read_handle();
+    info!(
+        decisions = recovery_decisions.len(),
+        "restart recovery completed",
+    );
 
     // ---- 6. per-repo trackers + webhook routes -------------------------
     let mut tracker_join: JoinSet<()> = JoinSet::new();
     let mut router = Router::new();
     let (webhook_tx_master, webhook_rx_master) = mpsc::channel::<NormalizedIssue>(64);
     let (polling_tx_master, polling_rx_master) = mpsc::channel::<NormalizedIssue>(64);
-
-    let rate_limit: Arc<dyn RateLimitState> = Arc::new(NoopRateLimit);
-    let linear_endpoint = config
-        .linear_endpoint
-        .clone()
-        .or_else(|| std::env::var("ROKI_LINEAR_ENDPOINT").ok())
-        .unwrap_or_else(|| DEFAULT_LINEAR_ENDPOINT.to_string());
 
     let mut tracker_shutdowns: Vec<oneshot::Sender<()>> = Vec::with_capacity(config.repos.len());
 
