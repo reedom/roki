@@ -211,7 +211,7 @@
   - _Depends: 3.2, 3.3, 3.5, 3.6_
   - _Requirements: 1.1, 4.3, 8.2, 10.3, 13.2_
 
-- [ ] 4.3 End-to-end failure-path test for retry budget exhaustion
+- [x] 4.3 End-to-end failure-path test for retry budget exhaustion
   - Drive the same harness so that the fake `claude` binary repeatedly exits non-cleanly until the configured retry budget is exhausted; assert the worker lands in `TerminalFailure` with the workspace retained and the failure logged.
   - Observable completion: the test passes deterministically and the post-run filesystem layout still contains the workspace directory while the orchestrator state for that key is `TerminalFailure`.
   - _Depends: 3.7, 4.2_
