@@ -117,7 +117,7 @@
   - _Requirements: 5.3, 5.4, 5.5, 5.6_
   - _Boundary: engine/policy_
 
-- [ ] 2.9 (P) Implement the permission strategy resolver
+- [x] 2.9 (P) Implement the permission strategy resolver
   - Resolve the effective permission strategy per worker by combining operator selection (`--settings` allowlist or `--dangerously-skip-permissions`) with any per-repo override declared in `WORKFLOW.md`.
   - Apply `workspace-write` and reject-elicitations as defaults, refuse to launch a worker when neither strategy is configured, and emit a per-launch log entry when the dangerous fallback is used.
   - Observable completion: a unit test exercises the four matrix cells (allowlist on or off; dangerous on or off; per-repo override present or absent) and asserts the resolved strategy plus the launch-time log shape for the dangerous case.
