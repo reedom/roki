@@ -87,7 +87,7 @@
   - _Requirements: 3.2, 3.3, 3.4, 3.5_
   - _Boundary: tracker/linear_
 
-- [ ] 2.5a (P) Publish the `TrackerRefresh` nudge trait
+- [x] 2.5a (P) Publish the `TrackerRefresh` nudge trait
   - Define the `TrackerRefresh` trait with a single `nudge()` method returning a `RefreshAccepted` shape and grant no read or mutation surface beyond requesting that the next poll be scheduled sooner.
   - Implement the trait on the tracker adapter so that an out-of-cycle nudge advances only the next-poll deadline, never bypassing the documented cadence cap or the 429 backoff state.
   - Observable completion: a unit test asserts that a nudge during an active 429 backoff window does not shorten the backoff and that a nudge during a normal idle window advances the next-poll deadline; the response shape names the window within which polling will occur.

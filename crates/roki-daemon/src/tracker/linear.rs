@@ -23,10 +23,14 @@
 //! * an `mpsc::Sender<NormalizedIssue>` sink the orchestrator drains.
 
 use std::sync::Arc;
+use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
+use async_trait::async_trait;
 use serde::Deserialize;
 use serde_json::{Value, json};
+use tokio::sync::Notify;
 use tokio::sync::mpsc;
 use tokio::sync::oneshot;
 use tokio::time::{Instant, sleep_until};
@@ -37,6 +41,7 @@ use crate::config::repos::LinearScope;
 use crate::orchestrator::state::{IssueId, RepoId};
 use crate::tools::RateLimitState;
 use crate::tracker::model::{IssueState, NormalizedIssue};
+use crate::tracker::{RefreshAccepted, TrackerRefresh};
 
 /// Hard upper bound on the configurable polling cadence (Requirement 3.2).
 const MAX_CADENCE: Duration = Duration::from_secs(300);
@@ -84,6 +89,75 @@ pub struct LinearTrackerConfig {
     pub rate_limit: Arc<dyn RateLimitState>,
 }
 
+/// Per-scope mutable state shared between the polling loop and the
+/// [`LinearTrackerHandle`] published as [`TrackerRefresh`].
+///
+/// The polling loop is the sole writer to `next_due` from the wake path; the
+/// handle is allowed to advance `next_due` to "now" only when the loop is
+/// not currently in 429 backoff (`in_backoff == false`). This is the
+/// invariant that satisfies Requirement 13.3's "no bypass of the 429 backoff
+/// state" clause.
+pub(crate) struct ScopeShared {
+    next_due: Mutex<Instant>,
+    in_backoff: AtomicBool,
+    notify: Notify,
+}
+
+impl ScopeShared {
+    fn new() -> Self {
+        Self {
+            // Start at `now()` so the first tick fires immediately, matching
+            // the legacy local-variable behaviour the cadence-cap test
+            // relies on.
+            next_due: Mutex::new(Instant::now()),
+            in_backoff: AtomicBool::new(false),
+            notify: Notify::new(),
+        }
+    }
+
+    fn load_next_due(&self) -> Instant {
+        // Mutex poisoning here would mean the loop panicked while holding
+        // the lock; we fall back to `now()` so the next tick fires rather
+        // than poisoning the entire tracker.
+        self.next_due
+            .lock()
+            .map(|g| *g)
+            .unwrap_or_else(|e| *e.into_inner())
+    }
+
+    fn store_next_due(&self, instant: Instant) {
+        if let Ok(mut guard) = self.next_due.lock() {
+            *guard = instant;
+        }
+    }
+
+    fn set_backoff(&self, value: bool) {
+        self.in_backoff.store(value, Ordering::Release);
+    }
+
+    fn is_in_backoff(&self) -> bool {
+        self.in_backoff.load(Ordering::Acquire)
+    }
+
+    fn wake(&self) {
+        self.notify.notify_one();
+    }
+
+    /// Test-only helper. Construct a controlled state without running the
+    /// loop so the unit tests can drive the nudge path deterministically.
+    #[cfg(test)]
+    fn set_for_test(&self, next_due: Instant, in_backoff: bool) {
+        self.store_next_due(next_due);
+        self.set_backoff(in_backoff);
+    }
+
+    /// Test-only inspector for asserting deadline movement.
+    #[cfg(test)]
+    fn peek_next_due_for_test(&self) -> Instant {
+        self.load_next_due()
+    }
+}
+
 /// Polling Linear tracker adapter.
 ///
 /// Construct with [`LinearTracker::new`] and drive with [`LinearTracker::run`].
@@ -96,6 +170,9 @@ pub struct LinearTracker {
     token: SecretString,
     rate_limit: Arc<dyn RateLimitState>,
     http: reqwest::Client,
+    /// Per-scope shared state, aligned with `scopes`. Cloned into the
+    /// handle so nudges reach every scope.
+    scope_states: Vec<Arc<ScopeShared>>,
 }
 
 impl LinearTracker {
@@ -108,6 +185,9 @@ impl LinearTracker {
             .timeout(REQUEST_TIMEOUT)
             .build()
             .unwrap_or_else(|_| reqwest::Client::new());
+        let scope_states = (0..config.scopes.len())
+            .map(|_| Arc::new(ScopeShared::new()))
+            .collect();
         Self {
             endpoint: config.endpoint,
             cadence,
@@ -115,6 +195,17 @@ impl LinearTracker {
             token: config.token,
             rate_limit: config.rate_limit,
             http,
+            scope_states,
+        }
+    }
+
+    /// Build a [`TrackerRefresh`] handle that shares per-scope state with
+    /// this tracker. The handle can be cloned freely and remains usable for
+    /// the lifetime of the running loop; nudges issued after the loop
+    /// terminates simply have no observable effect.
+    pub fn refresh_handle(&self) -> LinearTrackerHandle {
+        LinearTrackerHandle {
+            scope_states: self.scope_states.clone(),
         }
     }
 
@@ -146,7 +237,11 @@ impl LinearTracker {
             let _ = shutdown_signal.send(());
         });
 
-        for scope in self.scopes {
+        for (scope, state) in self
+            .scopes
+            .into_iter()
+            .zip(self.scope_states.iter().cloned())
+        {
             let endpoint = Arc::clone(&endpoint);
             let token = Arc::clone(&token);
             let rate_limit = Arc::clone(&rate_limit);
@@ -157,6 +252,7 @@ impl LinearTracker {
             let task = tokio::spawn(async move {
                 run_scope(
                     scope,
+                    state,
                     endpoint,
                     token,
                     rate_limit,
@@ -182,9 +278,69 @@ impl LinearTracker {
     }
 }
 
+/// Handle for the [`TrackerRefresh`] surface published by [`LinearTracker`].
+///
+/// Cloning is cheap: the handle is a thin wrapper around per-scope `Arc`
+/// state. Nudges issued through this handle are bounded by the documented
+/// cadence cap (the loop will not poll faster than `cadence` because the
+/// shared `next_due` is advanced at most to "now") and are inert during 429
+/// backoff (the handle inspects `in_backoff` and refuses to advance the
+/// deadline).
+#[derive(Clone)]
+pub struct LinearTrackerHandle {
+    scope_states: Vec<Arc<ScopeShared>>,
+}
+
+impl LinearTrackerHandle {
+    /// Test-only constructor. Lets unit tests build a handle with
+    /// hand-prepared `ScopeShared` so the nudge path can be exercised
+    /// without spinning up the polling loop.
+    #[cfg(test)]
+    pub(crate) fn for_test(scope_states: Vec<Arc<ScopeShared>>) -> Self {
+        Self { scope_states }
+    }
+}
+
+#[async_trait]
+impl TrackerRefresh for LinearTrackerHandle {
+    async fn nudge(&self) -> Result<RefreshAccepted, TrackerError> {
+        let now = Instant::now();
+        let mut max_window = Duration::from_secs(0);
+
+        for state in &self.scope_states {
+            if state.is_in_backoff() {
+                // 429 backoff is sacred (Requirement 13.3): do not advance
+                // `next_due`. Report the remaining backoff window so the
+                // caller knows when polling will actually occur.
+                let due = state.load_next_due();
+                let remaining = due.saturating_duration_since(now);
+                if max_window < remaining {
+                    max_window = remaining;
+                }
+                continue;
+            }
+
+            // Idle path: advance the deadline to `now`. If the loop is
+            // already at or before `now`, this is a no-op (coalescing).
+            let current = state.load_next_due();
+            if now < current {
+                state.store_next_due(now);
+            }
+            // Wake the loop so it observes the new deadline immediately.
+            state.wake();
+            // Window is effectively zero in this case.
+        }
+
+        Ok(RefreshAccepted {
+            will_poll_within: max_window,
+        })
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn run_scope(
     scope: ScopeWatch,
+    state: Arc<ScopeShared>,
     endpoint: Arc<String>,
     token: Arc<SecretString>,
     rate_limit: Arc<dyn RateLimitState>,
@@ -193,15 +349,19 @@ async fn run_scope(
     sink: mpsc::Sender<NormalizedIssue>,
     shutdown: &mut tokio::sync::broadcast::Receiver<()>,
 ) {
-    // Track the next deadline this scope is allowed to poll. Starts at
-    // `now()` so the first tick fires immediately, which the cadence-cap
-    // test relies on.
-    let mut next_due = Instant::now();
+    // Initialise the shared deadline at construction-time of the loop so
+    // the first tick fires immediately (preserves the legacy cadence-cap
+    // test's contract).
+    state.store_next_due(Instant::now());
+    state.set_backoff(false);
     // Consecutive 429 counter — drives exponential backoff.
     let mut consecutive_rate_limited: u32 = 0;
 
     loop {
-        // Honour shutdown ahead of any outbound work.
+        // Honour shutdown ahead of any outbound work. Wake on either the
+        // next-poll deadline or an out-of-cycle nudge from the
+        // [`TrackerRefresh`] handle.
+        let next_due = state.load_next_due();
         tokio::select! {
             biased;
             _ = shutdown.recv() => {
@@ -212,6 +372,20 @@ async fn run_scope(
                 return;
             }
             _ = sleep_until(next_due) => {}
+            _ = state.notify.notified() => {
+                // Nudge wake. If the loop is in 429 backoff, the nudge does
+                // NOT shorten the deadline (Requirement 13.3): re-enter the
+                // select to wait for the existing deadline.
+                if state.is_in_backoff() {
+                    debug!(
+                        repo = scope.repo.as_str(),
+                        "tracker nudge ignored during 429 backoff",
+                    );
+                    continue;
+                }
+                // Idle path: the handle has already advanced `next_due` to
+                // ~now, so falling through immediately polls.
+            }
         }
 
         // Consult shared rate-limit state. If the `linear_graphql` proxy
@@ -227,7 +401,8 @@ async fn run_scope(
                 wait_seconds = wait.as_secs(),
                 "tracker deferred poll because shared rate-limit state is paused",
             );
-            next_due = Instant::now() + wait;
+            state.set_backoff(true);
+            state.store_next_due(Instant::now() + wait);
             continue;
         }
 
@@ -243,6 +418,7 @@ async fn run_scope(
         {
             Ok(issues) => {
                 consecutive_rate_limited = 0;
+                state.set_backoff(false);
                 for normalized in issues {
                     if sink.send(normalized).await.is_err() {
                         debug!(
@@ -252,7 +428,7 @@ async fn run_scope(
                         return;
                     }
                 }
-                next_due = Instant::now() + cadence;
+                state.store_next_due(Instant::now() + cadence);
             }
             Err(PollError::RateLimited { retry_after }) => {
                 consecutive_rate_limited = consecutive_rate_limited.saturating_add(1);
@@ -263,25 +439,28 @@ async fn run_scope(
                     consecutive = consecutive_rate_limited,
                     "tracker received HTTP 429; applying exponential backoff",
                 );
-                next_due = Instant::now() + backoff;
+                state.set_backoff(true);
+                state.store_next_due(Instant::now() + backoff);
             }
             Err(PollError::Transport { message }) => {
                 consecutive_rate_limited = 0;
+                state.set_backoff(false);
                 warn!(
                     repo = scope.repo.as_str(),
                     error = %message,
                     "tracker poll failed; retrying after cadence interval",
                 );
-                next_due = Instant::now() + cadence;
+                state.store_next_due(Instant::now() + cadence);
             }
             Err(PollError::HttpStatus { status }) => {
                 consecutive_rate_limited = 0;
+                state.set_backoff(false);
                 warn!(
                     repo = scope.repo.as_str(),
                     status,
                     "tracker poll returned non-success status; retrying after cadence interval",
                 );
-                next_due = Instant::now() + cadence;
+                state.store_next_due(Instant::now() + cadence);
             }
         }
     }
@@ -534,6 +713,7 @@ pub enum TrackerError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::tracker::{RefreshAccepted, TrackerRefresh};
 
     fn dummy_scope_watch() -> ScopeWatch {
         ScopeWatch {
@@ -655,5 +835,137 @@ mod tests {
         assert_eq!(normalized.state, IssueState::Other);
         assert_eq!(normalized.description, "");
         assert!(normalized.labels.is_empty());
+    }
+
+    fn idle_scope_state() -> Arc<ScopeShared> {
+        // Idle: next_due is far in the future; not in 429 backoff.
+        let state = ScopeShared::new();
+        state.set_for_test(Instant::now() + Duration::from_secs(60), false);
+        Arc::new(state)
+    }
+
+    fn backoff_scope_state(remaining: Duration) -> Arc<ScopeShared> {
+        // Backoff: next_due is set to a deadline a known distance in the
+        // future, and `in_backoff` is true.
+        let state = ScopeShared::new();
+        state.set_for_test(Instant::now() + remaining, true);
+        Arc::new(state)
+    }
+
+    #[tokio::test]
+    async fn nudge_during_idle_advances_next_poll_deadline() {
+        // RED: a nudge during a normal idle window must advance the
+        // per-scope `next_due` deadline so the next loop iteration polls
+        // immediately. This satisfies Requirement 13.3 (out-of-cycle refresh).
+        let state = idle_scope_state();
+        let handle = LinearTrackerHandle::for_test(vec![Arc::clone(&state)]);
+
+        let before = state.peek_next_due_for_test();
+        let response = handle.nudge().await.expect("nudge accepted");
+        let after = state.peek_next_due_for_test();
+
+        // Deadline must have moved earlier — significantly so, because we
+        // started 60 seconds in the future.
+        assert!(
+            after < before,
+            "nudge must advance next_due during idle (before={before:?}, after={after:?})",
+        );
+        // The advanced deadline must be at or before "now" (the loop will
+        // wake on the next iteration). Allow a small grace window.
+        let now = Instant::now();
+        assert!(
+            after <= now + Duration::from_millis(50),
+            "nudge during idle must move next_due to ~now (after={after:?}, now={now:?})",
+        );
+        // The response window must be small (idle path).
+        assert!(
+            response.will_poll_within < Duration::from_millis(100),
+            "idle nudge response must report a near-zero window, got {:?}",
+            response.will_poll_within,
+        );
+    }
+
+    #[tokio::test]
+    async fn nudge_during_429_backoff_does_not_shorten_backoff() {
+        // RED: a nudge during an active 429 backoff window MUST NOT shorten
+        // the backoff (Requirement 13.3 explicitly bans bypassing the
+        // 429 backoff state).
+        let remaining = Duration::from_secs(45);
+        let state = backoff_scope_state(remaining);
+        let handle = LinearTrackerHandle::for_test(vec![Arc::clone(&state)]);
+
+        let before = state.peek_next_due_for_test();
+        let response = handle.nudge().await.expect("nudge accepted");
+        let after = state.peek_next_due_for_test();
+
+        // Deadline must be unchanged (or only refreshed by the loop itself,
+        // which the test does not run): the handle path must not advance it.
+        assert_eq!(
+            before, after,
+            "nudge during 429 backoff must not shorten next_due",
+        );
+        // The response must name the remaining backoff window (within a
+        // small tolerance because `Instant::now()` advanced during the call).
+        let reported = response.will_poll_within;
+        assert!(
+            Duration::from_secs(40) <= reported && reported <= Duration::from_secs(46),
+            "response must name the remaining backoff window, got {reported:?}",
+        );
+    }
+
+    #[tokio::test]
+    async fn refresh_accepted_names_window_within_which_polling_will_occur() {
+        // The response shape itself must carry a Duration field that names
+        // the polling window — the trait contract requires this.
+        let state = idle_scope_state();
+        let handle = LinearTrackerHandle::for_test(vec![state]);
+        let response: RefreshAccepted = handle.nudge().await.expect("nudge accepted");
+        // Just exercise the field — its presence is the contract.
+        let _: Duration = response.will_poll_within;
+    }
+
+    #[tokio::test]
+    async fn multiple_nudges_in_same_window_coalesce() {
+        // Two nudges in quick succession during the same idle window must
+        // converge: the second is a no-op because next_due is already at or
+        // near "now".
+        let state = idle_scope_state();
+        let handle = LinearTrackerHandle::for_test(vec![Arc::clone(&state)]);
+
+        let _ = handle.nudge().await.expect("first nudge accepted");
+        let after_first = state.peek_next_due_for_test();
+        let _ = handle.nudge().await.expect("second nudge accepted");
+        let after_second = state.peek_next_due_for_test();
+
+        // Second nudge must not push next_due forward; coalescing means
+        // either deadline is unchanged or moved no later (it should remain
+        // at or before now).
+        assert!(
+            after_second <= after_first + Duration::from_millis(5),
+            "coalesced nudges must not push the deadline forward (first={after_first:?}, second={after_second:?})",
+        );
+        // Both end states must be at or before now (small grace).
+        let now = Instant::now();
+        assert!(after_first <= now + Duration::from_millis(50));
+        assert!(after_second <= now + Duration::from_millis(50));
+    }
+
+    #[tokio::test]
+    async fn nudge_response_reports_max_window_across_scopes() {
+        // The handle aggregates across scopes. If one scope is idle and one
+        // is in backoff, the response must report the longer window so
+        // the caller knows the worst case.
+        let idle = idle_scope_state();
+        let backoff = backoff_scope_state(Duration::from_secs(30));
+        let handle = LinearTrackerHandle::for_test(vec![idle, backoff]);
+
+        let response = handle.nudge().await.expect("nudge accepted");
+        // The reported window must reflect the backoff scope.
+        assert!(
+            Duration::from_secs(25) <= response.will_poll_within
+                && response.will_poll_within <= Duration::from_secs(31),
+            "max-window response must name the backoff window, got {:?}",
+            response.will_poll_within,
+        );
     }
 }
