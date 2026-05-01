@@ -234,6 +234,50 @@
   - Observable completion: the parser keeps the same outcome on the captured fixture set across changes; new fixtures can be added with a single helper.
   - _Requirements: 5.2_
 
+- [ ] 6. Workspace model migration: switch from sandbox dirs to git worktrees
+
+- [ ] 6.1 Replace the sandbox-dir workspace model with `wt` + `ghq` git worktrees
+  - _Boundary:_ `crates/roki-daemon/src/config/{mod.rs,repos.rs}`, `crates/roki-daemon/src/tools/{mod.rs,wt.rs,ghq.rs}` (the latter two new), `crates/roki-daemon/src/workspace/{mod.rs,layout.rs}`, `crates/roki-daemon/src/runtime.rs` (bootstrap composition), `SPEC.md` §2.2 + §6 (rewrite), `.kiro/specs/roki-mvp/design.md`. Tests under `crates/roki-daemon/tests/orchestrator_workspace.rs`, `e2e_happy_path.rs`, `e2e_failure_retry.rs`, `e2e_multi_repo_routing.rs` (only struct-literal cascades), `e2e_vetoable_transition.rs` (only if needed), `e2e_bootstrap.rs`, plus new unit tests beside `tools/wt.rs` and `tools/ghq.rs`.
+  - **Locked decisions** (from `.kiro/specs/roki-mvp/design-worktree-workspace.md`):
+    1. Worktree backend = `wt` (worktrunk) external CLI. Operator installs; daemon assumes on `$PATH`. Hard refusal at startup if absent.
+    2. Repo discovery = `ghq` external CLI. `RepoConfig.repo: String` carries an `owner/repo` (or `host/owner/repo`) identifier; local path resolved at runtime via `ghq list -p` / `ghq get`. Hard refusal at startup if `ghq` absent.
+    3. Branch name = the Linear issue id verbatim (`IssueId.as_str()`).
+    4. Worktree path layout = `{repo_path}/../{repo_name}.{branch_sanitized}` per monorail's `WtTool::switch_create`.
+    5. Cleanup on `Cleaning` = `wt remove` on the worktree path. Branch is NOT deleted (`wt remove` does not delete branches).
+    6. Retention on `TerminalFailure` = keep both worktree dir AND branch; the daemon simply does not call `wt remove`.
+  - **Schema delta (breaking on `path`, dropping `workspace_root`)**:
+    - Remove `workspace_root` from `Config` and from `ConfigFile`. Drop the `ROKI_WORKSPACE_ROOT` env override. Existing `roki.toml` referencing `workspace_root` must fail to load with a clear error naming the offending key.
+    - Rename `RepoConfig.path` → `RepoConfig.repo: String` (ghq identifier). Validate at load: non-empty, matches `<token>/<token>` or `<host>/<token>/<token>` shape (no whitespace, no `..`, no leading `/`).
+  - **New tools** (port from monorail):
+    - `crates/roki-daemon/src/tools/wt.rs` — `WtTool` async trait with `switch_create(repo_path: &Path, branch: &str) -> Result<PathBuf>` and `remove(worktree_path: &Path) -> Result<()>`. `RealWt` shells out to `wt -C <repo_path> switch --create <branch>` and `wt -C <worktree_path> remove`. Branch sanitization (chars outside `[A-Za-z0-9_-]` → `-`) lives here. Pure unit tests for the sanitization.
+    - `crates/roki-daemon/src/tools/ghq.rs` — `GhqTool` async trait with `list_path(full: &str) -> Result<Option<PathBuf>>` and `ensure_cloned(full: &str) -> Result<PathBuf>`. `RealGhq` shells out to `ghq list -p` and `ghq get`. Unit tests for failure-path classification (command missing → `Ok(None)` for list, distinct error for ensure).
+    - `crates/roki-daemon/src/tools/mod.rs` — re-export `WtTool`, `RealWt`, `GhqTool`, `RealGhq`. Existing `linear_graphql` re-exports remain untouched.
+  - **`Workspace` trait + `WorkspaceManager` rewrite**:
+    - `WorkspaceManager` drops `workspace_root` field; gains `wt: Arc<dyn WtTool>` and `ghq: Arc<dyn GhqTool>`.
+    - The `Workspace` trait signature stays identical. Implementations of `ensure(repo, issue)` flow: (a) look up the repo's ghq identifier from operator config (the manager carries a `HashMap<RepoId, GhqIdentifier>` populated at construction), (b) `ghq.ensure_cloned(identifier)` → repo_path, (c) `wt.switch_create(repo_path, issue.as_str())` → worktree_path, (d) return a `Workspace` whose `path` is the worktree_path.
+    - `remove(repo, issue)` derives the worktree path the same way (deterministic from repo_path + sanitized branch) and calls `wt.remove(worktree_path)`.
+    - `list_existing()` may stub-out for now (returns empty Vec) with a doc-comment pointing at task 5.2 (restart recovery) for the real impl. The current `list_existing` is only consumed by recovery, which is itself unwired (5.2 follow-up).
+    - Path-safety invariants change: drop the "must descend from `workspace_root`" rule. Keep the collision rule (two distinct issue ids must not produce the same worktree path under the same repo). Reuse `wt.rs`'s sanitizer rather than re-rolling.
+  - **Bootstrap composition** (`runtime::run_with_shutdown`):
+    - At startup, refuse with a clear actionable error if `wt` or `ghq` are not on `$PATH`. Use `which::which("wt")` / `which::which("ghq")` (add `which` as a dep if not already present) or fall back to `Command::new("wt").arg("--version").output()` and treat `NotFound` as the refusal trigger.
+    - Construct `RealWt` and `RealGhq`; thread them into `WorkspaceManager::new(wt, ghq, repo_index)` where `repo_index` is the operator-supplied map from `RepoId` to ghq identifier.
+    - Remove `workspace_root` from the bootstrap path. Drop the `Config::workspace_root` reference and any `tokio::fs::create_dir_all` for it.
+  - **Doc updates (same change set per §16)**:
+    - `SPEC.md` §2.2 — drop the `workspace root` bullet; add a new bullet describing the `repo` ghq identifier and that the worktree path is derived at runtime.
+    - `SPEC.md` §6 — rewrite the entire section: remove the `<workspace_root>/<repo>/<issue>/` layout description, replace with the `{repo_path}/../{repo_name}.{branch}` worktree layout, document the sanitization rule (lives in `wt`), document the lifecycle invariants (creation on `Queued → Active` via `wt switch --create`, deletion on `Cleaning → [*]` via `wt remove`, retention on `TerminalFailure` keeps both dir and branch).
+    - `.kiro/specs/roki-mvp/design.md` — update the `WorkspaceManager` component prose to reflect the new dependencies (`WtTool`, `GhqTool`) and the elimination of a workspace root.
+  - **Test refactor**:
+    - `tests/orchestrator_workspace.rs` — inject mock `WtTool` + mock `GhqTool` via the trait. The mocks record invocations so the test can assert "ensure → ghq.ensure_cloned called once with the configured identifier; wt.switch_create called once with the resolved repo path and the issue id" and "remove → wt.remove called once with the same worktree path".
+    - `tests/e2e_happy_path.rs`, `tests/e2e_failure_retry.rs`, `tests/e2e_bootstrap.rs` — replace the temp-dir workspace_root with a constructed `WorkspaceManager` whose `WtTool` and `GhqTool` are mocks returning a `tempfile::TempDir`-backed path that mimics the worktree layout. The orchestrator never calls into `wt`/`ghq` directly, so swapping the `WorkspaceManager` deps is sufficient.
+    - `tests/e2e_multi_repo_routing.rs` — only mechanical struct-literal updates for the renamed `RepoConfig.repo` field and removed `RepoConfig.path` field.
+    - `tests/e2e_vetoable_transition.rs` — same mechanical update if it constructs `RepoConfig` literals.
+    - All e2e tests must remain deterministic and pass 3 sequential reps each.
+  - **Refusal modes** — `runtime::run_with_shutdown` must `Err(...)` with a clear, actionable message when: `wt` not on PATH, `ghq` not on PATH, `RepoConfig.repo` malformed, `ghq.ensure_cloned` returns a network/clone failure (mark repo unhealthy and continue with other repos rather than aborting the daemon — matches existing 1.5 health-check seam), `wt switch --create` fails because the branch already exists elsewhere (escalate per `(repo, issue)`, do not abort the daemon).
+  - Observable completion: (a) `cargo test --workspace`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all -- --check` all clean; (b) every existing e2e test passes deterministically across 3 sequential reps with mock `WtTool`/`GhqTool`; (c) new unit tests in `tools/wt.rs` and `tools/ghq.rs` exercise the sanitization and failure paths; (d) `SPEC.md` §2.2 and §6 reflect the new model; (e) `RepoConfig` struct fields, `Config` struct fields, and `Workspace` trait shape match the design; (f) the bootstrap refuses to start with a clear message when `wt` or `ghq` is absent (verifiable via a unit test that overrides PATH lookup or via inspection of the refusal-error message strings).
+  - _Depends: 5.1, 2.2_
+  - _Requirements: 4.1, 4.2, 4.5, 10.1_
+  - _Design: `.kiro/specs/roki-mvp/design-worktree-workspace.md`_
+
 - [ ] 5. Bootstrap: make `roki run` actually run the daemon end-to-end
 
 - [ ] 5.2 Wire restart recovery through the bootstrap
