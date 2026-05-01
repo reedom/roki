@@ -223,7 +223,7 @@
   - _Depends: 1.5, 3.6_
   - _Requirements: 2.2, 2.4_
 
-- [ ] 4.5 End-to-end vetoable-transition test
+- [x] 4.5 End-to-end vetoable-transition test
   - Register a stub subscriber that denies `Queued -> Active` for a specific issue identifier; assert that issue stays `Queued` and the daemon emits the documented veto log event while a second issue progresses to `Active` normally.
   - Observable completion: the test passes deterministically and the metrics for vetoed transitions are visible in logs alongside the normal progression for the unaffected issue.
   - _Depends: 3.1, 3.2_
