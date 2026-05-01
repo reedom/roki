@@ -95,7 +95,7 @@
   - _Requirements: 13.3_
   - _Boundary: tracker/linear_
 
-- [ ] 2.6 (P) Implement the Linear webhook receiver
+- [x] 2.6 (P) Implement the Linear webhook receiver
   - Stand up the axum endpoint at the configured path, verify the Linear signature header before any normalization, and decode the payload into the same `NormalizedIssue` shape used by polling.
   - Reject unsigned, mismatched, or malformed payloads with the documented status codes and avoid echoing payload content.
   - Observable completion: an integration test posts a correctly signed webhook payload and observes a normalized issue event reach the tracker sink; an incorrectly signed payload is rejected with 401 and no normalization occurs.

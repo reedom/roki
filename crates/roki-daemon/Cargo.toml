@@ -14,7 +14,10 @@ path = "src/main.rs"
 [dependencies]
 anyhow = "1.0"
 async-trait = "0.1"
+axum = { version = "0.7", default-features = false, features = ["http1", "json", "tokio"] }
 clap = { version = "4.5", features = ["derive"] }
+hex = "0.4"
+hmac = "0.12"
 jsonschema = { version = "0.46", default-features = false }
 liquid = "0.26"
 notify = "8"
@@ -23,15 +26,18 @@ reqwest = { version = "0.12", default-features = false, features = ["json", "rus
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 serde_yaml = "0.9"
+sha2 = "0.10"
 thiserror = "2.0"
 tokio = { version = "1.40", features = ["fs", "macros", "rt-multi-thread", "signal", "sync", "time"] }
 toml = "0.8"
+tower = { version = "0.5", default-features = false }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 uuid = { version = "1.10", features = ["v4"] }
 
 [dev-dependencies]
 tempfile = "3.10"
+tower = { version = "0.5", default-features = false, features = ["util"] }
 tracing-test = { version = "0.2", features = ["no-env-filter"] }
 wiremock = "0.6"
 
