@@ -142,7 +142,7 @@
   - _Depends: 2.1_
   - _Requirements: 8.2, 8.3, 8.4_
 
-- [ ] 3.2 Implement the orchestrator core and per-issue worker actor
+- [x] 3.2 Implement the orchestrator core and per-issue worker actor
   - Build the orchestrator runtime that owns one tokio task per `(repo, issue)`, drives transitions only from the declared sources (tracker, engine, recovery, shutdown), and routes lifecycle events between adapters.
   - Apply vetoable-transition checks against subscribers before committing `Queued -> Active`, `AwaitingReview -> TerminalSuccess`, and `TerminalSuccess -> Cleaning`; treat subscriber or pre-cleanup-hook error on a vetoable transition as `Deny` (fail closed).
   - Implement the `OrchestratorRead` trait against the live state map so additive consumers can read state without mutation rights.
