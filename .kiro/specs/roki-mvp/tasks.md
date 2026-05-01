@@ -80,7 +80,7 @@
   - _Requirements: 7.1, 7.2, 7.3, 7.4, 7.5_
   - _Boundary: tools_
 
-- [ ] 2.5 (P) Implement the Linear tracker adapter (polling)
+- [x] 2.5 (P) Implement the Linear tracker adapter (polling)
   - Implement the GraphQL client (reqwest) for the documented active-issue queries, the polling loop with the configurable cadence cap (<= 5 min per scope), and 429 exponential backoff with logging.
   - Normalize responses into the `NormalizedIssue` shape.
   - Observable completion: an integration test against a stub Linear server records that no scope is polled more than once per five minutes under steady load and that a 429 response defers the next request to the same endpoint.
