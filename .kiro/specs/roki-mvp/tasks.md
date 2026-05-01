@@ -236,7 +236,104 @@
 
 - [ ] 7. Agent-driven repo selection: collapse multi-repo routing into the agent
 
-- [ ] 7.1 Replace `repos.scope` daemon-side routing with agent-driven repo selection
+_Task 7.1 was split into 7.1a–7.1f after the first implementer dispatch BLOCKED on size (~16K production lines + ~4K tests + SPEC/design rewrites in one reviewer-gated unit). The 11 locked decisions in `design-agent-driven-repo-selection.md` carry through unchanged; only the envelope is split. Sub-tasks dispatched sequentially with normal subagent-per-task discipline._
+
+- [ ] 7.1a Drop `LinearScope` and the `routing.rs` module; shrink `RepoConfig` config schema
+  - _Boundary:_ `crates/roki-daemon/src/config/{mod.rs,repos.rs}`, `crates/roki-daemon/src/routing.rs` (DELETED), `crates/roki-daemon/src/lib.rs` (drop `mod routing`), and any other production source whose ONLY change is removing references to deleted/renamed types. Tests: mechanical updates in any `tests/*.rs` that constructs `RepoConfig` literals or imports `routing::*`. Per §16: SPEC.md §2.2 update + .kiro/specs/roki-mvp/design.md update for the schema delta.
+  - **Schema delta (breaking, additive where possible)**:
+    - REMOVE `RepoConfig.id`, `RepoConfig.scope`, `RepoConfig.webhook_secret_env`, `RepoConfig.webhook_secret`, `RepoConfig.workflow_path`. After this sub-task `RepoConfig` is `{ repo: String }` only.
+    - REMOVE the `LinearScope` enum and the `routing.rs` module entirely. `routing.rs` has zero production callers post-6.1; deletion is mechanical.
+    - ADD `[linear]` config block: `token_env: Option<String>` (defaults to `"LINEAR_API_TOKEN"`), `webhook_secret_env: String` (required, single workspace-level secret), `endpoint: Option<String>` (test-only override; production omits).
+    - ADD `[workflow]` config block: `path: PathBuf` (required, single workspace-level policy file).
+    - REJECT duplicate `[[repos]]` entries with the same `repo` value at config load (hard refusal naming the offending entry).
+  - **Compile cascade tolerance**: removing `RepoConfig.scope` and the `LinearScope` enum will break direct consumers (the per-repo `LinearTracker`, the per-repo webhook routes, the `route_issue` call site, etc.). 7.1a's job is to land the schema and delete `routing.rs`; immediate consumers in `tracker/linear.rs`, `tracker/webhook.rs`, `runtime.rs` will be updated mechanically here ONLY to the extent of removing the deleted/renamed references — no architectural rework. Anything that genuinely needs to be rewritten (single tracker, single webhook route, agent tool, etc.) lands in 7.1b–f. The build must still compile at the end of 7.1a; failing tests are acceptable if they're pinned to behavior that the later sub-tasks own.
+  - _Note for the implementer_: this is the "land config + drop routing + minimal compile-fixes" sub-task. Resist the urge to also reshape the tracker or webhook here — that's 7.1b/c.
+  - Observable completion: (a) `cargo build --workspace` clean; (b) `cargo fmt --all -- --check` clean; (c) `cargo clippy --workspace -- -D warnings` clean; (d) `crates/roki-daemon/src/routing.rs` is gone from the file tree; (e) `RepoConfig` shrinks to `{ repo: String }`; (f) `[linear]` and `[workflow]` config blocks parse from a fixture TOML; (g) duplicate `[[repos]]` entries error at load with the offending entry named; (h) SPEC.md §2.2 and .kiro/specs/roki-mvp/design.md reflect the schema delta. Tests pinned to behaviors owned by 7.1b–f may temporarily fail; document which in the status report.
+  - _Depends: 6.1_
+  - _Requirements: 2.1, 2.4_
+  - _Design: `.kiro/specs/roki-mvp/design-agent-driven-repo-selection.md` (decisions 6, 7 set the [linear] / [workflow] block shape)_
+
+- [ ] 7.1b Collapse the state-machine key from `(repo, issue)` to `(issue,)`
+  - _Boundary:_ `crates/roki-daemon/src/orchestrator/{state.rs,core.rs,events.rs,read.rs,hooks.rs,tracker_bridge.rs}` and the tests under `tests/orchestrator_*.rs` + `tests/e2e_vetoable_transition.rs` + `tests/e2e_multi_repo_routing.rs`. The biggest sub-task in 7.1 (~1500 LoC).
+  - **State-machine impact**:
+    - `(repo, issue)` collapses to `(issue,)`. `RepoId` stays as a type for `WorktreeRegistry` keying (added in 7.1d) but is no longer in the state-machine key.
+    - Update `ActorRecord` keying, `TrackerBridge` dedup keys (`(repo, issue, target_state)` → `(issue, target_state)`), `TransitionEvent.repo` becomes `Option<RepoId>` populated post-tool-call (or removed entirely if the field has no observable consumers — implementer's call, document in the SPEC.md update that lands here or in 7.1f).
+    - `Queued → Active` no longer pre-creates a worktree. The actor's "ensure workspace" call is replaced with a NoOp shim until 7.1d wires `SessionManager`. Document the shim in code with a `// TODO(7.1d):` comment naming the sub-task.
+    - `Cleaning → [*]` is similarly stubbed: the existing `wt.remove`-via-`WorkspaceManager` call is replaced with a NoOp shim until 7.1d wires `WorktreeRegistry`.
+  - **`tests/e2e_multi_repo_routing.rs`**: implementer's choice — delete entirely (it pins `route_issue` semantics that are gone) OR repurpose as a placeholder for 7.1d's cross-repo test (mark `#[ignore]` until 7.1d wires the new agent tool).
+  - Observable completion: (a) `cargo build --workspace` clean; (b) `cargo test --workspace` clean for everything that doesn't depend on the workspace shim; (c) the orchestrator integration tests reflect the `IssueId`-only key; (d) `cargo clippy` + `cargo fmt` clean.
+  - _Depends: 7.1a_
+  - _Requirements: 2.1, 8.2, 10.1_
+  - _Design: same as 7.1_
+
+- [ ] 7.1c Single `LinearTracker` + single webhook route + single HMAC secret
+  - _Boundary:_ `crates/roki-daemon/src/tracker/{linear.rs,webhook.rs,model.rs}` and their tests (`tests/tracker_linear.rs`, `tests/tracker_webhook.rs`, `tests/tracker_bridge.rs`). Bootstrap glue lands in 7.1f.
+  - Collapse per-repo trackers to one. The single tracker polls the entire Linear workspace using the API token; no `scope` filter. Honor the existing global `polling_cadence` and 5-min cap.
+  - Single webhook route: `POST /linear/webhook` (no per-repo path segment). HMAC-verify against `[linear].webhook_secret_env` (single secret).
+  - Webhook handler decodes → `NormalizedIssue` (no repo association) → forward to orchestrator's `tracker_inbox` keyed by `IssueId`.
+  - Tests update for single-route dispatch; assert per-issue dedup at the bridge.
+  - Observable completion: tracker tests pass; new test asserts the single webhook secret rejects mismatched HMACs and accepts correct ones; new test asserts polling produces one event per Linear issue regardless of how many `[[repos]]` entries are configured.
+  - _Depends: 7.1b_
+  - _Requirements: 3.1, 3.2_
+  - _Design: same as 7.1_
+
+- [ ] 7.1d `SessionManager` + `WorktreeRegistry` + `roki_open_worktree` agent tool
+  - _Boundary:_ rewrite `crates/roki-daemon/src/workspace/` as `session/` + `worktrees/` modules (drop the `Workspace` trait); add `crates/roki-daemon/src/tools/roki_open_worktree.rs` and update `tools/mod.rs` re-exports; wire the new modules into `orchestrator/core.rs` (replacing the 7.1b NoOp shims). New tests: `tests/agent_tool_open_worktree.rs` (allowlist rejection, idempotency, error taxonomy), `tests/orchestrator_session.rs` (session-tempdir lifecycle), and a new cross-repo e2e test where one worker opens worktrees in two configured repos.
+  - **Session tempdir**: `~/Library/Caches/roki/sessions/<issue>` on macOS, `~/.cache/roki/sessions/<issue>` on Linux. Add the `dirs` crate to `Cargo.toml` if not already present. `SessionManager::create_session(issue)` is idempotent (calling twice for the same issue returns the same path).
+  - **WorktreeRegistry**: `Arc<Mutex<HashMap<IssueId, Vec<(RepoId, BranchName, PathBuf)>>>>` (or equivalent shape). Tracks every worktree the agent opened per worker. The orchestrator's `WorkerActor` carries a registry handle; the agent tool resolves it via shared state.
+  - **Agent tool `roki_open_worktree`**:
+    - Description (verbatim, render in the agent's tool surface): "Open a git worktree for the current Linear issue in one of the configured repos. The daemon resolves the repo via ghq, creates a worktree branch named after the issue id via wt, and returns the absolute path. Idempotent — calling twice with the same repo returns the same path. Use this once per repo you intend to modify; cross-repo tickets call this multiple times."
+    - Input: `{ repo: string }` only. Strict allowlist (must match a configured `[[repos]]` entry; reject otherwise).
+    - Output: `{ path: string, repo: string, branch: string }` where `branch == issue.id`.
+    - Errors (typed): `RepoNotInAllowlist { repo, allowed: [string] }`, `GhqResolutionFailed { repo, reason }`, `WorktreeCreationFailed { repo, branch, reason }`.
+    - Handler flow: validate allowlist → check `WorktreeRegistry` for `(worker_id, repo)` (return existing path if present) → `ghq.ensure_cloned(repo)` → `wt.switch_create(repo_path, issue.as_str())` → register `(worker_id, repo, branch, worktree_path)` → return path.
+  - **Orchestrator wiring**:
+    - `Queued → Active` calls `SessionManager::create_session(issue)` and uses the resulting tempdir as the worker's CWD. (Replaces the 7.1b NoOp shim.)
+    - `Cleaning → [*]` walks `WorktreeRegistry` for the worker, calls `wt.remove` on each worktree (one-by-one, log per-arc, subject to existing pre-cleanup hooks), then removes the session tempdir. (Replaces the 7.1b NoOp shim.)
+    - `TerminalFailure` retains all worktrees AND the session tempdir.
+  - Observable completion: (a) all tests across `cargo test --workspace`, `cargo clippy`, `cargo fmt` clean; (b) new cross-repo test passes; (c) new allowlist-rejection test passes; (d) idempotency test passes; (e) Cleaning correctly removes every registered worktree subject to pre-cleanup hooks.
+  - _Depends: 7.1b, 7.1c_
+  - _Requirements: 4.1, 4.2, 4.5, 7.1, 7.2_
+  - _Design: same as 7.1_
+
+- [ ] 7.1e Restart recovery rewrite (folds task 5.2)
+  - _Boundary:_ `crates/roki-daemon/src/orchestrator/recovery.rs` rewrite; new production `RecoveryLinearReader` impl backed by the (now single) `LinearTracker`; `crates/roki-daemon/src/runtime.rs` swap of `Orchestrator::new` for `Orchestrator::with_recovery`. New integration test `tests/orchestrator_restart_recovery.rs` seeds both session tempdirs and pre-existing worktrees per configured repo.
+  - **Five-cell decision matrix** (expanded from the existing four-cell):
+    - `ResumeActive` — issue active in Linear, session tempdir + worktree(s) on disk → resume the worker
+    - `OrphanedSession` — session tempdir but no Linear active state and no worktree → schedule cleanup
+    - `OrphanedWorktree` — worktree exists but no session tempdir → schedule cleanup (worktree retained for inspection per design decision #6 if Linear state is `failed`)
+    - `FreshQueued` — Linear issue active, nothing on disk → spawn fresh worker
+    - `NoOp` — Linear issue terminal, nothing on disk → ignore
+  - **Walk algorithm**:
+    - List session tempdirs under `~/Library/Caches/roki/sessions/` (or platform equivalent via `dirs::cache_dir()`).
+    - For each configured `[[repos]]` entry, run `git worktree list --porcelain` and filter to branches matching the operator-configurable regex (default `^[A-Z]+-\d+$`; configurable via a new optional `[recovery].issue_branch_pattern` config key — additive).
+    - Reconcile every distinct issue id discovered (from either source) against Linear via the production `RecoveryLinearReader`.
+  - **Production `RecoveryLinearReader`**: implementation backed by `LinearTracker` (or a thin client wrapping the same Linear GraphQL surface). Folds the task-5.2 stub into the production codebase.
+  - Observable completion: (a) integration test exercises all 5 matrix cells with both session tempdirs and worktrees pre-seeded; (b) the `5.2` follow-up note in the task list is closed; (c) tests pass deterministically across 3 sequential reps.
+  - _Depends: 7.1d_
+  - _Requirements: 10.1, 10.2_
+  - _Design: same as 7.1_
+  - _Supersedes: 5.2_
+
+- [ ] 7.1f Bootstrap finalization + e2e refactor + SPEC/design same-change-set rewrites
+  - _Boundary:_ `crates/roki-daemon/src/runtime.rs` final wiring (single tracker, single webhook, single workflow loader); refactor `tests/e2e_{happy_path,failure_retry,bootstrap}.rs` to the new agent-driven flow (each refactored test must pass deterministically across 3 sequential reps); SPEC.md §2.2/§2.3/§6/§7/§10 rewrites; `.kiro/specs/roki-mvp/design.md` architecture-prose update.
+  - Bootstrap composition: load config → init redacted logging (with `[linear].webhook_secret_env`-resolved value in the redaction list) → install signal handlers → load single `WORKFLOW.md` from `[workflow].path` → build `SessionManager`, `WorktreeRegistry`, `PermissionResolver`, `ClaudeEngineAdapter`, `RealWt`, `RealGhq` → build `Orchestrator::with_recovery` → start single `LinearTracker` → mount single `POST /linear/webhook` route → axum::serve → run until shutdown.
+  - **Doc updates (same change set per §16)**:
+    - `SPEC.md` §2.2 — describe `[[repos]]` as the agent allowlist; `[linear]` and `[workflow]` block descriptions.
+    - `SPEC.md` §2.3 — replace the deterministic-precedence-rule section with "agent-driven repo selection via `roki_open_worktree`."
+    - `SPEC.md` §6 — replace the worktree-path section with "session tempdir layout + `WorktreeRegistry` semantics + lifecycle invariants (open via tool, remove on Cleaning, retain on TerminalFailure)."
+    - `SPEC.md` §7 — add `roki_open_worktree` to the registry table with input/output/error shape.
+    - `SPEC.md` §10 — rewrite the recovery section to walk both session tempdirs and worktrees per the new five-cell matrix.
+    - `.kiro/specs/roki-mvp/design.md` — fold the agent-driven model into the architecture prose; show the new component breakdown (`SessionManager`, `WorktreeRegistry`, `RokiOpenWorktreeTool`).
+  - **Determinism gate**: every refactored e2e must pass deterministically across 3 sequential reps with `-- --test-threads=1`.
+  - Observable completion: (a) all tests across `cargo test --workspace`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all -- --check` clean; (b) every refactored e2e test passes deterministically across 3 sequential reps; (c) new cross-repo e2e (from 7.1d) and allowlist-rejection test (from 7.1d) still pass; (d) SPEC.md §2.2/§2.3/§6/§7/§10 reflect the new model; (e) restart recovery test from 7.1e exercises all five matrix cells.
+  - _Depends: 7.1e_
+  - _Requirements: 1.1, 1.2, 2.1, 2.5, 3.1, 3.2, 4.1, 8.2, 9.5, 10.1, 12.2_
+  - _Design: same as 7.1_
+
+<!-- Original single-task envelope kept below for archival; superseded by 7.1a–7.1f above. -->
+
+- [ ] ~~7.1 Replace `repos.scope` daemon-side routing with agent-driven repo selection~~ (split into 7.1a–7.1f; original envelope kept below for archival)
   - _Boundary:_ `crates/roki-daemon/src/config/{mod.rs,repos.rs}`, `crates/roki-daemon/src/routing.rs` (deleted), `crates/roki-daemon/src/orchestrator/{state.rs,core.rs,tracker_bridge.rs,recovery.rs}`, `crates/roki-daemon/src/workspace/` (REWRITTEN as `session/` and `worktrees/` modules; the `Workspace` trait is dropped), `crates/roki-daemon/src/tools/{mod.rs,roki_open_worktree.rs}` (new tool alongside existing `linear_graphql`), `crates/roki-daemon/src/tracker/{linear.rs,webhook.rs}`, `crates/roki-daemon/src/runtime.rs`, `SPEC.md` (§2.2, §2.3, §6, §7, §10 — major rewrites), `.kiro/specs/roki-mvp/design.md`. Tests: every existing e2e test under `crates/roki-daemon/tests/` refactors; new tests for cross-repo worker, allowlist rejection, single-webhook dispatch.
   - **Locked decisions** (from `.kiro/specs/roki-mvp/design-agent-driven-repo-selection.md`):
     1. Tool name = `roki_open_worktree`. Daemon-owned semantics, namespaced like `linear_graphql`.
@@ -342,7 +439,7 @@
 
 - [ ] 5. Bootstrap: make `roki run` actually run the daemon end-to-end
 
-- [ ] 5.2 Wire restart recovery through the bootstrap
+- [ ] ~~5.2~~ Wire restart recovery through the bootstrap (SUPERSEDED by 7.1e)
   - _Boundary:_ a new production `RecoveryLinearReader` impl backed by `LinearTracker` (live module path TBD — implementer chooses), `crates/roki-daemon/src/runtime.rs` (swap `Orchestrator::new` for `Orchestrator::with_recovery`), and a new integration test that pre-seeds workspace directories before invoking `runtime::run_with_shutdown`.
   - Implements Requirement 10.1 at the daemon-binary level. Today the recovery scan and reconciliation logic exist in `orchestrator/recovery.rs` (shipped in task 3.3) but the bootstrap calls `Orchestrator::new` and never invokes them, so a real restart of the daemon does not reconcile.
   - Acceptance: a fresh-restart integration test pre-seeds at least two workspace directories under the configured workspace root (one whose Linear state is "active", one whose Linear state is "done"), starts the daemon via `runtime::run_with_shutdown`, and asserts the orchestrator's per-issue actor records line up with the four-cell recovery matrix (`ResumeActive` / `OrphanedWorkspace` / `FreshQueued` / `NoOp`) per `crates/roki-daemon/src/orchestrator/recovery.rs::reconcile_decisions`.
