@@ -8,7 +8,7 @@
   - Create `crates/roki-daemon/src/main.rs` that parses CLI arguments and bootstraps a tokio multi-threaded runtime.
   - Add a placeholder `roki run` subcommand that initializes tracing and exits cleanly.
   - Observable completion: `cargo run --bin roki -- --help` prints the documented subcommands; `cargo run --bin roki -- run` initializes the runtime, emits a startup log line, and exits without error; `cargo metadata` confirms a single workspace member at `crates/roki-daemon`.
-  - _Requirements: 1.1, 1.5_
+  - _Requirements: 1.1, 1.7_
   - _Boundary: workspace root and crates/roki-daemon_
 
 - [x] 1.2 Build the layered configuration loader with secret handling
@@ -16,26 +16,26 @@
   - Implement loading from a config file plus environment overrides, with explicit refusal when the Linear token is absent.
   - Validate configuration at startup and return a structured error that names the offending field on failure.
   - Observable completion: a unit test loads a valid example config and a malformed one; the malformed case returns an error whose message identifies the failing field.
-  - _Requirements: 1.2, 2.1, 2.5, 9.5_
+  - _Requirements: 1.2, 2.1, 2.3, 9.5_
 
 - [x] 1.3 Implement structured tracing and secret-redaction layer
   - Initialize `tracing-subscriber` with a configurable log level and destination (stdout, file, or both).
   - Add a redaction layer that scrubs the Linear API token and any operator-declared secret strings from every emitted event.
   - Standardize `(repo, issue, correlation_id)` context fields on every event that has them.
   - Observable completion: a unit test asserts the configured token never appears in captured log output even when intentionally placed in a field value.
-  - _Requirements: 1.4, 12.1, 12.2, 12.3, 12.4_
+  - _Requirements: 1.5, 12.1, 12.2, 12.3, 12.4_
 
 - [x] 1.4 Implement bounded shutdown handling
   - Wire `SIGINT` and `SIGTERM` handling to a single `ShutdownSignal` propagated through the orchestrator and adapters.
   - Stop accepting new work on shutdown, signal active workers, and wait per worker up to a bounded shutdown window before forcing exit.
   - Observable completion: an integration test starts the daemon with a fake long-running worker, sends a shutdown signal, and asserts the daemon exits cleanly within the documented window.
-  - _Requirements: 1.3_
+  - _Requirements: 1.4_
 
 - [x] 1.5 Implement the multi-repo router and unhealthy-repo handling
   - Build the deterministic precedence rule for routing a Linear issue to exactly one configured repository when scopes overlap, and log every routing decision.
   - On startup, verify each repository path is a Git working tree; mark missing or non-Git paths as unhealthy and refuse to schedule work for them while continuing to serve the remaining repositories.
   - Observable completion: a unit test routes the same issue against two overlapping configured scopes and asserts a single `(repo, issue)` key is produced, plus a log event names the precedence decision.
-  - _Requirements: 2.2, 2.3, 2.4_
+  - _Requirements: 2.6 (NOTE: this task implemented the pre-7.1 deterministic precedence rule and per-repo health classifier — both are removed by task 7.1; the original requirement IDs `2.2 (overlapping precedence)` and `2.3 (unhealthy repo)` no longer exist in the synced requirements.md)_
 
 - [ ] 2. Core: domain types, traits, and per-component implementations
 
@@ -61,7 +61,7 @@
   - Implement identifier sanitization for repo and issue components, derive the workspace path under the configured workspace root, and refuse paths that escape the root.
   - Provide `ensure`, `remove`, and `list_existing` operations with idempotent semantics; surface filesystem errors with the offending path.
   - Observable completion: a unit test shows that crafted issue identifiers (path traversal, absolute paths, identifiers colliding after sanitization) are rejected, and that valid identifiers produce a path that canonicalizes inside the workspace root.
-  - _Requirements: 4.1, 4.2, 4.5_
+  - _Requirements: 4.1, 4.3, 4.7_
   - _Boundary: workspace_
 
 - [x] 2.3 (P) Implement the WORKFLOW.md loader, schema, and hot reload
@@ -77,14 +77,14 @@
   - Define the `Tool` and `Registry` traits, their stable name and JSON-Schema input/output convention, and the catalog format passed to the engine adapter at worker launch.
   - Implement the `linear_graphql` proxy: accept exactly one GraphQL operation per call, forward to Linear with the daemon-owned token, share rate-limit state with the tracker client, and apply credential redaction to errors.
   - Observable completion: a unit test sends a multi-operation GraphQL document and receives a `MULTIPLE_OPERATIONS` error; another test injects the API token into a failure path and asserts no error field returned to the caller contains it.
-  - _Requirements: 7.1, 7.2, 7.3, 7.4, 7.5_
+  - _Requirements: 7.1, 7.2, 7.3, 7.8, 7.9_
   - _Boundary: tools_
 
 - [x] 2.5 (P) Implement the Linear tracker adapter (polling)
   - Implement the GraphQL client (reqwest) for the documented active-issue queries, the polling loop with the configurable cadence cap (<= 5 min per scope), and 429 exponential backoff with logging.
   - Normalize responses into the `NormalizedIssue` shape.
   - Observable completion: an integration test against a stub Linear server records that no scope is polled more than once per five minutes under steady load and that a 429 response defers the next request to the same endpoint.
-  - _Requirements: 3.2, 3.3, 3.4, 3.5_
+  - _Requirements: 3.3, 3.4, 3.5, 3.6_
   - _Boundary: tracker/linear_
 
 - [x] 2.5a (P) Publish the `TrackerRefresh` nudge trait
@@ -99,7 +99,7 @@
   - Stand up the axum endpoint at the configured path, verify the Linear signature header before any normalization, and decode the payload into the same `NormalizedIssue` shape used by polling.
   - Reject unsigned, mismatched, or malformed payloads with the documented status codes and avoid echoing payload content.
   - Observable completion: an integration test posts a correctly signed webhook payload and observes a normalized issue event reach the tracker sink; an incorrectly signed payload is rejected with 401 and no normalization occurs.
-  - _Requirements: 3.1, 3.4_
+  - _Requirements: 3.1, 3.2, 3.5_
   - _Boundary: tracker/webhook_
 
 - [x] 2.7 (P) Implement the Claude Code stream-JSON parser
@@ -156,14 +156,14 @@
   - Confirm the daemon writes no per-issue runtime state to disk except workspace contents the agent itself produces and the structured logs the daemon emits.
   - Observable completion: an integration test pre-seeds two workspaces and a Linear stub with mixed states, starts the daemon, and asserts each `(repo, issue)` lands in the documented post-recovery state.
   - _Depends: 2.2, 2.5, 3.2_
-  - _Requirements: 8.5, 10.1, 10.2, 10.3, 10.4_
+  - _Requirements: 8.5, 10.1, 10.2, 10.3, 10.4, 10.5_
 
 - [x] 3.4 Wire the tool registry into the engine adapter at worker launch
   - Compose the tool catalog (including the built-in `linear_graphql` proxy) and pass it to each spawned worker subprocess at launch.
   - Forward tool calls from the agent through the registry, applying redaction on errors before they leave the daemon.
   - Observable completion: an integration test with a fake `claude` binary issues a `linear_graphql` call against a stub Linear server and asserts the response is returned to the worker without the API token appearing in any tool input, output, or error.
   - _Depends: 2.4, 2.10_
-  - _Requirements: 7.1, 7.2, 7.4_
+  - _Requirements: 7.1, 7.2, 7.8_
 
 - [x] 3.5 Wire the workspace lifecycle into orchestrator transitions
   - Create the workspace on the first transition into `Active`, and set the worker subprocess cwd to that workspace.
@@ -171,14 +171,14 @@
   - Retain the workspace on `TerminalFailure` for inspection; on workspace creation or deletion errors, mark the worker failed, log the offending path, and refuse to start additional work for that `(repo, issue)` until the operator intervenes.
   - Observable completion: an integration test asserts that a happy-path issue with no pre-cleanup hooks registered produces a workspace that is created on activation, transitions through `TerminalSuccess -> Cleaning`, and is deleted; a second test registers a pre-cleanup hook that returns `Deny` and asserts the workspace is retained and the veto event is logged; a third test forces a workspace error and asserts the issue lands in `TerminalFailure` with the workspace retained.
   - _Depends: 2.1a, 2.2, 3.2_
-  - _Requirements: 4.3, 4.4, 4.5, 13.2_
+  - _Requirements: 4.1, 4.5, 4.6, 4.7, 13.2_
 
 - [x] 3.6 Connect the tracker adapter to the orchestrator
   - Bridge `NormalizedIssue` events from both polling and webhook paths into the orchestrator's tracker-event sink, ensuring duplicates are idempotent on `(repo, issue, target_state)`.
   - Refuse any code path that performs Linear writes from inside the daemon process; all writes must originate from the agent through `linear_graphql`.
   - Observable completion: an integration test delivers the same logical issue update via both webhook and polling within a single tick and asserts only one observable transition is produced.
   - _Depends: 2.5, 2.6, 3.2_
-  - _Requirements: 3.1, 3.5_
+  - _Requirements: 3.1, 3.6_
 
 - [x] 3.7 Implement the retry-budget Backoff loop in the worker actor
   - _Boundary:_ `crates/roki-daemon/src/engine/policy.rs`, `crates/roki-daemon/src/orchestrator/core.rs`, `crates/roki-daemon/src/workflow/schema.rs` (and the matching JSON-Schema asset), `SPEC.md` §3.2 + §9.5, `design.md` retry-budget paragraph (≈line 761). Tests under `crates/roki-daemon/src/engine/policy.rs` (`#[cfg(test)]`) and `crates/roki-daemon/tests/orchestrator_core.rs`.
@@ -191,7 +191,7 @@
   - Update `SPEC.md` §3.2 schema table (add the `max_attempts` row) and §9.5 retry semantics paragraph (state explicitly that only `NonCleanExit` retries) in the same change set, per §16 contract-change rule. Update `design.md` line ≈761 to match.
   - Observable completion: (a) unit test in `engine::policy` rejects `max_attempts = 0` and accepts `1..=10`; (b) integration test in `orchestrator_core.rs` with a stub `EngineLauncher` producing a configurable failure sequence asserts the exact `Active → Backoff → Active → … → TerminalFailure` transition trace for `NonCleanExit` and the immediate `Active → TerminalFailure` for `Stalled` / `TurnBudgetExhausted`, completes deterministically in well under one second using a sub-second `backoff_floor`, and confirms the workspace path on disk is retained throughout.
   - _Depends: 3.2, 3.5_
-  - _Requirements: 4.5, 5.6, 8.1_
+  - _Requirements: 4.6, 5.6, 8.1_
   - _Design: `.kiro/specs/roki-mvp/design-retry-policy.md`_
 
 - [ ] 4. Validation: end-to-end paths, language-agnostic SPEC.md
@@ -209,19 +209,19 @@
   - Assert workspace creation on activation, transition events emitted in the correct order with correlation ids set (including the `TerminalSuccess -> Cleaning` transition), and workspace deletion after `Cleaning -> [*]`.
   - Observable completion: the test passes deterministically and produces the expected transition log sequence with no duplicate transitions for the same key.
   - _Depends: 3.2, 3.3, 3.5, 3.6_
-  - _Requirements: 1.1, 4.3, 8.2, 10.3, 13.2_
+  - _Requirements: 1.1, 4.5, 8.2, 10.4, 13.2_
 
 - [x] 4.3 End-to-end failure-path test for retry budget exhaustion
   - Drive the same harness so that the fake `claude` binary repeatedly exits non-cleanly until the configured retry budget is exhausted; assert the worker lands in `TerminalFailure` with the workspace retained and the failure logged.
   - Observable completion: the test passes deterministically and the post-run filesystem layout still contains the workspace directory while the orchestrator state for that key is `TerminalFailure`.
   - _Depends: 3.7, 4.2_
-  - _Requirements: 5.6, 4.5, 8.1_
+  - _Requirements: 4.6, 5.6, 8.1_
 
 - [x] 4.4 End-to-end multi-repo and routing test
   - Configure two repositories with overlapping Linear scopes, emit the same logical issue into both scopes, and assert the deterministic precedence rule selects exactly one repository while the other ignores the issue, with both logged.
   - Observable completion: the test passes deterministically and the logs show one `routed` event per issue with the precedence decision named.
   - _Depends: 1.5, 3.6_
-  - _Requirements: 2.2, 2.4_
+  - _Requirements: 2.6 (NOTE: this test exercises the pre-7.1 deterministic precedence rule from `routing::route_issue`; both that function and the underlying overlapping-scope behavior are removed by task 7.1. The original requirement IDs `2.2 (overlapping precedence)` and `2.4 ((repo, issue) keying)` either no longer exist or have been collapsed to per-issue keying in the synced requirements.md.)_
 
 - [x] 4.5 End-to-end vetoable-transition test
   - Register a stub subscriber that denies `Queued -> Active` for a specific issue identifier; assert that issue stays `Queued` and the daemon emits the documented veto log event while a second issue progresses to `Active` normally.
@@ -293,7 +293,7 @@
   - **Refusal modes**: `[linear].webhook_secret_env` not set → hard refusal; `[workflow].path` missing or unreadable → hard refusal; no `[[repos]]` entries → WARN log, daemon starts but every `roki_open_worktree` call returns `RepoNotInAllowlist`; `wt`/`ghq`/`claude` absent → hard refusal (existing); duplicate `repo` in `[[repos]]` → hard refusal at config load; agent specifies a `repo` not in the allowlist → tool error to agent (worker continues).
   - Observable completion: (a) all tests across `cargo test --workspace`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all -- --check` clean; (b) every refactored e2e test passes deterministically across 3 sequential reps; (c) new cross-repo test where one worker opens worktrees in two configured repos passes; (d) new allowlist-rejection test where the agent specifies a non-allowlisted repo asserts the typed error and that no worktree was created; (e) `crates/roki-daemon/src/routing.rs` is gone from the file tree; (f) `RepoConfig` shrinks to a single field; (g) SPEC.md §2.2/§2.3/§6/§7/§10 reflect the new model; (h) restart recovery test exercises all five matrix cells with both session tempdirs and worktrees pre-seeded.
   - _Depends: 6.1, 5.1_
-  - _Requirements: 2.1, 2.4, 4.1, 4.2, 4.5, 7.1, 7.2, 8.2, 10.1, 10.2_
+  - _Requirements: 2.1, 2.2, 2.3, 2.4, 2.6, 2.7, 3.1, 3.2, 4.1, 4.2, 4.4, 4.5, 4.6, 6.1, 7.1, 7.4, 7.5, 7.6, 7.7, 8.2, 10.1, 10.2, 10.3, 10.4_
   - _Design: `.kiro/specs/roki-mvp/design-agent-driven-repo-selection.md`_
 
 - [ ] 6. Workspace model migration: switch from sandbox dirs to git worktrees
@@ -337,7 +337,7 @@
   - **Refusal modes** — `runtime::run_with_shutdown` must `Err(...)` with a clear, actionable message when: `wt` not on PATH, `ghq` not on PATH, `RepoConfig.repo` malformed, `ghq.ensure_cloned` returns a network/clone failure (mark repo unhealthy and continue with other repos rather than aborting the daemon — matches existing 1.5 health-check seam), `wt switch --create` fails because the branch already exists elsewhere (escalate per `(repo, issue)`, do not abort the daemon).
   - Observable completion: (a) `cargo test --workspace`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all -- --check` all clean; (b) every existing e2e test passes deterministically across 3 sequential reps with mock `WtTool`/`GhqTool`; (c) new unit tests in `tools/wt.rs` and `tools/ghq.rs` exercise the sanitization and failure paths; (d) `SPEC.md` §2.2 and §6 reflect the new model; (e) `RepoConfig` struct fields, `Config` struct fields, and `Workspace` trait shape match the design; (f) the bootstrap refuses to start with a clear message when `wt` or `ghq` is absent (verifiable via a unit test that overrides PATH lookup or via inspection of the refusal-error message strings).
   - _Depends: 5.1, 2.2_
-  - _Requirements: 4.1, 4.2, 4.5, 10.1_
+  - _Requirements: 4.3, 4.4, 4.5, 4.6, 10.1_
   - _Design: `.kiro/specs/roki-mvp/design-worktree-workspace.md`_
 
 - [ ] 5. Bootstrap: make `roki run` actually run the daemon end-to-end
@@ -347,7 +347,7 @@
   - Implements Requirement 10.1 at the daemon-binary level. Today the recovery scan and reconciliation logic exist in `orchestrator/recovery.rs` (shipped in task 3.3) but the bootstrap calls `Orchestrator::new` and never invokes them, so a real restart of the daemon does not reconcile.
   - Acceptance: a fresh-restart integration test pre-seeds at least two workspace directories under the configured workspace root (one whose Linear state is "active", one whose Linear state is "done"), starts the daemon via `runtime::run_with_shutdown`, and asserts the orchestrator's per-issue actor records line up with the four-cell recovery matrix (`ResumeActive` / `OrphanedWorkspace` / `FreshQueued` / `NoOp`) per `crates/roki-daemon/src/orchestrator/recovery.rs::reconcile_decisions`.
   - _Depends: 5.1, 3.3_
-  - _Requirements: 10.1, 10.2, 10.3_
+  - _Requirements: 10.1, 10.2, 10.3, 10.4_
 
 - [x] 5.1 Wire the daemon bootstrap end-to-end
   - _Boundary:_ `crates/roki-daemon/src/cli.rs`, `crates/roki-daemon/src/config/{mod.rs,repos.rs}`, `crates/roki-daemon/src/runtime.rs`, `crates/roki-daemon/src/engine/policy.rs` (new `EnginePolicy::from_workflow`), `crates/roki-daemon/src/orchestrator/core.rs` (only if a thin builder addition is needed; prefer existing `with_engine_policy`), `SPEC.md` §3.2 + new short startup-sequence subsection in §9, `.kiro/specs/roki-mvp/design.md` (architecture-prose update). Tests under `crates/roki-daemon/tests/e2e_bootstrap.rs` and additive unit tests next to changed modules.
@@ -369,7 +369,7 @@
   - **Determinism note** — The bootstrap MUST NOT block on Linear connectivity at startup. Trackers retry their first poll asynchronously; webhook delivery and `roki run` startup are independent. Document this so an operator can ngrok-test before Linear is configured.
   - Observable completion: (a) running `roki run --config ./roki.toml` against the smoke-test fixture produces the documented startup log line, binds the configured port, mounts a route per repo, and reaches the documented terminal state for a posted webhook; (b) `e2e_bootstrap.rs` passes deterministically across 3 sequential reps; (c) `cargo test --workspace`, `cargo clippy --workspace --all-targets -- -D warnings`, and `cargo fmt --all -- --check` all clean; (d) SPEC.md §3.2 + §9 and design.md show the new subsection and rows.
   - _Depends: 3.7, 3.6, 4.2_
-  - _Requirements: 1.1, 1.2, 2.1, 2.5, 3.1, 3.2, 4.1, 8.2, 9.5, 10.1, 12.2_
+  - _Requirements: 1.1, 1.2, 1.3, 1.6, 2.1, 2.3, 2.5, 3.1, 3.3, 4.1, 8.2, 9.5, 10.1, 12.2_
   - _Design: `.kiro/specs/roki-mvp/design-bootstrap.md`_
 
 ## Implementation Notes
