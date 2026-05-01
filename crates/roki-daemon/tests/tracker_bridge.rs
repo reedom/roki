@@ -95,9 +95,15 @@ async fn forwards_state_change_for_same_key() {
     handle.await.expect("bridge task");
 }
 
-/// Distinct `(repo, issue)` keys are independently tracked.
+/// Distinct `IssueId` keys are independently tracked.
+///
+/// Per task 7.1b the bridge dedup key collapsed from `(repo, issue,
+/// target_state)` to `(issue, target_state)`. Two events with the same
+/// `IssueId` but different `RepoId` are now considered the same logical
+/// transition (the orchestrator state machine no longer keys by repo); only
+/// the first observation is forwarded for that issue/state pair.
 #[tokio::test]
-async fn forwards_different_keys() {
+async fn forwards_different_issues() {
     let (poll_tx, poll_rx) = mpsc::channel::<NormalizedIssue>(8);
     let (web_tx, web_rx) = mpsc::channel::<NormalizedIssue>(8);
     let (out_tx, mut out_rx) = mpsc::channel::<NormalizedIssue>(8);
@@ -106,7 +112,7 @@ async fn forwards_different_keys() {
 
     let one = issue("repo-a", "ENG-1", IssueState::Active);
     let two = issue("repo-a", "ENG-2", IssueState::Active);
-    let three = issue("repo-b", "ENG-1", IssueState::Active);
+    let three = issue("repo-a", "ENG-3", IssueState::Active);
     poll_tx.send(one.clone()).await.expect("send 1");
     poll_tx.send(two.clone()).await.expect("send 2");
     poll_tx.send(three.clone()).await.expect("send 3");
@@ -117,10 +123,42 @@ async fn forwards_different_keys() {
             received.push(ev);
         }
     }
-    assert_eq!(received.len(), 3, "all three distinct keys must forward");
+    assert_eq!(received.len(), 3, "all three distinct issues must forward");
     assert!(received.contains(&one));
     assert!(received.contains(&two));
     assert!(received.contains(&three));
+
+    drop(poll_tx);
+    drop(web_tx);
+    handle.await.expect("bridge task");
+}
+
+/// Two events with the same `IssueId` but different `RepoId` are deduped to
+/// one forward — task 7.1b's `(issue, target_state)` key collapse.
+#[tokio::test]
+async fn collapses_same_issue_across_repos() {
+    let (poll_tx, poll_rx) = mpsc::channel::<NormalizedIssue>(8);
+    let (web_tx, web_rx) = mpsc::channel::<NormalizedIssue>(8);
+    let (out_tx, mut out_rx) = mpsc::channel::<NormalizedIssue>(8);
+
+    let handle = tokio::spawn(TrackerBridge::new(poll_rx, web_rx, out_tx).run());
+
+    let from_repo_a = issue("repo-a", "ENG-1", IssueState::Active);
+    let from_repo_b = issue("repo-b", "ENG-1", IssueState::Active);
+    poll_tx.send(from_repo_a.clone()).await.expect("send a");
+    poll_tx.send(from_repo_b.clone()).await.expect("send b");
+
+    let first = recv_with_timeout(&mut out_rx).await;
+    assert_eq!(
+        first,
+        Some(from_repo_a),
+        "first observation must be forwarded to the orchestrator",
+    );
+    let second = recv_with_timeout(&mut out_rx).await;
+    assert!(
+        second.is_none(),
+        "same IssueId+state from a different repo must dedup; got {second:?}",
+    );
 
     drop(poll_tx);
     drop(web_tx);

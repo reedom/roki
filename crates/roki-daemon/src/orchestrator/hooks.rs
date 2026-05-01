@@ -51,27 +51,27 @@ use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 
-use super::state::{CorrelationId, IssueId, RepoId, VetoDecision};
+use super::state::{CorrelationId, IssueId, VetoDecision};
 
 /// Read-only payload handed to a [`PreCleanupHook`] when the orchestrator
 /// dispatches the hook on the `TerminalSuccess -> Cleaning` transition.
 ///
 /// The fields are intentionally minimal — only what every hook needs to
 /// identify the issue and correlate logs. Path / workspace fields belong to
-/// task 2.2's surface and will be added there without breaking this struct
-/// (it is `non_exhaustive` so additive evolution is safe).
+/// task 7.1d's surface (`WorktreeRegistry`) and will be added there without
+/// breaking this struct (it is `non_exhaustive` so additive evolution is
+/// safe). Per task 7.1b the state-machine key collapsed from `(repo, issue)`
+/// to `(issue,)`; this context drops the `repo` field accordingly.
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 pub struct PreCleanupContext {
-    pub repo: RepoId,
     pub issue: IssueId,
     pub correlation_id: CorrelationId,
 }
 
 impl PreCleanupContext {
-    pub fn new(repo: RepoId, issue: IssueId, correlation_id: CorrelationId) -> Self {
+    pub fn new(issue: IssueId, correlation_id: CorrelationId) -> Self {
         Self {
-            repo,
             issue,
             correlation_id,
         }
@@ -224,11 +224,7 @@ mod tests {
     }
 
     fn sample_context() -> PreCleanupContext {
-        PreCleanupContext::new(
-            RepoId::new("repo-a"),
-            IssueId::new("ENG-1"),
-            CorrelationId::from_uuid(Uuid::nil()),
-        )
+        PreCleanupContext::new(IssueId::new("ENG-1"), CorrelationId::from_uuid(Uuid::nil()))
     }
 
     /// Models the orchestrator-side guard so the test can assert a `Deny`

@@ -426,8 +426,7 @@ mod tests {
     }
 
     use crate::orchestrator::state::{
-        CorrelationId, IssueId, RepoId, TransitionEvent, TransitionTrigger, VetoDecision,
-        WorkerState,
+        CorrelationId, IssueId, TransitionEvent, TransitionTrigger, VetoDecision, WorkerState,
     };
     use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
     use std::time::Duration;
@@ -437,7 +436,6 @@ mod tests {
     fn sample_non_vetoable_event() -> TransitionEvent {
         // Discovered -> Queued is legal and non-vetoable.
         TransitionEvent::new(
-            RepoId::new("repo-a"),
             IssueId::new("ENG-1"),
             WorkerState::Discovered,
             WorkerState::Queued,
@@ -450,7 +448,6 @@ mod tests {
     fn sample_vetoable_event() -> TransitionEvent {
         // Queued -> Active is legal and vetoable.
         TransitionEvent::new(
-            RepoId::new("repo-a"),
             IssueId::new("ENG-1"),
             WorkerState::Queued,
             WorkerState::Active,

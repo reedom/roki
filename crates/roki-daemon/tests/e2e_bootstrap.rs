@@ -445,7 +445,6 @@ async fn bootstrap_drives_issue_through_documented_happy_path() {
         "bootstrap-driven transitions must match the documented happy-path prefix",
     );
     for ev in &log {
-        assert_eq!(ev.repo.as_str(), TEST_REPO_ID);
         assert_eq!(ev.issue.as_str(), TEST_ISSUE_ID);
     }
 

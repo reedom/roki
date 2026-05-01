@@ -21,16 +21,21 @@
 //!
 //! ## Idempotence model
 //!
-//! The bridge maintains a per-`(repo, issue)` "last forwarded state" map.
-//! An incoming event is forwarded iff:
+//! The bridge maintains a per-`IssueId` "last forwarded state" map. An
+//! incoming event is forwarded iff:
 //!
-//! * the key has never been forwarded (first observation), OR
+//! * the issue has never been forwarded (first observation), OR
 //! * the incoming `state` differs from the last forwarded `state` for the
-//!   key (a real transition).
+//!   issue (a real transition).
 //!
 //! This is a transition-based dedup: a re-poll of the same state (or a
 //! webhook re-delivery) collapses to a no-op without ever waking the
-//! orchestrator's actor for the key. State changes still propagate.
+//! orchestrator's actor for the issue. State changes still propagate.
+//!
+//! Task 7.1b collapsed the dedup key from `(repo, issue, target_state)` to
+//! `(issue, target_state)`. The incoming `NormalizedIssue.repo` field is
+//! ignored here; repo association moves onto the (post-7.1d)
+//! `WorktreeRegistry`, which is per-worker rather than per-tracker-event.
 //!
 //! ## Linear writes are forbidden here
 //!
@@ -57,11 +62,11 @@ use std::collections::HashMap;
 use tokio::sync::mpsc;
 use tracing::{debug, trace};
 
-use crate::orchestrator::state::{IssueId, RepoId};
+use crate::orchestrator::state::IssueId;
 use crate::tracker::model::{IssueState, NormalizedIssue};
 
 /// Merge polling and webhook [`NormalizedIssue`] streams into the
-/// orchestrator's tracker-event sink with `(repo, issue, target_state)`
+/// orchestrator's tracker-event sink with `(issue, target_state)`
 /// idempotence.
 ///
 /// Construct with [`TrackerBridge::new`]; drive with [`TrackerBridge::run`]
@@ -72,7 +77,7 @@ pub struct TrackerBridge {
     polling: Option<mpsc::Receiver<NormalizedIssue>>,
     webhook: Option<mpsc::Receiver<NormalizedIssue>>,
     out: mpsc::Sender<NormalizedIssue>,
-    last_forwarded: HashMap<(RepoId, IssueId), IssueState>,
+    last_forwarded: HashMap<IssueId, IssueState>,
 }
 
 impl TrackerBridge {
@@ -152,10 +157,10 @@ impl TrackerBridge {
         }
     }
 
-    /// Apply the `(repo, issue, target_state)` dedup rule and forward
-    /// survivors to the orchestrator inbox.
+    /// Apply the `(issue, target_state)` dedup rule and forward survivors to
+    /// the orchestrator inbox.
     async fn dispatch(&mut self, event: NormalizedIssue) {
-        let key = (event.repo.clone(), event.issue.clone());
+        let key = event.issue.clone();
         let incoming_state = event.state;
 
         if let Some(last) = self.last_forwarded.get(&key)
@@ -163,13 +168,12 @@ impl TrackerBridge {
         {
             // Same target state already observed — drop. This is the
             // dedup branch the design pins: orchestrator transitions are
-            // idempotent on (repo, issue, target_state).
+            // idempotent on (issue, target_state) post-7.1b.
             trace!(
                 target: "tracker_bridge",
-                repo = %key.0.as_str(),
-                issue = %key.1.as_str(),
+                issue = %key.as_str(),
                 state = ?incoming_state,
-                "duplicate (repo, issue, state); dropping",
+                "duplicate (issue, state); dropping",
             );
             return;
         }
@@ -193,6 +197,7 @@ mod tests {
     //! integration test at `tests/tracker_bridge.rs`.
 
     use super::*;
+    use crate::orchestrator::state::RepoId;
 
     fn ev(repo: &str, issue: &str, state: IssueState) -> NormalizedIssue {
         NormalizedIssue {

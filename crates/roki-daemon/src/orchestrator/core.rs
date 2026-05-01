@@ -1,12 +1,13 @@
-//! Orchestrator runtime: per-`(repo, issue)` worker actor and the supervising
-//! event loop.
+//! Orchestrator runtime: per-issue worker actor and the supervising event
+//! loop.
 //!
-//! Task 3.2 of the roki-mvp spec. This module owns the central
+//! Task 3.2 of the roki-mvp spec, with the per-task-7.1b key collapse from
+//! `(repo, issue)` to `(issue,)` applied. This module owns the central
 //! [`Orchestrator`] struct that:
 //!
-//! * holds the canonical in-memory state map (`Arc<RwLock<HashMap<(RepoId,
-//!   IssueId), IssueState>>>`);
-//! * spawns one tokio task per `(repo, issue)` — the per-issue worker actor;
+//! * holds the canonical in-memory state map (`Arc<RwLock<HashMap<IssueId,
+//!   ActorRecord>>>`);
+//! * spawns one tokio task per `IssueId` — the per-issue worker actor;
 //! * routes [`NormalizedIssue`] events from the tracker inbox to the right
 //!   actor;
 //! * gates every committed transition through [`EventBus::publish`] (which
@@ -17,29 +18,28 @@
 //!   from either side stays in `TerminalSuccess`);
 //! * shuts down cooperatively when [`ShutdownSignal::wait`] resolves.
 //!
-//! ## What this module does NOT do
+//! ## What this module does NOT do (post-7.1b)
 //!
-//! Restart recovery (task 3.3), tool-registry-aware launches (3.4),
-//! workspace-lifecycle wiring beyond `ensure`/`remove` around `Active`/
-//! `Cleaning` (3.5), and the tracker→orchestrator bridge (3.6) are deferred
-//! to their owner tasks. The [`Orchestrator`] takes a generic
-//! [`mpsc::Receiver<NormalizedIssue>`] inbox so 3.6 can wire polling and
-//! webhook adapters into it without modifying core.
+//! Workspace lifecycle wiring (session-tempdir creation on `Queued -> Active`
+//! and worktree teardown on `Cleaning`) is replaced with NoOp shims pending
+//! task 7.1d (`SessionManager` + `WorktreeRegistry`). The NoOp shims keep
+//! the actor advancing through the lifecycle so unit tests for the
+//! retry-budget loop, vetoable-transition gating, and pre-cleanup hooks all
+//! exercise the same arcs they did pre-7.1b. Anything that touched real
+//! `wt`/`ghq` plumbing has been pulled out and tagged `// TODO(7.1d):`.
 //!
 //! ## Boundary
 //!
 //! The orchestrator depends on a small [`EngineLauncher`] trait rather than a
-//! concrete adapter so:
+//! concrete adapter so the integration test in `tests/orchestrator_core.rs`
+//! can stub engine launches without spawning real subprocesses. The
+//! `workspace: Arc<dyn Workspace>` field is retained as a placeholder for
+//! restart recovery's `list_existing` call (see [`Orchestrator::with_recovery`]);
+//! the worker actor itself no longer calls `ensure`/`remove`. Task 7.1d
+//! drops the `Workspace` trait dependency entirely.
 //!
-//! * the integration test in `tests/orchestrator_core.rs` can stub engine
-//!   launches without spawning real subprocesses;
-//! * future work (3.4) that wires the tool registry through `WorkerContext`
-//!   keeps a clean seam.
-//!
-//! [`ClaudeEngineAdapter::launch`] already matches this trait signature
-//! (`async fn launch(&self, WorkerContext, mpsc::Sender<SupervisedEvent>) ->
-//! Result<WorkerOutcome, LaunchError>`) so a wrapper impl can be added by 3.4
-//! without breaking core.
+//! [`ClaudeEngineAdapter::launch`] already matches the [`EngineLauncher`]
+//! signature so a wrapper impl can be added without breaking core.
 
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
@@ -66,7 +66,7 @@ use crate::permissions::{PermissionMode, PermissionSource, ResolvedPermission};
 use crate::shutdown::ShutdownSignal;
 use crate::tracker::model::{IssueState as TrackerIssueState, NormalizedIssue};
 use crate::workflow::{ElicitationsMode, SandboxMode};
-use crate::workspace::{Workspace, WorkspaceError};
+use crate::workspace::Workspace;
 
 /// Error type re-exported for the engine launcher trait so downstream test
 /// stubs and the real `ClaudeEngineAdapter` can both surface launch failures
@@ -99,7 +99,7 @@ pub trait EngineLauncher: Send + Sync + 'static {
 }
 
 /// Internal record kept in the orchestrator state map for each tracked
-/// `(repo, issue)` worker. Used by the `OrchestratorRead` projection.
+/// issue. Used by the `OrchestratorRead` projection.
 #[derive(Debug, Clone)]
 struct ActorRecord {
     state: WorkerState,
@@ -109,8 +109,8 @@ struct ActorRecord {
     /// forward tracker events. `None` once the actor has terminated.
     inbox: Option<mpsc::Sender<ActorCommand>>,
     /// Number of consecutive `NonCleanExit` outcomes recorded for this
-    /// `(repo, issue)` since the actor entered `Active`. Drives the retry
-    /// budget enforced in [`WorkerActor::try_promote_to_active`] (task 3.7,
+    /// issue since the actor entered `Active`. Drives the retry budget
+    /// enforced in [`WorkerActor::try_promote_to_active`] (task 3.7,
     /// SPEC.md §9.5).
     ///
     /// The state machine forbids re-entering `Active` after `AwaitingReview`
@@ -120,7 +120,7 @@ struct ActorRecord {
     consecutive_failures: u32,
 }
 
-/// Commands routed into a per-`(repo, issue)` actor's inbox.
+/// Commands routed into a per-issue actor's inbox.
 ///
 /// Lifecycle events from the engine are NOT carried through this enum —
 /// each actor owns its own engine-events `mpsc::Receiver` and consumes them
@@ -140,7 +140,7 @@ enum ActorCommand {
 /// no `&mut self` method anywhere on this surface.
 #[derive(Clone)]
 pub struct OrchestratorReadHandle {
-    state: Arc<RwLock<HashMap<(RepoId, IssueId), ActorRecord>>>,
+    state: Arc<RwLock<HashMap<IssueId, ActorRecord>>>,
 }
 
 impl OrchestratorRead for OrchestratorReadHandle {
@@ -151,8 +151,7 @@ impl OrchestratorRead for OrchestratorReadHandle {
             .expect("orchestrator state RwLock poisoned; this is unrecoverable");
         let issues: Vec<IssueState> = guard
             .iter()
-            .map(|((repo, issue), record)| IssueState {
-                repo: repo.clone(),
+            .map(|(issue, record)| IssueState {
                 issue: issue.clone(),
                 state: record.state,
                 last_event_at: record.last_event_at,
@@ -162,20 +161,17 @@ impl OrchestratorRead for OrchestratorReadHandle {
         SnapshotResponse::new(issues)
     }
 
-    fn issue(&self, repo: &RepoId, issue: &IssueId) -> Option<IssueState> {
+    fn issue(&self, issue: &IssueId) -> Option<IssueState> {
         let guard = self
             .state
             .read()
             .expect("orchestrator state RwLock poisoned; this is unrecoverable");
-        guard
-            .get(&(repo.clone(), issue.clone()))
-            .map(|record| IssueState {
-                repo: repo.clone(),
-                issue: issue.clone(),
-                state: record.state,
-                last_event_at: record.last_event_at,
-                last_correlation_id: record.last_correlation_id,
-            })
+        guard.get(issue).map(|record| IssueState {
+            issue: issue.clone(),
+            state: record.state,
+            last_event_at: record.last_event_at,
+            last_correlation_id: record.last_correlation_id,
+        })
     }
 }
 
@@ -187,19 +183,37 @@ impl OrchestratorRead for OrchestratorReadHandle {
 /// before starting, then drive [`Orchestrator::run`] from a tokio task. The
 /// `run` future resolves only after [`ShutdownSignal::wait`] resolves.
 pub struct Orchestrator {
+    /// Workspace adapter retained for restart-recovery's `list_existing`
+    /// call (see [`Self::with_recovery`]). The worker actor no longer calls
+    /// `ensure`/`remove` post-7.1b — those become NoOp shims until 7.1d
+    /// wires `SessionManager` and `WorktreeRegistry`. The trait dependency
+    /// itself drops in 7.1d. The field is currently set-only on the
+    /// orchestrator runtime path; `with_recovery` consumes the same value
+    /// before constructing `Self`, so reading it back here would be
+    /// redundant.
+    #[allow(
+        dead_code,
+        reason = "Retained for the 7.1d wiring (drops the trait dependency entirely) so the public constructor signature stays stable across the 7.1b → 7.1d transition."
+    )]
     workspace: Arc<dyn Workspace>,
     engine: Arc<dyn EngineLauncher>,
     event_bus: Arc<EventBus>,
     hook_registry: Arc<HookRegistry>,
     shutdown: ShutdownSignal,
     tracker_inbox: mpsc::Receiver<NormalizedIssue>,
-    state: Arc<RwLock<HashMap<(RepoId, IssueId), ActorRecord>>>,
-    /// Keys whose workspace lifecycle hit a hard fault (creation or deletion
+    state: Arc<RwLock<HashMap<IssueId, ActorRecord>>>,
+    /// Issues whose workspace lifecycle hit a hard fault (creation or deletion
     /// error). Per Requirement 4.5, the orchestrator refuses to start
-    /// additional work for a poisoned `(repo, issue)` until an operator
-    /// intervenes. This set is append-only for the daemon's lifetime; restart
-    /// recovery (task 3.3) is the operator's intervention surface.
-    poisoned: Arc<RwLock<HashSet<(RepoId, IssueId)>>>,
+    /// additional work for a poisoned issue until an operator intervenes.
+    /// This set is append-only for the daemon's lifetime; restart recovery
+    /// (task 3.3 / 7.1e) is the operator's intervention surface.
+    ///
+    /// Post-7.1b the workspace lifecycle is NoOp-stubbed so this set is
+    /// currently never populated by production paths; the surface is kept
+    /// so 7.1d can repopulate it from the new `SessionManager` /
+    /// `WorktreeRegistry` failure paths without rewiring the dispatch
+    /// guard.
+    poisoned: Arc<RwLock<HashSet<IssueId>>>,
     /// Per-orchestrator [`EnginePolicy`] used to construct each actor's
     /// `WorkerContext` and to drive the retry-budget Backoff loop in
     /// [`WorkerActor::try_promote_to_active`]. Defaults to
@@ -215,6 +229,10 @@ impl Orchestrator {
     /// canonical singletons (workspace, engine, event bus, hook registry,
     /// shutdown signal) and a `tracker_inbox` receiver fed by the
     /// tracker→orchestrator bridge (task 3.6).
+    ///
+    /// The `workspace` argument is currently retained only for
+    /// [`Self::with_recovery`]; the worker actor itself no longer calls
+    /// into it (post-7.1b). Task 7.1d drops the parameter entirely.
     pub fn new(
         workspace: Arc<dyn Workspace>,
         engine: Arc<dyn EngineLauncher>,
@@ -249,9 +267,9 @@ impl Orchestrator {
     }
 
     /// Construct an orchestrator after running the restart-recovery scan
-    /// (task 3.3).
+    /// (task 3.3; rewritten in 7.1e).
     ///
-    /// This async constructor performs the documented per-`(repo, issue)`
+    /// This async constructor performs the documented per-issue
     /// reconciliation across the workspace root and Linear before returning.
     /// Synthetic active-state tracker events are posted into
     /// `recovery_sender` for `ResumeActive` and `FreshQueued` decisions so
@@ -349,15 +367,19 @@ impl Orchestrator {
     }
 
     /// Forward a tracker event to the right actor, spawning a fresh actor if
-    /// this is the first time we see the `(repo, issue)` key.
+    /// this is the first time we see the issue.
+    ///
+    /// Note: post-7.1b `NormalizedIssue.repo` is intentionally ignored here.
+    /// The state-machine key is the issue alone; repo association moves onto
+    /// the (post-7.1d) `WorktreeRegistry` per worktree the agent opens.
     async fn dispatch_tracker_event(&mut self, issue: NormalizedIssue) {
-        let key = (issue.repo.clone(), issue.issue.clone());
+        let key = issue.issue.clone();
 
-        // Refuse any further work for a poisoned `(repo, issue)`: a workspace
-        // creation or deletion error already drove this key into a fault state
-        // and the operator must intervene before we resume. We log + skip here
-        // so the orchestrator never silently ignores tracker events.
-        // Requirement 4.5.
+        // Refuse any further work for a poisoned issue: a workspace
+        // creation or deletion error already drove this issue into a fault
+        // state and the operator must intervene before we resume. We log +
+        // skip here so the orchestrator never silently ignores tracker
+        // events. Requirement 4.5.
         {
             let guard = self
                 .poisoned
@@ -366,9 +388,8 @@ impl Orchestrator {
             if guard.contains(&key) {
                 warn!(
                     target: "orchestrator",
-                    repo = %key.0.as_str(),
-                    issue = %key.1.as_str(),
-                    "tracker event refused for poisoned (repo, issue); operator intervention required",
+                    issue = %key.as_str(),
+                    "tracker event refused for poisoned issue; operator intervention required",
                 );
                 return;
             }
@@ -403,19 +424,17 @@ impl Orchestrator {
         if inbox.send(ActorCommand::Tracker(issue)).await.is_err() {
             warn!(
                 target: "orchestrator",
-                repo = %key.0.as_str(),
-                issue = %key.1.as_str(),
+                issue = %key.as_str(),
                 "actor inbox closed before tracker event could be delivered",
             );
         }
     }
 
-    /// Spawn the per-`(repo, issue)` actor task.
-    fn spawn_actor(&self, key: (RepoId, IssueId), rx: mpsc::Receiver<ActorCommand>) {
+    /// Spawn the per-issue actor task.
+    fn spawn_actor(&self, key: IssueId, rx: mpsc::Receiver<ActorCommand>) {
         let actor = WorkerActor {
             key,
             state: Arc::clone(&self.state),
-            workspace: Arc::clone(&self.workspace),
             engine: Arc::clone(&self.engine),
             event_bus: Arc::clone(&self.event_bus),
             hook_registry: Arc::clone(&self.hook_registry),
@@ -427,25 +446,30 @@ impl Orchestrator {
     }
 }
 
-/// Per-`(repo, issue)` worker actor.
+/// Per-issue worker actor.
 ///
-/// Owns one key, drives the state machine `Discovered -> Queued -> Active ->
-/// AwaitingReview -> TerminalSuccess -> Cleaning -> [*]` through tracker and
-/// engine events. Every committed transition is published through
+/// Owns one issue, drives the state machine `Discovered -> Queued -> Active
+/// -> AwaitingReview -> TerminalSuccess -> Cleaning -> [*]` through tracker
+/// and engine events. Every committed transition is published through
 /// [`EventBus::publish`]; the three vetoable transitions are gated through
 /// the bus's vetoable path (and the `TerminalSuccess -> Cleaning` transition
 /// also through the [`HookRegistry`]).
 struct WorkerActor {
-    key: (RepoId, IssueId),
-    state: Arc<RwLock<HashMap<(RepoId, IssueId), ActorRecord>>>,
-    workspace: Arc<dyn Workspace>,
+    key: IssueId,
+    state: Arc<RwLock<HashMap<IssueId, ActorRecord>>>,
     engine: Arc<dyn EngineLauncher>,
     event_bus: Arc<EventBus>,
     hook_registry: Arc<HookRegistry>,
     /// Shared with [`Orchestrator`] so a workspace fault recorded inside the
     /// actor immediately fences off subsequent tracker events for the same
-    /// `(repo, issue)`. Requirement 4.5.
-    poisoned: Arc<RwLock<HashSet<(RepoId, IssueId)>>>,
+    /// issue. Requirement 4.5. Currently unused on the production path
+    /// (post-7.1b NoOp shims); 7.1d repopulates this from the new
+    /// `SessionManager` / `WorktreeRegistry` failure paths.
+    #[allow(
+        dead_code,
+        reason = "Surface retained for the 7.1d wiring; the NoOp shims used post-7.1b never fault, so the field is currently set-only. Removing it now would require re-introducing the field in 7.1d."
+    )]
+    poisoned: Arc<RwLock<HashSet<IssueId>>>,
     /// Per-launch policy carried from the orchestrator. Drives the
     /// retry-budget Backoff loop (`max_attempts`, `backoff_floor`, etc.) and
     /// is also forwarded into the [`WorkerContext`] passed to each engine
@@ -471,8 +495,7 @@ impl WorkerActor {
             ) {
                 debug!(
                     target: "orchestrator",
-                    repo = %self.key.0.as_str(),
-                    issue = %self.key.1.as_str(),
+                    issue = %self.key.as_str(),
                     state = ?current_state,
                     "actor reached terminal end; exiting",
                 );
@@ -487,8 +510,7 @@ impl WorkerActor {
                 None => {
                     debug!(
                         target: "orchestrator",
-                        repo = %self.key.0.as_str(),
-                        issue = %self.key.1.as_str(),
+                        issue = %self.key.as_str(),
                         "actor inbox closed; exiting",
                     );
                     return;
@@ -499,8 +521,7 @@ impl WorkerActor {
                 ActorCommand::Shutdown => {
                     info!(
                         target: "orchestrator",
-                        repo = %self.key.0.as_str(),
-                        issue = %self.key.1.as_str(),
+                        issue = %self.key.as_str(),
                         "actor received shutdown; exiting",
                     );
                     return;
@@ -549,8 +570,7 @@ impl WorkerActor {
             (state, tracker) => {
                 debug!(
                     target: "orchestrator",
-                    repo = %self.key.0.as_str(),
-                    issue = %self.key.1.as_str(),
+                    issue = %self.key.as_str(),
                     actor_state = ?state,
                     tracker_state = ?tracker,
                     "tracker event ignored: no transition for current state",
@@ -560,18 +580,19 @@ impl WorkerActor {
     }
 
     /// Run the `Queued -> Active` vetoable transition, then on `Allow` create
-    /// the workspace, launch the engine, and drive the retry-budget Backoff
-    /// loop until either (a) the engine reports `CleanExit` (advance to
-    /// `AwaitingReview`), (b) the engine reports `Stalled` or
-    /// `TurnBudgetExhausted` (route directly to `TerminalFailure` — these are
-    /// agent-authored failures that repeat under the same prompt and budget,
-    /// per SPEC.md §9.5), or (c) the configured `max_attempts` retry budget
-    /// is exhausted by repeated `NonCleanExit` outcomes.
+    /// the session workdir (NoOp shim post-7.1b), launch the engine, and
+    /// drive the retry-budget Backoff loop until either (a) the engine
+    /// reports `CleanExit` (advance to `AwaitingReview`), (b) the engine
+    /// reports `Stalled` or `TurnBudgetExhausted` (route directly to
+    /// `TerminalFailure` — these are agent-authored failures that repeat
+    /// under the same prompt and budget, per SPEC.md §9.5), or (c) the
+    /// configured `max_attempts` retry budget is exhausted by repeated
+    /// `NonCleanExit` outcomes.
     ///
-    /// Workspace is retained across the Backoff loop — no delete/recreate
-    /// between attempts. The same prelude / `additional_context` is re-emitted
-    /// on each launch (failure-history accumulation is a downstream-spec
-    /// concern, out of scope for the MVP).
+    /// The session workdir is retained across the Backoff loop — no
+    /// delete/recreate between attempts. The same prelude /
+    /// `additional_context` is re-emitted on each launch (failure-history
+    /// accumulation is a downstream-spec concern, out of scope for the MVP).
     async fn try_promote_to_active(
         &self,
         correlation: CorrelationId,
@@ -589,34 +610,20 @@ impl WorkerActor {
             return;
         }
 
-        // Workspace lifecycle: ensure the directory exists before the worker
-        // launches. Failure to materialise the workspace is a hard fault per
-        // Requirement 4.5 — log the offending path, drive the actor to
-        // TerminalFailure, and poison the (repo, issue) so subsequent tracker
-        // events refuse to start more work until the operator intervenes.
-        let workspace_dir = match self.workspace.ensure(&self.key.0, &self.key.1).await {
-            Ok(path) => path,
-            Err(err) => {
-                let offending = workspace_error_path(&err);
-                warn!(
-                    target: "orchestrator",
-                    repo = %self.key.0.as_str(),
-                    issue = %self.key.1.as_str(),
-                    error = %err,
-                    offending_path = ?offending,
-                    "workspace ensure failed; skipping engine launch",
-                );
-                self.mark_poisoned();
-                self.commit_transition(
-                    WorkerState::Active,
-                    WorkerState::TerminalFailure,
-                    TransitionTrigger::EngineEvent,
-                    correlation,
-                )
-                .await;
-                return;
-            }
-        };
+        // TODO(7.1d): replace this NoOp shim with
+        // `SessionManager::create_session(&self.key)` once 7.1d lands. The
+        // session tempdir lives at `~/Library/Caches/roki/sessions/<issue>`
+        // on macOS / `~/.cache/roki/sessions/<issue>` on Linux per design
+        // decision #5. Until then we hand the engine a placeholder path so
+        // the orchestrator core's lifecycle still drives `Active` → engine
+        // launch → terminal-outcome dispatch identically to the production
+        // path. The engine launcher in the integration tests does not read
+        // from the workspace_dir so the placeholder path is observationally
+        // equivalent for unit-test purposes; the e2e tests that DO read
+        // from it (`e2e_failure_retry`, `e2e_happy_path`) are temporarily
+        // gated under `#[ignore]` until 7.1d wires the real session
+        // tempdir.
+        let workspace_dir = noop_session_workdir(&self.key);
 
         // Drive the retry-budget Backoff loop. The actor enters the loop in
         // `Active` (committed above) and re-enters `Active` after each
@@ -628,8 +635,7 @@ impl WorkerActor {
             let attempt = self.read_consecutive_failures().saturating_add(1);
             info!(
                 target: "orchestrator",
-                repo = %self.key.0.as_str(),
-                issue = %self.key.1.as_str(),
+                issue = %self.key.as_str(),
                 attempt,
                 max_attempts = self.engine_policy.max_attempts,
                 "launching worker (retry-budget loop)",
@@ -659,8 +665,7 @@ impl WorkerActor {
                         // with the documented final-attempt fields.
                         info!(
                             target: "orchestrator",
-                            repo = %self.key.0.as_str(),
-                            issue = %self.key.1.as_str(),
+                            issue = %self.key.as_str(),
                             final_attempt = next_failures,
                             max_attempts,
                             last_outcome_reason = "non_clean_exit",
@@ -682,8 +687,7 @@ impl WorkerActor {
                         .next_launch_delay(WorkerOutcome::NonCleanExit { code: 0 }, next_failures);
                     info!(
                         target: "orchestrator",
-                        repo = %self.key.0.as_str(),
-                        issue = %self.key.1.as_str(),
+                        issue = %self.key.as_str(),
                         attempt = next_failures,
                         delay_ms = delay.as_millis() as u64,
                         outcome_reason = "non_clean_exit",
@@ -733,8 +737,7 @@ impl WorkerActor {
                     };
                     info!(
                         target: "orchestrator",
-                        repo = %self.key.0.as_str(),
-                        issue = %self.key.1.as_str(),
+                        issue = %self.key.as_str(),
                         attempt,
                         last_outcome_reason = outcome_reason,
                         "agent-authored failure; routing directly to TerminalFailure",
@@ -751,8 +754,7 @@ impl WorkerActor {
                 None => {
                     warn!(
                         target: "orchestrator",
-                        repo = %self.key.0.as_str(),
-                        issue = %self.key.1.as_str(),
+                        issue = %self.key.as_str(),
                         "engine launch produced no terminal event; staying Active",
                     );
                     return;
@@ -776,8 +778,7 @@ impl WorkerActor {
         let (events_tx, mut events_rx) = mpsc::channel::<SupervisedEvent>(64);
         let engine = Arc::clone(&self.engine);
         let ctx = build_worker_context(
-            self.key.0.clone(),
-            self.key.1.clone(),
+            self.key.clone(),
             correlation,
             workspace_dir.to_path_buf(),
             self.engine_policy,
@@ -814,8 +815,7 @@ impl WorkerActor {
             () = self.shutdown.wait() => {
                 debug!(
                     target: "orchestrator",
-                    repo = %self.key.0.as_str(),
-                    issue = %self.key.1.as_str(),
+                    issue = %self.key.as_str(),
                     "Backoff sleep aborted by shutdown signal",
                 );
                 false
@@ -824,8 +824,7 @@ impl WorkerActor {
                 if matches!(cmd, Some(ActorCommand::Shutdown) | None) {
                     debug!(
                         target: "orchestrator",
-                        repo = %self.key.0.as_str(),
-                        issue = %self.key.1.as_str(),
+                        issue = %self.key.as_str(),
                         "Backoff sleep aborted by inbox shutdown",
                     );
                     false
@@ -840,8 +839,7 @@ impl WorkerActor {
                     // because Backoff is a coarse-grained mechanism.
                     debug!(
                         target: "orchestrator",
-                        repo = %self.key.0.as_str(),
-                        issue = %self.key.1.as_str(),
+                        issue = %self.key.as_str(),
                         "tracker event during Backoff window; sleeping out the remainder",
                     );
                     tokio::select! {
@@ -908,13 +906,12 @@ impl WorkerActor {
     async fn try_cleaning(&self, correlation: CorrelationId) {
         // Evaluate pre-cleanup hooks first. Per design.md, a Deny here keeps
         // the actor in TerminalSuccess so deferred-cleanup work can finish.
-        let hook_ctx = PreCleanupContext::new(self.key.0.clone(), self.key.1.clone(), correlation);
+        let hook_ctx = PreCleanupContext::new(self.key.clone(), correlation);
         let hook_decision = self.hook_registry.evaluate_pre_cleanup(&hook_ctx).await;
         if let VetoDecision::Deny { reason } = hook_decision {
             info!(
                 target: "orchestrator",
-                repo = %self.key.0.as_str(),
-                issue = %self.key.1.as_str(),
+                issue = %self.key.as_str(),
                 reason = %reason,
                 "pre-cleanup hook denied TerminalSuccess -> Cleaning; staying in TerminalSuccess",
             );
@@ -933,34 +930,20 @@ impl WorkerActor {
             return;
         }
 
-        // Workspace removal happens once the actor enters Cleaning. A failure
-        // here is a hard fault per Requirement 4.5: log the offending path,
-        // poison the (repo, issue) so subsequent tracker events for this key
-        // are refused, and stop the cleanup loop. The Cleaning state has no
-        // outgoing transition so the actor exits next loop iteration.
-        if let Err(err) = self.workspace.remove(&self.key.0, &self.key.1).await {
-            let offending = workspace_error_path(&err);
-            warn!(
-                target: "orchestrator",
-                repo = %self.key.0.as_str(),
-                issue = %self.key.1.as_str(),
-                error = %err,
-                offending_path = ?offending,
-                "workspace remove failed during Cleaning; poisoning (repo, issue)",
-            );
-            self.mark_poisoned();
-        }
-    }
-
-    /// Mark the actor's `(repo, issue)` as poisoned so the orchestrator
-    /// dispatch loop refuses any further tracker events for this key. See
-    /// Requirement 4.5.
-    fn mark_poisoned(&self) {
-        let mut guard = self
-            .poisoned
-            .write()
-            .expect("orchestrator poisoned-set RwLock poisoned; this is unrecoverable");
-        guard.insert(self.key.clone());
+        // TODO(7.1d): replace this NoOp shim with a walk over
+        // `WorktreeRegistry` for the worker that calls `wt.remove` per
+        // registered worktree, then `SessionManager::remove_session(&self.key)`.
+        // Per design decision #11 cleanup-on-Cleaning is the daemon's
+        // responsibility (the agent does not call a `roki_close_worktree`
+        // tool); the iteration order is registration order so per-arc logs
+        // remain stable. A failure during the iteration must repopulate the
+        // `poisoned` set so subsequent tracker events for the issue are
+        // refused (mirrors the pre-7.1b workspace.remove failure path).
+        debug!(
+            target: "orchestrator",
+            issue = %self.key.as_str(),
+            "Cleaning entered; workspace teardown is a NoOp shim until 7.1d wires WorktreeRegistry",
+        );
     }
 
     /// Read the actor's current state from the orchestrator state map.
@@ -986,27 +969,20 @@ impl WorkerActor {
         trigger: TransitionTrigger,
         correlation: CorrelationId,
     ) -> bool {
-        let event = match TransitionEvent::new(
-            self.key.0.clone(),
-            self.key.1.clone(),
-            previous,
-            next,
-            trigger,
-            correlation,
-        ) {
-            Some(event) => event,
-            None => {
-                warn!(
-                    target: "orchestrator",
-                    repo = %self.key.0.as_str(),
-                    issue = %self.key.1.as_str(),
-                    ?previous,
-                    ?next,
-                    "illegal transition rejected before publish",
-                );
-                return false;
-            }
-        };
+        let event =
+            match TransitionEvent::new(self.key.clone(), previous, next, trigger, correlation) {
+                Some(event) => event,
+                None => {
+                    warn!(
+                        target: "orchestrator",
+                        issue = %self.key.as_str(),
+                        ?previous,
+                        ?next,
+                        "illegal transition rejected before publish",
+                    );
+                    return false;
+                }
+            };
 
         let decision = self.event_bus.publish(event).await;
         match decision {
@@ -1017,8 +993,7 @@ impl WorkerActor {
             VetoDecision::Deny { reason } => {
                 info!(
                     target: "orchestrator",
-                    repo = %self.key.0.as_str(),
-                    issue = %self.key.1.as_str(),
+                    issue = %self.key.as_str(),
                     ?previous,
                     ?next,
                     reason = %reason,
@@ -1061,19 +1036,23 @@ impl WorkerActor {
     }
 }
 
-/// Extract the offending path from a [`WorkspaceError`] when one is carried.
+/// Build a placeholder session-workdir path keyed by issue id.
 ///
-/// Requirement 4.5 demands that workspace creation/deletion errors are logged
-/// alongside the path the daemon was operating on. Variants without an
-/// associated path return `None` and the structured log just omits the field.
-fn workspace_error_path(err: &WorkspaceError) -> Option<&PathBuf> {
-    match err {
-        WorkspaceError::Wt { path, .. } => Some(path),
-        WorkspaceError::IdentifierCollision { existing_path, .. } => Some(existing_path),
-        WorkspaceError::InvalidIdentifier { .. } => None,
-        WorkspaceError::UnknownRepo { .. } => None,
-        WorkspaceError::Ghq { .. } => None,
-    }
+/// TODO(7.1d): replace with `SessionManager::create_session(issue)` returning
+/// `~/Library/Caches/roki/sessions/<issue>` on macOS / `~/.cache/roki/sessions/<issue>`
+/// on Linux. The current placeholder is intentionally not materialised on
+/// disk — the engine launchers used in the orchestrator's unit + integration
+/// tests do not require a real directory, and the e2e tests that DO require
+/// one (`e2e_happy_path`, `e2e_failure_retry`) are gated under `#[ignore]`
+/// pending 7.1d.
+fn noop_session_workdir(issue: &IssueId) -> PathBuf {
+    // Use the system temp dir as a host so `Path::parent`/`is_absolute`
+    // semantics match what 7.1d's real `SessionManager` will return. The
+    // path is NOT created and may not exist; consumers that probe disk for
+    // it will fail. That is intentional during the 7.1b → 7.1d window.
+    std::env::temp_dir()
+        .join("roki-sessions-noop")
+        .join(issue.as_str())
 }
 
 /// Build the per-launch [`WorkerContext`] supplied to the engine adapter.
@@ -1084,15 +1063,23 @@ fn workspace_error_path(err: &WorkspaceError) -> Option<&PathBuf> {
 /// The current defaults match what
 /// [`crate::engine::ClaudeEngineAdapter`] would already accept and let the
 /// orchestrator core land without crossing into 3.4 / 3.5 territory.
+///
+/// Per task 7.1b the [`WorkerContext`] still carries a `repo: RepoId` field
+/// for backwards compatibility with the engine surface (`engine/mod.rs` is
+/// outside this task's boundary). We populate it with a placeholder value
+/// because the state-machine no longer keys by repo; 7.1d removes this
+/// field from `WorkerContext` when the agent-driven repo selection lands.
 fn build_worker_context(
-    repo: RepoId,
     issue: IssueId,
     correlation: CorrelationId,
     workspace_dir: PathBuf,
     policy: EnginePolicy,
 ) -> WorkerContext {
     WorkerContext {
-        repo,
+        // TODO(7.1d): drop `repo` from `WorkerContext`; it is no longer in
+        // the state-machine key. The engine surface is outside the 7.1b
+        // boundary so we populate it with a placeholder for now.
+        repo: RepoId::new(""),
         issue,
         correlation_id: correlation,
         workspace_dir,
@@ -1123,7 +1110,6 @@ mod tests {
 
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
-    use tempfile::tempdir;
 
     /// Minimal engine stub: returns the configured outcome and emits a
     /// single terminal Exited event per launch.
@@ -1145,54 +1131,33 @@ mod tests {
         }
     }
 
+    /// Stub workspace that succeeds on every call. The orchestrator core no
+    /// longer invokes `ensure`/`remove` (post-7.1b NoOp shims) but the
+    /// `with_recovery` constructor still requires a `Workspace` until 7.1d
+    /// drops the trait dependency. The stub returns empty results so unit
+    /// tests focused on the state-machine driver do not need to materialise
+    /// any directories.
     fn workspace_for_test() -> Arc<dyn Workspace> {
-        // Hand-rolled stub workspace: succeeds for any (repo, issue) and
-        // returns a fresh tempdir-derived path. Production wiring uses
-        // WorkspaceManager backed by `wt` + `ghq`; the orchestrator tests
-        // here only need an `ensure`/`remove` surface that reports success.
         use async_trait::async_trait;
         use std::path::PathBuf;
-        use std::sync::Mutex as StdMutex;
 
-        struct StubWorkspace {
-            root: tempfile::TempDir,
-            tracked: StdMutex<std::collections::HashMap<(String, String), PathBuf>>,
-        }
+        struct StubWorkspace;
 
         #[async_trait]
         impl Workspace for StubWorkspace {
             async fn ensure(
                 &self,
-                repo: &RepoId,
-                issue: &IssueId,
+                _repo: &RepoId,
+                _issue: &IssueId,
             ) -> Result<PathBuf, crate::workspace::WorkspaceError> {
-                let key = (repo.as_str().to_string(), issue.as_str().to_string());
-                let mut guard = self.tracked.lock().unwrap();
-                if let Some(p) = guard.get(&key) {
-                    return Ok(p.clone());
-                }
-                let path = self.root.path().join(repo.as_str()).join(issue.as_str());
-                std::fs::create_dir_all(&path).map_err(|err| {
-                    crate::workspace::WorkspaceError::InvalidIdentifier {
-                        reason: format!("stub create_dir_all failed: {err}"),
-                    }
-                })?;
-                guard.insert(key, path.clone());
-                Ok(path)
+                Ok(std::env::temp_dir().join("roki-stub-workspace"))
             }
 
             async fn remove(
                 &self,
-                repo: &RepoId,
-                issue: &IssueId,
+                _repo: &RepoId,
+                _issue: &IssueId,
             ) -> Result<(), crate::workspace::WorkspaceError> {
-                let key = (repo.as_str().to_string(), issue.as_str().to_string());
-                let mut guard = self.tracked.lock().unwrap();
-                if let Some(path) = guard.remove(&key) {
-                    if path.exists() {
-                        std::fs::remove_dir_all(path).ok();
-                    }
-                }
                 Ok(())
             }
 
@@ -1204,11 +1169,7 @@ mod tests {
             }
         }
 
-        let root = tempdir().expect("tempdir for workspace root");
-        Arc::new(StubWorkspace {
-            root,
-            tracked: StdMutex::new(std::collections::HashMap::new()),
-        })
+        Arc::new(StubWorkspace)
     }
 
     fn fresh_orchestrator(
@@ -1262,7 +1223,7 @@ mod tests {
 
     #[tokio::test]
     async fn dispatch_creates_state_entry_for_new_key() {
-        // First tracker event for a key should insert a record into the
+        // First tracker event for an issue should insert a record into the
         // state map so OrchestratorRead can project it before the actor has
         // even processed the event.
         let engine = Arc::new(StubEngine {
@@ -1277,8 +1238,8 @@ mod tests {
             .await
             .expect("send active");
 
-        // Wait until the state map carries a record for the key. The actor
-        // may have advanced past Discovered, but the key must exist.
+        // Wait until the state map carries a record for the issue. The actor
+        // may have advanced past Discovered, but the issue must exist.
         let saw_record = {
             let mut tries = 0;
             loop {
@@ -1293,10 +1254,7 @@ mod tests {
                 tokio::time::sleep(std::time::Duration::from_millis(5)).await;
             }
         };
-        assert!(
-            saw_record,
-            "state map must record the new (repo, issue) key"
-        );
+        assert!(saw_record, "state map must record the new issue");
 
         shutdown.trigger();
         let _ = tokio::time::timeout(std::time::Duration::from_secs(2), handle).await;

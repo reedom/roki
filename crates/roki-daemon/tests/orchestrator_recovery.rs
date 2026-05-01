@@ -135,14 +135,13 @@ impl Workspace for StubWorkspace {
 
 async fn await_state<R: OrchestratorRead>(
     read_handle: &R,
-    repo: &RepoId,
     issue: &IssueId,
     target: WorkerState,
     timeout: Duration,
 ) -> bool {
     let start = std::time::Instant::now();
     while start.elapsed() < timeout {
-        if let Some(snapshot) = read_handle.issue(repo, issue) {
+        if let Some(snapshot) = read_handle.issue(issue) {
             if snapshot.state == target {
                 return true;
             }
@@ -269,12 +268,10 @@ async fn recovery_reconciles_workspaces_and_linear_state_on_startup() {
     // 3. ENG-1 and ENG-3 must reach Active. The CountingEngine sleeps for
     //    50ms before exiting, so we have a window to observe the Active
     //    state. We use a long enough timeout to absorb scheduling jitter.
-    let repo = RepoId::new("repo-a");
     let eng1 = IssueId::new("ENG-1");
     let eng3 = IssueId::new("ENG-3");
     let saw_eng1_active = await_state(
         &read_handle,
-        &repo,
         &eng1,
         WorkerState::Active,
         Duration::from_secs(5),
@@ -282,7 +279,6 @@ async fn recovery_reconciles_workspaces_and_linear_state_on_startup() {
     .await;
     let saw_eng3_active = await_state(
         &read_handle,
-        &repo,
         &eng3,
         WorkerState::Active,
         Duration::from_secs(5),
@@ -302,7 +298,6 @@ async fn recovery_reconciles_workspaces_and_linear_state_on_startup() {
     // it was orphaned without spawning an actor.
     let saw_eng1_review = await_state(
         &read_handle,
-        &repo,
         &eng1,
         WorkerState::AwaitingReview,
         Duration::from_secs(5),
@@ -310,7 +305,6 @@ async fn recovery_reconciles_workspaces_and_linear_state_on_startup() {
     .await;
     let saw_eng3_review = await_state(
         &read_handle,
-        &repo,
         &eng3,
         WorkerState::AwaitingReview,
         Duration::from_secs(5),
@@ -327,10 +321,7 @@ async fn recovery_reconciles_workspaces_and_linear_state_on_startup() {
 
     let snapshot = read_handle.snapshot();
     assert!(
-        !snapshot
-            .issues
-            .iter()
-            .any(|i| i.repo.as_str() == "repo-a" && i.issue.as_str() == "ENG-2"),
+        !snapshot.issues.iter().any(|i| i.issue.as_str() == "ENG-2"),
         "ENG-2 must NOT appear in the orchestrator state map; orphaned workspaces have no actor",
     );
 

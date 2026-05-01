@@ -12,12 +12,17 @@
 //! * The returned types ([`SnapshotResponse`], [`IssueState`]) are pure data
 //!   projections cloned out of the orchestrator's in-memory state.
 //!
-//! ## What ships in 2.1a
+//! ## What ships in 2.1a (and 7.1b's key collapse)
 //!
 //! Only the trait shape and the projection structs. The orchestrator's
 //! concrete `OrchestratorRead` implementation that reads live worker state
 //! lives behind the worker actor (task 3.x). For 2.1a, downstream specs and
 //! tests can implement [`OrchestratorRead`] themselves against a fixture map.
+//!
+//! Task 7.1b collapsed the state-machine key from `(repo, issue)` to
+//! `(issue,)`. The projection therefore identifies a worker by issue alone;
+//! repo association moves onto the (yet-to-land in 7.1d) `WorktreeRegistry`,
+//! which is per-worker rather than per-state.
 //!
 //! ## Serialization
 //!
@@ -25,14 +30,14 @@
 //! implement [`serde::Serialize`] manually so downstream observability can
 //! emit JSON without forcing serde derives onto the foundational
 //! [`super::state`] types (which are intentionally serde-free for now). The
-//! manual impls use the public string accessors on [`RepoId`] / [`IssueId`]
-//! and stable lower-kebab-case names for [`WorkerState`].
+//! manual impls use the public string accessors on [`IssueId`] and stable
+//! lower-kebab-case names for [`WorkerState`].
 
 use std::time::SystemTime;
 
 use serde::{Serialize, Serializer, ser::SerializeStruct};
 
-use super::state::{CorrelationId, IssueId, RepoId, WorkerState};
+use super::state::{CorrelationId, IssueId, WorkerState};
 
 /// Read-only projection surface for orchestrator state.
 ///
@@ -44,7 +49,7 @@ use super::state::{CorrelationId, IssueId, RepoId, WorkerState};
 /// * Every method takes `&self` only — there are no mutators.
 /// * Returned types are owned clones of internal projections; consumers
 ///   cannot reach back into orchestrator state through them.
-/// * Implementations MUST NOT panic on unknown `(repo, issue)` keys; they
+/// * Implementations MUST NOT panic on unknown `IssueId` keys; they
 ///   return [`Option::None`] from [`OrchestratorRead::issue`] and skip the
 ///   key from [`SnapshotResponse::issues`].
 ///
@@ -53,14 +58,14 @@ use super::state::{CorrelationId, IssueId, RepoId, WorkerState};
 /// store is expected to be an in-memory map guarded by a `RwLock` (or
 /// equivalent), with the read path on the lock's read side only.
 pub trait OrchestratorRead: Send + Sync {
-    /// Snapshot the current per-`(repo, issue)` state for every tracked
-    /// worker. The returned [`SnapshotResponse`] is a self-contained owned
-    /// value safe to JSON-serialize and ship over a wire.
+    /// Snapshot the current per-issue state for every tracked worker. The
+    /// returned [`SnapshotResponse`] is a self-contained owned value safe to
+    /// JSON-serialize and ship over a wire.
     fn snapshot(&self) -> SnapshotResponse;
 
-    /// Look up a single `(repo, issue)` projection. Returns [`None`] if no
-    /// worker for that key is being tracked.
-    fn issue(&self, repo: &RepoId, issue: &IssueId) -> Option<IssueState>;
+    /// Look up a single issue projection. Returns [`None`] if no worker for
+    /// that issue is being tracked.
+    fn issue(&self, issue: &IssueId) -> Option<IssueState>;
 }
 
 /// Stable wire version for [`SnapshotResponse`]. Bumped only on a breaking
@@ -81,9 +86,9 @@ pub const SNAPSHOT_RESPONSE_VERSION: &str = "v1";
 pub struct SnapshotResponse {
     /// Wire version — currently always [`SNAPSHOT_RESPONSE_VERSION`].
     pub version: String,
-    /// Projection of every tracked `(repo, issue)` worker, in implementation
-    /// order. Consumers must not assume any particular ordering beyond stable
-    /// repetition between back-to-back snapshots.
+    /// Projection of every tracked worker, in implementation order. Consumers
+    /// must not assume any particular ordering beyond stable repetition
+    /// between back-to-back snapshots.
     pub issues: Vec<IssueState>,
 }
 
@@ -107,7 +112,7 @@ impl Serialize for SnapshotResponse {
     }
 }
 
-/// Per-`(repo, issue)` projection of orchestrator state.
+/// Per-issue projection of orchestrator state.
 ///
 /// This is the unit returned by [`OrchestratorRead::issue`] and held inside
 /// [`SnapshotResponse::issues`]. It is intentionally a flat data record:
@@ -116,26 +121,25 @@ impl Serialize for SnapshotResponse {
 /// `last_event_at` is reported as a [`SystemTime`] (rather than `Instant`,
 /// which is monotonic but not absolute) so observability can render it
 /// against a wall clock; serialized form is whole seconds since UNIX_EPOCH
-/// via the manual [`Serialize`] impl. Pre-1.5/2.2 there is no path/workspace
-/// surface here — path-typed fields will be added by the workspace task.
+/// via the manual [`Serialize`] impl. Repo association is handled by the
+/// (post-7.1d) `WorktreeRegistry` per opened worktree, not by this
+/// per-state projection.
 #[derive(Debug, Clone)]
 pub struct IssueState {
-    pub repo: RepoId,
     pub issue: IssueId,
     pub state: WorkerState,
     /// Wall-clock timestamp of the most recent transition observed for this
-    /// `(repo, issue)`, or [`None`] if the worker has not transitioned since
-    /// being observed.
+    /// issue, or [`None`] if the worker has not transitioned since being
+    /// observed.
     pub last_event_at: Option<SystemTime>,
     /// Correlation id associated with the most recent worker invocation for
-    /// this `(repo, issue)`, or [`None`] if no invocation has been minted.
+    /// this issue, or [`None`] if no invocation has been minted.
     pub last_correlation_id: Option<CorrelationId>,
 }
 
 impl Serialize for IssueState {
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        let mut state = serializer.serialize_struct("IssueState", 5)?;
-        state.serialize_field("repo", self.repo.as_str())?;
+        let mut state = serializer.serialize_struct("IssueState", 4)?;
         state.serialize_field("issue", self.issue.as_str())?;
         state.serialize_field("state", worker_state_wire_name(self.state))?;
         // SystemTime serializes as a struct in serde's default impl; render as
@@ -198,10 +202,10 @@ mod tests {
             SnapshotResponse::new(self.issues.clone())
         }
 
-        fn issue(&self, repo: &RepoId, issue: &IssueId) -> Option<IssueState> {
+        fn issue(&self, issue: &IssueId) -> Option<IssueState> {
             self.issues
                 .iter()
-                .find(|projection| &projection.repo == repo && &projection.issue == issue)
+                .find(|projection| &projection.issue == issue)
                 .cloned()
         }
     }
@@ -209,21 +213,18 @@ mod tests {
     fn seed_issues() -> Vec<IssueState> {
         vec![
             IssueState {
-                repo: RepoId::new("repo-a"),
                 issue: IssueId::new("ENG-1"),
                 state: WorkerState::Active,
                 last_event_at: Some(SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000)),
                 last_correlation_id: Some(CorrelationId::from_uuid(Uuid::nil())),
             },
             IssueState {
-                repo: RepoId::new("repo-a"),
                 issue: IssueId::new("ENG-2"),
                 state: WorkerState::AwaitingReview,
                 last_event_at: None,
                 last_correlation_id: None,
             },
             IssueState {
-                repo: RepoId::new("repo-b"),
                 issue: IssueId::new("OPS-9"),
                 state: WorkerState::Cleaning,
                 last_event_at: Some(SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_500)),
@@ -250,7 +251,7 @@ mod tests {
         // Both methods compile against `&dyn OrchestratorRead`, confirming
         // the trait grants no mutation rights.
         let _snapshot: SnapshotResponse = read.snapshot();
-        let _issue: Option<IssueState> = read.issue(&RepoId::new("repo-a"), &IssueId::new("ENG-1"));
+        let _issue: Option<IssueState> = read.issue(&IssueId::new("ENG-1"));
     }
 
     #[test]
@@ -265,7 +266,6 @@ mod tests {
         assert_eq!(response.issues.len(), seeded.len());
 
         for (returned, expected) in response.issues.iter().zip(seeded.iter()) {
-            assert_eq!(returned.repo, expected.repo);
             assert_eq!(returned.issue, expected.issue);
             assert_eq!(returned.state, expected.state);
             assert_eq!(returned.last_event_at, expected.last_event_at);
@@ -280,11 +280,11 @@ mod tests {
         };
 
         let hit = fixture
-            .issue(&RepoId::new("repo-a"), &IssueId::new("ENG-1"))
+            .issue(&IssueId::new("ENG-1"))
             .expect("seeded key must resolve");
         assert_eq!(hit.state, WorkerState::Active);
 
-        let miss = fixture.issue(&RepoId::new("repo-a"), &IssueId::new("DOES-NOT-EXIST"));
+        let miss = fixture.issue(&IssueId::new("DOES-NOT-EXIST"));
         assert!(miss.is_none(), "unknown key must return None, not panic");
     }
 
@@ -292,7 +292,6 @@ mod tests {
     fn snapshot_response_serializes_to_stable_v1_shape() {
         let fixture = FixtureRead {
             issues: vec![IssueState {
-                repo: RepoId::new("repo-a"),
                 issue: IssueId::new("ENG-1"),
                 state: WorkerState::Cleaning,
                 last_event_at: Some(SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000)),
@@ -304,7 +303,6 @@ mod tests {
         assert_eq!(json["version"], "v1");
         let issues = json["issues"].as_array().expect("issues is an array");
         assert_eq!(issues.len(), 1);
-        assert_eq!(issues[0]["repo"], "repo-a");
         assert_eq!(issues[0]["issue"], "ENG-1");
         assert_eq!(issues[0]["state"], "cleaning");
         assert_eq!(issues[0]["last_event_at_unix_seconds"], 1_700_000_000_i64);

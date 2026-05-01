@@ -1,6 +1,6 @@
 //! Orchestrator state, transition table, and transition-event types.
 //!
-//! This module is the foundation type layer for the per-`(repo, issue)` state
+//! This module is the foundation type layer for the per-`(issue,)` state
 //! machine described in design.md "Per-issue worker lifecycle" and pinned by
 //! requirements 8.1, 8.2, and 13.2. Everything here is pure: no I/O, no async,
 //! no shared state. Downstream submodules (`event_bus`, `hooks`, `worker`,
@@ -9,12 +9,12 @@
 //!
 //! ## What lives here
 //!
-//! * [`WorkerState`] — every state a `(repo, issue)` worker can occupy,
-//!   including the [`WorkerState::Cleaning`] interim state that gives
-//!   downstream specs (notably roki-distill-postmerge) a stable place to do
-//!   deferred work while the workspace still exists. Workspace removal happens
-//!   only on `Cleaning -> [*]`; the terminal-end is expressed as the absence
-//!   of legal outgoing transitions from `Cleaning` and `TerminalFailure`.
+//! * [`WorkerState`] — every state a per-issue worker can occupy, including
+//!   the [`WorkerState::Cleaning`] interim state that gives downstream specs
+//!   (notably roki-distill-postmerge) a stable place to do deferred work
+//!   while the workspace still exists. Workspace removal happens only on
+//!   `Cleaning -> [*]`; the terminal-end is expressed as the absence of
+//!   legal outgoing transitions from `Cleaning` and `TerminalFailure`.
 //! * [`TransitionTrigger`] — the source that caused the transition. Only the
 //!   sources design.md authorises the orchestrator to drive transitions from
 //!   are listed: tracker events, engine events, recovery scan, operator
@@ -41,15 +41,26 @@
 //!   the pre-cleanup hook
 //!
 //! Every other legal transition is observable but non-vetoable.
+//!
+//! ## Per-task-7.1b note: state-machine key collapse
+//!
+//! Task 7.1b collapsed the orchestrator key from `(repo, issue)` to `(issue,)`.
+//! The `RepoId` newtype is retained here so 7.1d can key the
+//! `WorktreeRegistry` by it; nothing in the state machine itself reads the
+//! repo any more. `TransitionEvent` no longer carries a `repo` field — repo
+//! association is owned by the (yet-to-land) `WorktreeRegistry` and is per
+//! worktree the agent opens, not per state-machine transition.
 
 use uuid::Uuid;
 
-/// Linear repository identifier as carried through the orchestrator.
+/// Repository identifier as carried through the `WorktreeRegistry` (added by
+/// task 7.1d).
 ///
 /// Defined here (rather than in a shared id module) so `orchestrator/state` is
 /// self-contained; later tasks may relocate the type without changing its
 /// shape, and downstream code already pattern-matches on `String`-equivalent
-/// newtypes only.
+/// newtypes only. The state machine itself does not key by `RepoId`; the type
+/// stays public for the agent-driven worktree allowlist that 7.1d wires.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct RepoId(String);
 
@@ -109,7 +120,7 @@ impl Default for CorrelationId {
     }
 }
 
-/// Every state a per-`(repo, issue)` worker can occupy.
+/// Every state a per-issue worker can occupy.
 ///
 /// Mirrors the lifecycle diagram in design.md. Variants are deliberately flat
 /// (no payload) so the state itself never carries hidden context — all
@@ -187,9 +198,13 @@ impl VetoDecision {
 /// `(previous, next)` pair using [`is_vetoable`] when constructing the event.
 /// Carrying the flag on the event lets observers and structured-log pipelines
 /// avoid reimplementing the vetoable table.
+///
+/// Per task 7.1b the state-machine key collapsed from `(repo, issue)` to
+/// `(issue,)`; the event therefore carries only the issue. Repo association
+/// (post-task-7.1d) lives on the `WorktreeRegistry` per opened worktree, not
+/// on the per-transition event.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TransitionEvent {
-    pub repo: RepoId,
     pub issue: IssueId,
     pub previous: WorkerState,
     pub next: WorkerState,
@@ -207,7 +222,6 @@ impl TransitionEvent {
     /// [`legal_transition`] so an `Err`-equivalent here is a programmer error;
     /// returning `Option` keeps this function pure and panic-free for testing.
     pub fn new(
-        repo: RepoId,
         issue: IssueId,
         previous: WorkerState,
         next: WorkerState,
@@ -218,7 +232,6 @@ impl TransitionEvent {
             return None;
         }
         Some(Self {
-            repo,
             issue,
             previous,
             next,
@@ -427,13 +440,11 @@ mod tests {
 
     #[test]
     fn transition_event_new_populates_every_documented_transition() {
-        let repo = RepoId::new("repo-a");
         let issue = IssueId::new("ENG-1");
         let correlation = CorrelationId::from_uuid(Uuid::nil());
 
         for (from, to, _, expected_vetoable) in documented_transitions() {
             let event = TransitionEvent::new(
-                repo.clone(),
                 issue.clone(),
                 from,
                 to,
@@ -448,7 +459,6 @@ mod tests {
                 event.vetoable, expected_vetoable,
                 "vetoable flag for {from:?} -> {to:?}",
             );
-            assert_eq!(event.repo, repo);
             assert_eq!(event.issue, issue);
             assert_eq!(event.trigger, TransitionTrigger::TrackerEvent);
             assert_eq!(event.correlation_id, correlation);
@@ -458,10 +468,8 @@ mod tests {
     #[test]
     fn transition_event_new_rejects_illegal_transitions() {
         // A representative illegal transition: Active back to Discovered.
-        let repo = RepoId::new("repo-a");
         let issue = IssueId::new("ENG-1");
         let event = TransitionEvent::new(
-            repo,
             issue,
             WorkerState::Active,
             WorkerState::Discovered,
@@ -480,7 +488,6 @@ mod tests {
         // three vetoable transitions produces an event with `vetoable = true`
         // and the correct previous/next pair. This is the observable
         // completion criterion stated in tasks.md task 2.1.
-        let repo = RepoId::new("repo-vetoable");
         let issue = IssueId::new("ENG-vet");
         let correlation = CorrelationId::from_uuid(Uuid::nil());
 
@@ -492,7 +499,6 @@ mod tests {
 
         for (from, to) in cases {
             let event = TransitionEvent::new(
-                repo.clone(),
                 issue.clone(),
                 from,
                 to,

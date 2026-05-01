@@ -205,7 +205,6 @@ async fn orchestrator_drives_issue_from_discovered_to_cleaning() {
     // must reflect the same key projected to Cleaning.
     let snapshot = read_handle.snapshot();
     assert_eq!(snapshot.issues.len(), 1);
-    assert_eq!(snapshot.issues[0].repo.as_str(), "repo-a");
     assert_eq!(snapshot.issues[0].issue.as_str(), "ENG-1");
     assert_eq!(snapshot.issues[0].state, WorkerState::Cleaning);
 
@@ -277,13 +276,12 @@ async fn orchestrator_read_snapshot_matches_actual_state_mid_run() {
     let snapshot = read_handle.snapshot();
     assert_eq!(snapshot.issues.len(), 1);
     let projected = &snapshot.issues[0];
-    assert_eq!(projected.repo.as_str(), "repo-a");
     assert_eq!(projected.issue.as_str(), "ENG-7");
     assert_eq!(projected.state, WorkerState::AwaitingReview);
 
     // Single-issue lookup also exposes the same projection.
     let one = read_handle
-        .issue(&RepoId::new("repo-a"), &IssueId::new("ENG-7"))
+        .issue(&IssueId::new("ENG-7"))
         .expect("issue must be tracked");
     assert_eq!(one.state, WorkerState::AwaitingReview);
 
@@ -447,15 +445,12 @@ async fn non_clean_exit_drives_active_backoff_loop_until_budget_exhausted() {
         "engine must be launched exactly max_attempts (=3) times",
     );
 
-    // Workspace path must be retained throughout — no delete/recreate between
-    // attempts, and TerminalFailure retains the workspace for inspection per
-    // Requirement 4.5.
-    let expected_workspace =
-        crate::common::expected_worktree_path(_parent_keep.path(), "repo-a", "ENG-1");
-    assert!(
-        expected_workspace.is_dir(),
-        "workspace must be retained after retry-budget exhaustion; expected {expected_workspace:?}",
-    );
+    // TODO(7.1d): re-assert "workspace path retained across the Backoff
+    // loop" once `SessionManager` materialises a real session tempdir on
+    // `Queued -> Active`. The post-7.1b NoOp shim does not create any
+    // directory on disk, so the previous `expected_workspace.is_dir()`
+    // probe is dropped here. The retry-budget state-trace assertion above
+    // covers the in-memory invariant.
 
     let snapshot = read_handle.snapshot();
     assert_eq!(snapshot.issues.len(), 1);
@@ -636,6 +631,10 @@ async fn turn_budget_exhausted_drives_active_to_terminal_failure_without_backoff
 }
 
 #[tokio::test]
+#[ignore = "TODO(7.1d): post-7.1b the workspace lifecycle on Queued -> Active \
+            is a NoOp shim that does not materialise a directory on disk. \
+            Re-enable once SessionManager creates a real session tempdir; \
+            the test asserts the path exists during every Backoff window."]
 async fn workspace_path_retained_across_backoff_loop() {
     // Task 3.7 explicit observable completion: confirm the workspace path
     // exists on disk during every Backoff window of the retry loop. We pin

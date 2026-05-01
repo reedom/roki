@@ -99,7 +99,6 @@ impl EngineLauncher for StubEngine {
 /// operator-readable reason.
 struct DenyingVetoSubscriber {
     id: &'static str,
-    deny_repo: String,
     deny_issue: String,
     deny_reason: String,
     veto_invocations: Arc<AtomicUsize>,
@@ -119,7 +118,6 @@ impl TransitionSubscriber for DenyingVetoSubscriber {
         self.veto_invocations.fetch_add(1, Ordering::SeqCst);
         let matches_target = event.previous == WorkerState::Queued
             && event.next == WorkerState::Active
-            && event.repo.as_str() == self.deny_repo
             && event.issue.as_str() == self.deny_issue;
         if matches_target {
             Ok(VetoDecision::deny(self.deny_reason.clone()))
@@ -202,7 +200,6 @@ async fn e2e_vetoable_transition_blocks_denied_issue_and_lets_others_progress() 
     let veto_invocations = Arc::new(AtomicUsize::new(0));
     event_bus.register(Arc::new(DenyingVetoSubscriber {
         id: "stub-spec-gate",
-        deny_repo: TEST_REPO.to_string(),
         deny_issue: DENIED_ISSUE.to_string(),
         deny_reason: DENY_REASON.to_string(),
         veto_invocations: Arc::clone(&veto_invocations),
@@ -255,10 +252,9 @@ async fn e2e_vetoable_transition_blocks_denied_issue_and_lets_others_progress() 
     // unaffected issue and that the orchestrator has had a real chance
     // to evaluate the denied issue's vetoable transition by the time we
     // assert below.
-    let allowed_repo = RepoId::new(TEST_REPO);
     let allowed_issue = IssueId::new(ALLOWED_ISSUE);
     let allowed_progressed = await_condition(Duration::from_secs(5), || {
-        match read_handle.issue(&allowed_repo, &allowed_issue) {
+        match read_handle.issue(&allowed_issue) {
             Some(state) => matches!(
                 state.state,
                 WorkerState::Active | WorkerState::AwaitingReview
@@ -277,10 +273,9 @@ async fn e2e_vetoable_transition_blocks_denied_issue_and_lets_others_progress() 
     // The denying veto subscriber MUST have been consulted for the
     // denied issue's `Queued -> Active` arc, and the orchestrator must
     // NOT have committed that transition.
-    let denied_repo = RepoId::new(TEST_REPO);
     let denied_issue = IssueId::new(DENIED_ISSUE);
     let denied_state = read_handle
-        .issue(&denied_repo, &denied_issue)
+        .issue(&denied_issue)
         .expect("denied issue must have a state-map record after dispatch");
     assert_eq!(
         denied_state.state,
@@ -301,8 +296,7 @@ async fn e2e_vetoable_transition_blocks_denied_issue_and_lets_others_progress() 
     // actor returns without writing state.
     let log = recorded.lock().await.clone();
     let allowed_progress_committed = log.iter().any(|ev| {
-        ev.repo.as_str() == TEST_REPO
-            && ev.issue.as_str() == ALLOWED_ISSUE
+        ev.issue.as_str() == ALLOWED_ISSUE
             && ev.previous == WorkerState::Active
             && ev.next == WorkerState::AwaitingReview
     });
@@ -310,11 +304,9 @@ async fn e2e_vetoable_transition_blocks_denied_issue_and_lets_others_progress() 
         allowed_progress_committed,
         "the unaffected issue must commit `Active -> AwaitingReview` after the engine clean-exit; got {log:?}",
     );
-    let denied_post_queued = log.iter().any(|ev| {
-        ev.repo.as_str() == TEST_REPO
-            && ev.issue.as_str() == DENIED_ISSUE
-            && ev.previous == WorkerState::Active
-    });
+    let denied_post_queued = log
+        .iter()
+        .any(|ev| ev.issue.as_str() == DENIED_ISSUE && ev.previous == WorkerState::Active);
     assert!(
         !denied_post_queued,
         "the denied issue must never commit any `Active -> ...` transition (its Queued -> Active was vetoed); got {log:?}",
@@ -323,8 +315,7 @@ async fn e2e_vetoable_transition_blocks_denied_issue_and_lets_others_progress() 
     // commit still appears in the log; that is what the read-handle
     // assertion above confirms via the projected state.
     let denied_queued_published = log.iter().any(|ev| {
-        ev.repo.as_str() == TEST_REPO
-            && ev.issue.as_str() == DENIED_ISSUE
+        ev.issue.as_str() == DENIED_ISSUE
             && ev.previous == WorkerState::Discovered
             && ev.next == WorkerState::Queued
     });
@@ -370,10 +361,10 @@ async fn e2e_vetoable_transition_blocks_denied_issue_and_lets_others_progress() 
         logs_contain(DENIED_ISSUE),
         "the veto log must carry the denied issue identifier",
     );
-    assert!(
-        logs_contain(TEST_REPO),
-        "the veto log must carry the denied repo identifier",
-    );
+    // Per task 7.1b the veto log no longer carries `repo=...`: the
+    // state-machine key collapsed to `(issue,)` and `TransitionEvent.repo`
+    // was removed. Repo association moves onto the (post-7.1d)
+    // `WorktreeRegistry` per opened worktree.
     assert!(
         logs_contain("Queued") && logs_contain("Active"),
         "the veto log must name the (previous, next) transition pair (Queued -> Active)",
