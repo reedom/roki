@@ -124,7 +124,7 @@
   - _Requirements: 9.1, 9.2, 9.3, 9.4, 9.5_
   - _Boundary: permissions_
 
-- [ ] 2.10 Implement the engine adapter subprocess supervisor
+- [x] 2.10 Implement the engine adapter subprocess supervisor
   - Spawn `claude --print --output-format stream-json` with the issue workspace as cwd, kiro-skill-discovery flags applied (no `--bare`), the resolved permission strategy passed through, and `kill_on_drop` set on the process handle.
   - Wire the stream-JSON parser, the engine policy controller, and the tool catalog into a single supervised lifecycle that emits one terminal `Exited` event for every launch.
   - Add the `additional_context: Option<serde_json::Value>` field to `WorkerContext`. When `Some(value)`, the adapter shall forward the value verbatim into the agent's session through a documented prelude envelope (a stable JSON block prepended to the session prompt under a stable key). The MVP shall not interpret the contents.
@@ -229,3 +229,5 @@
 - 2.1a: `register_pre_cleanup_hook` is on `HookRegistry` returning `usize` (current count); design.md sketches it on the `Orchestrator` trait returning `SubscriptionHandle`. Acceptable for 2.1a since `Orchestrator` doesn't exist yet; 3.x must republish the API on the `Orchestrator` trait and add deregistration.
 - 2.3: `BackoffPolicy.max_seconds` default 300 is correct, but the JSON-Schema upper bound allows up to 3600 (1h). Design says "capped at 5min". Tighten the schema bound to 300 in a follow-up touch-up.
 - 2.3: `routing::tests::route_issue_emits_routed_event_with_required_fields` (crates/roki-daemon/src/routing.rs:449) intermittently fails when run in the full workspace due to `tracing::subscriber::set_default` not isolating across parallel tests. Pre-existing — observed during 2.3 review; passes in isolation. Fix in 1.5 follow-up by switching to a per-test custom subscriber via `tracing::subscriber::with_default` scoped to the test thread.
+- 2.10: `WorkerContext` shape diverges from design.md slightly — instead of separate `policy: WorkflowPolicy`, `permission: PermissionStrategy`, `max_turns`, `stall_window` fields, the supervisor consumes already-resolved `permission: ResolvedPermission` (from 2.9) and `policy: EnginePolicy` (from 2.8). Update design.md to reflect this when next revised.
+- 2.10: `WorkerOutcome::TurnBudgetExhausted` and `Cancelled` are not produced by the single-launch supervisor — they belong to the orchestrator's continuation-prompt loop and shutdown path respectively. The orchestrator (3.x) must produce these outcomes itself.
