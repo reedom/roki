@@ -190,7 +190,7 @@
   - Observable completion: `SPEC.md` exists at the repository root and a manual cross-check confirms each Requirement 11 and Requirement 13 acceptance criterion has a named section addressing it; a search for both `extension.gates.spec.required_status` and `extension.gates.review.required_status` in `SPEC.md` returns the disambiguation paragraph.
   - _Requirements: 11.1, 11.2, 11.3, 11.4, 13.1, 13.2, 13.3, 13.4, 13.5_
 
-- [ ] 4.2 End-to-end happy-path test with fake Linear and fake `claude`
+- [x] 4.2 End-to-end happy-path test with fake Linear and fake `claude`
   - Stand up a fake Linear server and a fake `claude` binary that emits a scripted stream-json sequence covering `Discovered -> Queued -> Active -> AwaitingReview -> TerminalSuccess -> Cleaning` for one `(repo, issue)`.
   - Assert workspace creation on activation, transition events emitted in the correct order with correlation ids set (including the `TerminalSuccess -> Cleaning` transition), and workspace deletion after `Cleaning -> [*]`.
   - Observable completion: the test passes deterministically and produces the expected transition log sequence with no duplicate transitions for the same key.
