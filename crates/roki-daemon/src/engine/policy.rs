@@ -33,7 +33,21 @@ use std::time::Duration;
 
 /// Documented absolute floor for non-`CleanExit` next-launch delays
 /// (requirements.md §5.6, design.md §Engine).
+///
+/// This is the documented default for [`EnginePolicy::backoff_floor`]. The
+/// constant remains exported so callers that want the published default can
+/// reference it directly (tests and downstream specs alike).
 pub const BACKOFF_FLOOR: Duration = Duration::from_secs(10);
+
+/// Default per-`(repo, issue)` retry budget. One launch per attempt;
+/// `1` means "one shot, no retry"; the documented default is `3`. The
+/// JSON-Schema in `WORKFLOW.md` rejects values outside `1..=10`. See
+/// [`EnginePolicy::max_attempts`] and SPEC.md §3.2 / §9.5.
+pub const DEFAULT_MAX_ATTEMPTS: u32 = 3;
+
+/// Maximum value the `WORKFLOW.md` schema accepts for `engine.max_attempts`.
+/// Mirrored here for use by `EnginePolicy::with_max_attempts` validation.
+pub const MAX_ATTEMPTS_CEILING: u32 = 10;
 
 /// Documented absolute ceiling for non-`CleanExit` next-launch delays
 /// (requirements.md §5.6, design.md §Engine).
@@ -158,6 +172,22 @@ pub struct EnginePolicy {
     /// Exponential-growth knobs for the next-launch delay
     /// (requirements.md §5.6).
     pub backoff: BackoffPolicy,
+    /// Retry budget for the orchestrator's `Active → Backoff → Active` loop:
+    /// the maximum number of launch attempts the worker actor will make for a
+    /// single `(repo, issue)` against repeated `NonCleanExit` outcomes. `1`
+    /// means "one shot, no retry"; the documented default is `3`. Only
+    /// `NonCleanExit` consumes this budget — `Stalled` and
+    /// `TurnBudgetExhausted` route directly to `TerminalFailure` because
+    /// re-running with the same prompt and budget repeats the same outcome
+    /// (see SPEC.md §9.5).
+    pub max_attempts: u32,
+    /// Documented floor applied to the computed next-launch delay before
+    /// the absolute `[BACKOFF_FLOOR, BACKOFF_CEILING]` clamp. Defaults to the
+    /// [`BACKOFF_FLOOR`] constant; tests construct policies with sub-second
+    /// values so retry loops complete deterministically in well under one
+    /// second. The constant remains the documented default for production
+    /// callers.
+    pub backoff_floor: Duration,
 }
 
 impl Default for EnginePolicy {
@@ -166,8 +196,20 @@ impl Default for EnginePolicy {
             turn_budget: DEFAULT_TURN_BUDGET,
             stall_window: DEFAULT_STALL_WINDOW,
             backoff: BackoffPolicy::default(),
+            max_attempts: DEFAULT_MAX_ATTEMPTS,
+            backoff_floor: BACKOFF_FLOOR,
         }
     }
+}
+
+/// Error raised when constructing or validating an [`EnginePolicy`].
+#[derive(Debug, thiserror::Error, PartialEq, Eq)]
+pub enum EnginePolicyError {
+    /// `max_attempts` was outside the documented `1..=10` envelope.
+    #[error(
+        "engine.max_attempts must be between 1 and {MAX_ATTEMPTS_CEILING} inclusive, got {value}"
+    )]
+    InvalidMaxAttempts { value: u32 },
 }
 
 impl EnginePolicy {
@@ -230,7 +272,23 @@ impl EnginePolicy {
         };
         let raw = Duration::from_secs_f64(safe_secs);
         let bounded_by_policy = raw.min(self.backoff.max);
-        bounded_by_policy.clamp(BACKOFF_FLOOR, BACKOFF_CEILING)
+        // Floor is configurable per-policy (defaults to `BACKOFF_FLOOR`);
+        // the absolute ceiling is fixed at `BACKOFF_CEILING` so a misconfigured
+        // operator cannot push delays beyond the documented envelope.
+        let floor = self.backoff_floor.min(BACKOFF_CEILING);
+        bounded_by_policy.clamp(floor, BACKOFF_CEILING)
+    }
+
+    /// Validate that `max_attempts` is inside the documented `1..=10`
+    /// envelope. Used by the `WORKFLOW.md` policy resolver before constructing
+    /// an [`EnginePolicy`]; the JSON-Schema also enforces the bound, so this
+    /// function exists primarily as a defense-in-depth check for callers that
+    /// build policies programmatically.
+    pub fn validate_max_attempts(value: u32) -> Result<u32, EnginePolicyError> {
+        if !(1..=MAX_ATTEMPTS_CEILING).contains(&value) {
+            return Err(EnginePolicyError::InvalidMaxAttempts { value });
+        }
+        Ok(value)
     }
 }
 
@@ -464,6 +522,83 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn validate_max_attempts_rejects_zero_and_above_ceiling() {
+        // Task 3.7: the JSON-Schema bound is 1..=10. The runtime helper must
+        // reject 0 and 11 (or higher) so the policy resolver fails closed if
+        // the schema check is bypassed.
+        assert_eq!(
+            EnginePolicy::validate_max_attempts(0),
+            Err(EnginePolicyError::InvalidMaxAttempts { value: 0 }),
+            "max_attempts = 0 must be rejected (one shot is encoded as 1)",
+        );
+        assert_eq!(
+            EnginePolicy::validate_max_attempts(MAX_ATTEMPTS_CEILING + 1),
+            Err(EnginePolicyError::InvalidMaxAttempts {
+                value: MAX_ATTEMPTS_CEILING + 1,
+            }),
+            "max_attempts = {} must be rejected (above documented ceiling)",
+            MAX_ATTEMPTS_CEILING + 1,
+        );
+    }
+
+    #[test]
+    fn validate_max_attempts_accepts_documented_envelope() {
+        // The lower and upper bounds are both inclusive.
+        assert_eq!(EnginePolicy::validate_max_attempts(1), Ok(1));
+        assert_eq!(
+            EnginePolicy::validate_max_attempts(MAX_ATTEMPTS_CEILING),
+            Ok(MAX_ATTEMPTS_CEILING),
+        );
+        // Default constant is itself inside the envelope.
+        assert_eq!(
+            EnginePolicy::validate_max_attempts(DEFAULT_MAX_ATTEMPTS),
+            Ok(DEFAULT_MAX_ATTEMPTS),
+        );
+    }
+
+    #[test]
+    fn default_engine_policy_carries_documented_max_attempts() {
+        // Sanity: the documented default is `3`, and `Default::default`
+        // must agree.
+        assert_eq!(EnginePolicy::default().max_attempts, DEFAULT_MAX_ATTEMPTS);
+        assert_eq!(EnginePolicy::default().max_attempts, 3);
+        assert_eq!(EnginePolicy::default().backoff_floor, BACKOFF_FLOOR);
+    }
+
+    #[test]
+    fn compute_backoff_honours_per_policy_floor_field() {
+        // Task 3.7: tests must be able to construct a policy with a
+        // sub-second floor so retry-loop integration tests run deterministically
+        // in well under one second. The field overrides the constant on the
+        // per-policy `backoff_floor`, while the absolute `BACKOFF_CEILING`
+        // remains in effect.
+        let p = EnginePolicy {
+            backoff: BackoffPolicy {
+                initial: Duration::from_millis(10),
+                max: Duration::from_secs(60),
+                multiplier: 2.0,
+            },
+            backoff_floor: Duration::from_millis(50),
+            ..EnginePolicy::default()
+        };
+
+        // First failure at the floor — backoff_floor wins because the raw
+        // computed delay (10ms) is below the configured floor (50ms).
+        let delay = p.next_launch_delay(WorkerOutcome::NonCleanExit { code: 1 }, 0);
+        assert_eq!(
+            delay,
+            Duration::from_millis(50),
+            "floor field must override the BACKOFF_FLOOR constant for sub-second test policies",
+        );
+
+        // CleanExit still uses the dedicated 1s continuation delay regardless.
+        assert_eq!(
+            p.next_launch_delay(WorkerOutcome::CleanExit, 0),
+            CLEAN_EXIT_RETRY_DELAY,
+        );
     }
 
     #[test]

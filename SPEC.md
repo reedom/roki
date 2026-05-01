@@ -203,6 +203,7 @@ adapter renders into the agent's prompt at worker launch.
 | `elicitations` | enum (`reject` \| `allow`) | `reject` | no | Default elicitation policy. |
 | `max_turns` | unsigned integer | `20` | no | Per-worker turn budget. |
 | `stall_window_seconds` | unsigned integer | `300` | no | Event-inactivity stall window. |
+| `max_attempts` | unsigned integer | `3` | no | Retry budget for the `Active → Backoff → Active` loop (range `1..=10`; `1` = one shot, no retry). Only `NonCleanExit` consumes the budget; see §9.5. |
 | `backoff.min_seconds` | unsigned integer | `10` | no | Lower bound for non-clean retry backoff (≥ 10). |
 | `backoff.max_seconds` | unsigned integer | `300` | no | Upper bound for non-clean retry backoff (≤ 300). |
 | `extension` | object | `{}` | no | See §3.3. |
@@ -295,7 +296,7 @@ is "yes" are subject to subscriber veto (see §4.3).
 | `Queued` | `TerminalFailure` | engine / tracker (unrouteable) | no |
 | `Active` | `Active` | engine (continuation retry on clean exit) | no |
 | `Active` | `AwaitingReview` | tracker (agent moved issue to review state) | no |
-| `Active` | `Backoff` | engine (non-clean exit or turn-budget exhausted) | no |
+| `Active` | `Backoff` | engine (`NonCleanExit` while retry budget remains; see §9.5) | no |
 | `Active` | `Stalled` | engine (event-inactivity over stall window) | no |
 | `Active` | `TerminalFailure` | engine (retry budget exhausted) or operator | no |
 | `Backoff` | `Active` | engine (backoff window elapsed) | no |
@@ -674,6 +675,19 @@ The engine adapter enforces:
   is always clamped to **`[10s, 300s]`** (`BACKOFF_FLOOR` and
   `BACKOFF_CEILING`) regardless of operator overrides, so a misconfigured
   `WORKFLOW.md` cannot produce a delay outside the documented envelope.
+- **Retry budget (`max_attempts`)**: only `NonCleanExit` outcomes consume
+  the per-`(repo, issue)` retry budget configured by `max_attempts`
+  (default `3`, range `1..=10`). When a `NonCleanExit` occurs and the
+  budget remains, the worker actor drives `Active → Backoff →
+  Active` and re-launches; when the budget is exhausted, it routes
+  `Active → TerminalFailure` and retains the workspace for inspection.
+  `Stalled` and `TurnBudgetExhausted` are agent-authored failures that
+  repeat under the same prompt and budget, so they route directly from
+  `Active → TerminalFailure` without consuming the retry budget. The
+  workspace is retained across the entire Backoff loop — no
+  delete/recreate between attempts. The prelude / `additional_context`
+  is re-emitted unchanged on each launch; failure-history accumulation
+  is a downstream-spec concern.
 
 ### 9.6 Schema-drift tolerance
 

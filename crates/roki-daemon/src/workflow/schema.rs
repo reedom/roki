@@ -42,6 +42,11 @@ pub fn workflow_schema() -> JsonValue {
                 "minimum": 1,
                 "maximum": 3600
             },
+            "max_attempts": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 10
+            },
             "backoff": {
                 "type": "object",
                 "additionalProperties": false,
@@ -143,6 +148,37 @@ mod tests {
             }
         }))
         .expect("opaque extension values must be accepted");
+    }
+
+    #[test]
+    fn max_attempts_accepts_documented_envelope() {
+        // Task 3.7: WORKFLOW.md schema bound is 1..=10 (1 = "one shot, no retry").
+        validate(&json!({ "max_attempts": 1 })).expect("max_attempts = 1 must be accepted");
+        validate(&json!({ "max_attempts": 3 }))
+            .expect("max_attempts = 3 (default) must be accepted");
+        validate(&json!({ "max_attempts": 10 })).expect("max_attempts = 10 must be accepted");
+    }
+
+    #[test]
+    fn max_attempts_rejects_zero_and_above_ceiling() {
+        // 0 means "no attempts at all" — nonsensical; the schema must refuse it.
+        let err =
+            validate(&json!({ "max_attempts": 0 })).expect_err("max_attempts = 0 must be rejected");
+        match err {
+            WorkflowError::SchemaViolation { key_path, .. } => {
+                assert_eq!(key_path, "max_attempts");
+            }
+            other => panic!("expected SchemaViolation, got {other:?}"),
+        }
+
+        let err = validate(&json!({ "max_attempts": 11 }))
+            .expect_err("max_attempts = 11 must be rejected");
+        match err {
+            WorkflowError::SchemaViolation { key_path, .. } => {
+                assert_eq!(key_path, "max_attempts");
+            }
+            other => panic!("expected SchemaViolation, got {other:?}"),
+        }
     }
 
     #[test]

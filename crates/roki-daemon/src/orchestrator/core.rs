@@ -44,7 +44,7 @@
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
-use std::time::SystemTime;
+use std::time::{Duration, SystemTime};
 
 use async_trait::async_trait;
 use thiserror::Error;
@@ -108,6 +108,16 @@ struct ActorRecord {
     /// Sender into the per-actor inbox, used by the orchestrator runtime to
     /// forward tracker events. `None` once the actor has terminated.
     inbox: Option<mpsc::Sender<ActorCommand>>,
+    /// Number of consecutive `NonCleanExit` outcomes recorded for this
+    /// `(repo, issue)` since the actor entered `Active`. Drives the retry
+    /// budget enforced in [`WorkerActor::try_promote_to_active`] (task 3.7,
+    /// SPEC.md §9.5).
+    ///
+    /// The state machine forbids re-entering `Active` after `AwaitingReview`
+    /// (no `AwaitingReview → Queued` arc), so reset is unreachable; the
+    /// counter is monotonic for the actor's lifetime and intentionally has no
+    /// reset path. Documented invariant — do not write dead reset code.
+    consecutive_failures: u32,
 }
 
 /// Commands routed into a per-`(repo, issue)` actor's inbox.
@@ -190,6 +200,14 @@ pub struct Orchestrator {
     /// intervenes. This set is append-only for the daemon's lifetime; restart
     /// recovery (task 3.3) is the operator's intervention surface.
     poisoned: Arc<RwLock<HashSet<(RepoId, IssueId)>>>,
+    /// Per-orchestrator [`EnginePolicy`] used to construct each actor's
+    /// `WorkerContext` and to drive the retry-budget Backoff loop in
+    /// [`WorkerActor::try_promote_to_active`]. Defaults to
+    /// [`EnginePolicy::default`]; tests override via
+    /// [`Orchestrator::with_engine_policy`] to drop the backoff floor into
+    /// the millisecond range so retry traces complete deterministically in
+    /// well under one second (task 3.7).
+    engine_policy: EnginePolicy,
 }
 
 impl Orchestrator {
@@ -214,7 +232,20 @@ impl Orchestrator {
             tracker_inbox,
             state: Arc::new(RwLock::new(HashMap::new())),
             poisoned: Arc::new(RwLock::new(HashSet::new())),
+            engine_policy: EnginePolicy::default(),
         }
+    }
+
+    /// Replace the per-orchestrator [`EnginePolicy`] with `policy`.
+    ///
+    /// The default policy uses [`crate::engine::policy::BACKOFF_FLOOR`] (10s)
+    /// and `max_attempts = 3`. Production callers normally accept the default;
+    /// tests pass a sub-second `backoff_floor` so retry traces complete
+    /// deterministically. Future work may resolve this from `WORKFLOW.md`.
+    #[must_use]
+    pub fn with_engine_policy(mut self, policy: EnginePolicy) -> Self {
+        self.engine_policy = policy;
+        self
     }
 
     /// Construct an orchestrator after running the restart-recovery scan
@@ -360,6 +391,7 @@ impl Orchestrator {
                         last_event_at: None,
                         last_correlation_id: None,
                         inbox: Some(tx.clone()),
+                        consecutive_failures: 0,
                     };
                     guard.insert(key.clone(), record);
                     drop(guard);
@@ -388,6 +420,8 @@ impl Orchestrator {
             event_bus: Arc::clone(&self.event_bus),
             hook_registry: Arc::clone(&self.hook_registry),
             poisoned: Arc::clone(&self.poisoned),
+            engine_policy: self.engine_policy,
+            shutdown: self.shutdown.clone(),
         };
         tokio::spawn(async move { actor.run(rx).await });
     }
@@ -412,6 +446,14 @@ struct WorkerActor {
     /// actor immediately fences off subsequent tracker events for the same
     /// `(repo, issue)`. Requirement 4.5.
     poisoned: Arc<RwLock<HashSet<(RepoId, IssueId)>>>,
+    /// Per-launch policy carried from the orchestrator. Drives the
+    /// retry-budget Backoff loop (`max_attempts`, `backoff_floor`, etc.) and
+    /// is also forwarded into the [`WorkerContext`] passed to each engine
+    /// launch so the supervisor uses the same policy bounds.
+    engine_policy: EnginePolicy,
+    /// Cloned shutdown signal so the actor can abort a Backoff sleep cleanly
+    /// when the orchestrator is asked to wind down (Requirement 1.3).
+    shutdown: ShutdownSignal,
 }
 
 impl WorkerActor {
@@ -478,7 +520,7 @@ impl WorkerActor {
         &self,
         issue: &NormalizedIssue,
         correlation: CorrelationId,
-        _rx: &mut mpsc::Receiver<ActorCommand>,
+        rx: &mut mpsc::Receiver<ActorCommand>,
     ) {
         let current = self.read_current_state();
 
@@ -496,7 +538,7 @@ impl WorkerActor {
                 {
                     return;
                 }
-                self.try_promote_to_active(correlation).await;
+                self.try_promote_to_active(correlation, rx).await;
             }
             (WorkerState::AwaitingReview, TrackerIssueState::Terminal) => {
                 self.try_terminal_success(correlation).await;
@@ -518,9 +560,23 @@ impl WorkerActor {
     }
 
     /// Run the `Queued -> Active` vetoable transition, then on `Allow` create
-    /// the workspace, launch the engine, and wait for the terminal supervised
-    /// event so the actor can promote to `AwaitingReview`.
-    async fn try_promote_to_active(&self, correlation: CorrelationId) {
+    /// the workspace, launch the engine, and drive the retry-budget Backoff
+    /// loop until either (a) the engine reports `CleanExit` (advance to
+    /// `AwaitingReview`), (b) the engine reports `Stalled` or
+    /// `TurnBudgetExhausted` (route directly to `TerminalFailure` — these are
+    /// agent-authored failures that repeat under the same prompt and budget,
+    /// per SPEC.md §9.5), or (c) the configured `max_attempts` retry budget
+    /// is exhausted by repeated `NonCleanExit` outcomes.
+    ///
+    /// Workspace is retained across the Backoff loop — no delete/recreate
+    /// between attempts. The same prelude / `additional_context` is re-emitted
+    /// on each launch (failure-history accumulation is a downstream-spec
+    /// concern, out of scope for the MVP).
+    async fn try_promote_to_active(
+        &self,
+        correlation: CorrelationId,
+        rx: &mut mpsc::Receiver<ActorCommand>,
+    ) {
         let allowed = self
             .commit_transition(
                 WorkerState::Queued,
@@ -562,21 +618,172 @@ impl WorkerActor {
             }
         };
 
-        // Launch the engine. The orchestrator owns the events channel so it
-        // can observe lifecycle events and the terminal Exited event without
-        // letting the per-actor task block on the engine's internal queue.
+        // Drive the retry-budget Backoff loop. The actor enters the loop in
+        // `Active` (committed above) and re-enters `Active` after each
+        // `Backoff -> Active` arc until one of the documented terminal arms
+        // fires. Each iteration logs one `transition` per arc with the
+        // attempt counter and the outcome so observability pipelines can
+        // reconstruct the retry trace.
+        loop {
+            let attempt = self.read_consecutive_failures().saturating_add(1);
+            info!(
+                target: "orchestrator",
+                repo = %self.key.0.as_str(),
+                issue = %self.key.1.as_str(),
+                attempt,
+                max_attempts = self.engine_policy.max_attempts,
+                "launching worker (retry-budget loop)",
+            );
+            let outcome = self.launch_once(correlation, &workspace_dir).await;
+
+            match outcome {
+                Some(WorkerOutcome::CleanExit) => {
+                    // Advance to `AwaitingReview` so the tracker can later
+                    // promote to `TerminalSuccess`. Counter is not reset —
+                    // the state machine forbids re-entering `Active` after
+                    // `AwaitingReview`, so reset is unreachable.
+                    self.commit_transition(
+                        WorkerState::Active,
+                        WorkerState::AwaitingReview,
+                        TransitionTrigger::EngineEvent,
+                        correlation,
+                    )
+                    .await;
+                    return;
+                }
+                Some(WorkerOutcome::NonCleanExit { .. }) => {
+                    let next_failures = self.increment_consecutive_failures();
+                    let max_attempts = self.engine_policy.max_attempts;
+                    if max_attempts <= next_failures {
+                        // Budget exhausted: route Active -> TerminalFailure
+                        // with the documented final-attempt fields.
+                        info!(
+                            target: "orchestrator",
+                            repo = %self.key.0.as_str(),
+                            issue = %self.key.1.as_str(),
+                            final_attempt = next_failures,
+                            max_attempts,
+                            last_outcome_reason = "non_clean_exit",
+                            "retry budget exhausted; escalating to TerminalFailure",
+                        );
+                        self.commit_transition(
+                            WorkerState::Active,
+                            WorkerState::TerminalFailure,
+                            TransitionTrigger::EngineEvent,
+                            correlation,
+                        )
+                        .await;
+                        return;
+                    }
+
+                    // Budget remains: Active -> Backoff, sleep, Backoff -> Active.
+                    let delay = self
+                        .engine_policy
+                        .next_launch_delay(WorkerOutcome::NonCleanExit { code: 0 }, next_failures);
+                    info!(
+                        target: "orchestrator",
+                        repo = %self.key.0.as_str(),
+                        issue = %self.key.1.as_str(),
+                        attempt = next_failures,
+                        delay_ms = delay.as_millis() as u64,
+                        outcome_reason = "non_clean_exit",
+                        "scheduling Backoff window before retry",
+                    );
+                    let advanced = self
+                        .commit_transition(
+                            WorkerState::Active,
+                            WorkerState::Backoff,
+                            TransitionTrigger::EngineEvent,
+                            correlation,
+                        )
+                        .await;
+                    if !advanced {
+                        return;
+                    }
+
+                    // Sleep the Backoff window, but abort cleanly on shutdown
+                    // or on an explicit Shutdown command from the orchestrator
+                    // so the daemon honours its bounded shutdown contract.
+                    if !self.sleep_backoff(delay, rx).await {
+                        return;
+                    }
+
+                    let advanced = self
+                        .commit_transition(
+                            WorkerState::Backoff,
+                            WorkerState::Active,
+                            TransitionTrigger::EngineEvent,
+                            correlation,
+                        )
+                        .await;
+                    if !advanced {
+                        return;
+                    }
+                    // Loop and try the next attempt.
+                }
+                Some(WorkerOutcome::TurnBudgetExhausted) | Some(WorkerOutcome::Stalled { .. }) => {
+                    // Agent-authored failures: re-running with the same
+                    // prompt and budget repeats the same outcome. Route
+                    // directly to TerminalFailure with no Backoff cycle,
+                    // matching SPEC.md §9.5.
+                    let outcome_reason = match outcome {
+                        Some(WorkerOutcome::TurnBudgetExhausted) => "turn_budget_exhausted",
+                        Some(WorkerOutcome::Stalled { .. }) => "stalled",
+                        _ => unreachable!(),
+                    };
+                    info!(
+                        target: "orchestrator",
+                        repo = %self.key.0.as_str(),
+                        issue = %self.key.1.as_str(),
+                        attempt,
+                        last_outcome_reason = outcome_reason,
+                        "agent-authored failure; routing directly to TerminalFailure",
+                    );
+                    self.commit_transition(
+                        WorkerState::Active,
+                        WorkerState::TerminalFailure,
+                        TransitionTrigger::EngineEvent,
+                        correlation,
+                    )
+                    .await;
+                    return;
+                }
+                None => {
+                    warn!(
+                        target: "orchestrator",
+                        repo = %self.key.0.as_str(),
+                        issue = %self.key.1.as_str(),
+                        "engine launch produced no terminal event; staying Active",
+                    );
+                    return;
+                }
+            }
+        }
+    }
+
+    /// Run a single supervised launch cycle and return the terminal outcome.
+    ///
+    /// Owns the events channel so the orchestrator observes lifecycle events
+    /// and the terminal `Exited` event without letting the per-actor task
+    /// block on the engine's internal queue. Returns `None` if the supervised
+    /// channel closed before producing an `Exited` event (treated as a
+    /// programmer error in production paths).
+    async fn launch_once(
+        &self,
+        correlation: CorrelationId,
+        workspace_dir: &std::path::Path,
+    ) -> Option<WorkerOutcome> {
         let (events_tx, mut events_rx) = mpsc::channel::<SupervisedEvent>(64);
         let engine = Arc::clone(&self.engine);
         let ctx = build_worker_context(
             self.key.0.clone(),
             self.key.1.clone(),
             correlation,
-            workspace_dir.clone(),
+            workspace_dir.to_path_buf(),
+            self.engine_policy,
         );
         let launch_handle = tokio::spawn(async move { engine.launch(ctx, events_tx).await });
 
-        // Drive the supervised event loop. Per the engine contract, exactly
-        // one terminal Exited event is emitted per successful launch.
         let mut terminal: Option<WorkerOutcome> = None;
         while let Some(event) = events_rx.recv().await {
             match event {
@@ -591,41 +798,90 @@ impl WorkerActor {
                 }
             }
         }
-        // Ensure the launch task resolves so we don't leak its handle.
         let _ = launch_handle.await;
+        terminal
+    }
 
-        match terminal {
-            Some(WorkerOutcome::CleanExit) => {
-                // Move into AwaitingReview so the tracker can later promote
-                // to TerminalSuccess once the issue is resolved.
-                self.commit_transition(
-                    WorkerState::Active,
-                    WorkerState::AwaitingReview,
-                    TransitionTrigger::EngineEvent,
-                    correlation,
-                )
-                .await;
-            }
-            Some(WorkerOutcome::NonCleanExit { .. })
-            | Some(WorkerOutcome::TurnBudgetExhausted)
-            | Some(WorkerOutcome::Stalled { .. }) => {
-                self.commit_transition(
-                    WorkerState::Active,
-                    WorkerState::TerminalFailure,
-                    TransitionTrigger::EngineEvent,
-                    correlation,
-                )
-                .await;
-            }
-            None => {
-                warn!(
+    /// Sleep the configured Backoff window. Returns `true` if the sleep
+    /// completed normally (so the caller may proceed to relaunch); returns
+    /// `false` if the sleep was preempted by a shutdown signal or by an
+    /// explicit `ActorCommand::Shutdown` arriving on the actor inbox, in
+    /// which case the caller must unwind and let the actor's outer loop
+    /// observe shutdown / terminal-end on the next iteration.
+    async fn sleep_backoff(&self, delay: Duration, rx: &mut mpsc::Receiver<ActorCommand>) -> bool {
+        tokio::select! {
+            biased;
+            () = self.shutdown.wait() => {
+                debug!(
                     target: "orchestrator",
                     repo = %self.key.0.as_str(),
                     issue = %self.key.1.as_str(),
-                    "engine launch produced no terminal event; staying Active",
+                    "Backoff sleep aborted by shutdown signal",
                 );
+                false
             }
+            cmd = rx.recv() => {
+                if matches!(cmd, Some(ActorCommand::Shutdown) | None) {
+                    debug!(
+                        target: "orchestrator",
+                        repo = %self.key.0.as_str(),
+                        issue = %self.key.1.as_str(),
+                        "Backoff sleep aborted by inbox shutdown",
+                    );
+                    false
+                } else {
+                    // Tracker events delivered during a Backoff window are
+                    // intentionally dropped: the actor is committed to the
+                    // current launch attempt and the next tracker event will
+                    // be re-evaluated against the freshly resumed Active
+                    // state once the loop continues. Keep sleeping for the
+                    // remaining window — we approximate this by sleeping the
+                    // full delay; missing a partial window here is acceptable
+                    // because Backoff is a coarse-grained mechanism.
+                    debug!(
+                        target: "orchestrator",
+                        repo = %self.key.0.as_str(),
+                        issue = %self.key.1.as_str(),
+                        "tracker event during Backoff window; sleeping out the remainder",
+                    );
+                    tokio::select! {
+                        biased;
+                        () = self.shutdown.wait() => false,
+                        () = tokio::time::sleep(delay) => true,
+                    }
+                }
+            }
+            () = tokio::time::sleep(delay) => true,
         }
+    }
+
+    /// Read the actor's `consecutive_failures` counter from the state map.
+    fn read_consecutive_failures(&self) -> u32 {
+        let guard = self
+            .state
+            .read()
+            .expect("orchestrator state RwLock poisoned; this is unrecoverable");
+        guard
+            .get(&self.key)
+            .map(|record| record.consecutive_failures)
+            .unwrap_or(0)
+    }
+
+    /// Increment `consecutive_failures` by one and return the new value.
+    fn increment_consecutive_failures(&self) -> u32 {
+        let mut guard = self
+            .state
+            .write()
+            .expect("orchestrator state RwLock poisoned; this is unrecoverable");
+        let entry = guard.entry(self.key.clone()).or_insert(ActorRecord {
+            state: WorkerState::Active,
+            last_event_at: None,
+            last_correlation_id: None,
+            inbox: None,
+            consecutive_failures: 0,
+        });
+        entry.consecutive_failures = entry.consecutive_failures.saturating_add(1);
+        entry.consecutive_failures
     }
 
     /// Run the vetoable `AwaitingReview -> TerminalSuccess` transition. On
@@ -785,6 +1041,7 @@ impl WorkerActor {
             last_event_at: None,
             last_correlation_id: None,
             inbox: None,
+            consecutive_failures: 0,
         });
         entry.state = next;
         entry.last_event_at = Some(SystemTime::now());
@@ -831,6 +1088,7 @@ fn build_worker_context(
     issue: IssueId,
     correlation: CorrelationId,
     workspace_dir: PathBuf,
+    policy: EnginePolicy,
 ) -> WorkerContext {
     WorkerContext {
         repo,
@@ -847,7 +1105,7 @@ fn build_worker_context(
             elicitations: ElicitationsMode::Reject,
             mode_source: PermissionSource::Operator,
         },
-        policy: EnginePolicy::default(),
+        policy,
         additional_context: None,
     }
 }

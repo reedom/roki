@@ -758,7 +758,7 @@ Subscriber errors are isolated: per-subscriber error counters in tracing, never 
 - **Configuration errors** (startup): refuse to start, exit non-zero, log offending field.
 - **Linear errors** (runtime): transient (429, network) → exponential backoff with logging; persistent → leave issue queued, surface via logs.
 - **Workspace errors**: fail the affected `(repo, issue)`, mark `TerminalFailure`, retain workspace for inspection if creation succeeded but a later step failed.
-- **Engine errors**: classify by `WorkerOutcome`; `NonCleanExit` and `Stalled` route to `Backoff`; `TurnBudgetExhausted` triggers backoff but counts toward retry budget; consecutive failures past the configured retry budget escalate to `TerminalFailure`.
+- **Engine errors**: classify by `WorkerOutcome`. Only `NonCleanExit` consumes the configured `max_attempts` retry budget (default `3`); on each `NonCleanExit` the worker actor drives `Active → Backoff → Active` until the budget is exhausted, at which point the actor routes `Active → TerminalFailure` and retains the workspace. `Stalled` and `TurnBudgetExhausted` are agent-authored failures that repeat under the same prompt and budget, so they route directly to `TerminalFailure` without consuming the retry budget. The workspace is retained across the entire Backoff loop (no delete/recreate between attempts); the prelude / `additional_context` is re-emitted unchanged on each launch.
 - **WORKFLOW.md errors**: at startup, refuse for that repo; at hot reload, retain last-known-good and log.
 - **Tool errors**: structured tool errors are returned to the agent unchanged after redaction; never elevated to daemon errors.
 

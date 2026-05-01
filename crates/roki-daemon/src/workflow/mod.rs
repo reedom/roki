@@ -105,6 +105,10 @@ pub struct WorkflowPolicy {
     pub max_turns: u32,
     pub stall_window: Duration,
     pub backoff: BackoffPolicy,
+    /// Retry budget for the orchestrator's `Active → Backoff → Active` loop
+    /// (task 3.7 / SPEC.md §9.5). `1` means "one shot, no retry"; the
+    /// documented default is `3`. The JSON-Schema bound is `1..=10`.
+    pub max_attempts: u32,
     pub extension: JsonValue,
     /// The Liquid + Markdown body of the file, captured verbatim. Rendering
     /// is performed by the engine adapter at worker launch.
@@ -339,6 +343,16 @@ fn build_policy(value: JsonValue, body: &str) -> Result<WorkflowPolicy, Workflow
         .unwrap_or(180);
     let stall_window = Duration::from_secs(stall_window_seconds);
 
+    // Task 3.7: optional `max_attempts` retry budget. Default is 3 (the
+    // documented default per SPEC.md §3.2). The JSON-Schema bound (1..=10)
+    // has already been enforced by `schema::validate` above; we only need to
+    // surface the value here.
+    let max_attempts = object
+        .get("max_attempts")
+        .and_then(JsonValue::as_u64)
+        .map(|n| n as u32)
+        .unwrap_or(crate::engine::policy::DEFAULT_MAX_ATTEMPTS);
+
     let backoff = match object.get("backoff") {
         Some(v) => serde_json::from_value::<BackoffPolicy>(v.clone()).map_err(|err| {
             WorkflowError::SchemaViolation {
@@ -369,6 +383,7 @@ fn build_policy(value: JsonValue, body: &str) -> Result<WorkflowPolicy, Workflow
         max_turns,
         stall_window,
         backoff,
+        max_attempts,
         extension,
         prompt_template: body.to_string(),
     })
@@ -474,6 +489,46 @@ Render with {{ issue.id }} and {{ repo.id }}.
             }
         );
         assert!(policy.prompt_template.contains("Render with"));
+    }
+
+    #[test]
+    fn max_attempts_defaults_to_three_when_absent() {
+        let policy = WorkflowLoader::load_from_str(valid_workflow(), &fixture_path())
+            .expect("valid workflow must load");
+        assert_eq!(
+            policy.max_attempts,
+            crate::engine::policy::DEFAULT_MAX_ATTEMPTS,
+        );
+        assert_eq!(policy.max_attempts, 3);
+    }
+
+    #[test]
+    fn max_attempts_round_trips_when_present() {
+        let workflow = r#"---
+sandbox: workspace-write
+elicitations: reject
+max_attempts: 5
+---
+body
+"#;
+        let policy = WorkflowLoader::load_from_str(workflow, &fixture_path())
+            .expect("valid workflow must load");
+        assert_eq!(policy.max_attempts, 5);
+    }
+
+    #[test]
+    fn max_attempts_rejected_when_outside_envelope() {
+        let workflow = r#"---
+sandbox: workspace-write
+elicitations: reject
+max_attempts: 11
+---
+body
+"#;
+        let err = WorkflowLoader::load_from_str(workflow, &fixture_path())
+            .expect_err("max_attempts above ceiling must be rejected");
+        assert!(matches!(err, WorkflowError::SchemaViolation { .. }));
+        assert_eq!(err.key_path(), Some("max_attempts"));
     }
 
     #[test]

@@ -194,6 +194,7 @@ async fn engine_stall() {
         turn_budget: 20,
         stall_window: Duration::from_millis(300),
         backoff: BackoffPolicy::default(),
+        ..EnginePolicy::default()
     };
 
     let (tx, mut rx) = mpsc::channel(64);
