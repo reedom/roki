@@ -182,7 +182,7 @@
 
 - [ ] 4. Validation: end-to-end paths, language-agnostic SPEC.md
 
-- [ ] 4.1 Author the language-agnostic `SPEC.md` at the repo root
+- [x] 4.1 Author the language-agnostic `SPEC.md` at the repo root
   - Document the daemon contract, the `WORKFLOW.md` schema with all four reserved extension namespaces (`extension.gates.spec.*`, `extension.gates.review.*`, `extension.server.*`, `extension.distill.*`), the per-issue state machine and full vetoable-transition list (including `TerminalSuccess -> Cleaning` as the pre-cleanup hook), the agent tool registry contract and `linear_graphql` semantics, the workspace path layout and sanitization rules, and the lifecycle event taxonomy.
   - Document the published cross-spec extension surface: `OrchestratorRead`, `TrackerRefresh`, the pre-cleanup hook, `WorkerContext.additional_context` and the prelude-forwarding contract, and the reserved `WorkflowPolicy.extension` sub-namespaces.
   - Disambiguate the two `required_status` fields used by gate extensions: `extension.gates.spec.required_status` is a Linear issue state name to gate against (consumed by roki-spec-gate); `extension.gates.review.required_status` is a `review.md` frontmatter status value to gate against (consumed by roki-review-gate). These share a name but are different semantic fields and SPEC.md must call out the distinction.
