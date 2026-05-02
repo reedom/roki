@@ -27,7 +27,7 @@ This MVP is symphony-aligned: in-memory orchestrator with no persistent database
 3. If the `wt` external CLI, the `ghq` external CLI, or the configured `claude` binary is not present at startup, the roki daemon shall refuse to start and shall log an actionable remediation message that names the missing executable.
 4. When the operator sends SIGINT or SIGTERM to a running daemon, the roki daemon shall stop accepting new work, signal each active worker subprocess to terminate, await a bounded shutdown window per worker, and exit cleanly.
 5. The roki daemon shall emit structured logs through a tracing pipeline that records per-issue and per-worker context fields for every event it produces, plus a per-repo field for events scoped to a specific repo (for example `roki_open_worktree` outcomes and worktree cleanup).
-6. The roki daemon shall accept the CLI flags `--config <path>`, `--bind <addr>`, `--port <num>`, and `--dangerously-skip-permissions`, where flags override configuration values; the daemon shall document each flag in `--help` output for `roki run` and any subcommand.
+6. The roki daemon shall accept the CLI flags `--config <path>`, `--bind <addr>`, `--port <num>`, `--dangerously-skip-permissions`, and `--debug`, where flags override configuration values; the daemon shall document each flag in `--help` output for `roki run` and any subcommand.
 7. When the operator invokes `roki --help` or any subcommand with `--help`, the roki daemon shall print usage information that documents all configuration knobs surfaced through the CLI.
 
 ### Requirement 2: Configuration and Multi-Repo Allowlist
@@ -91,6 +91,8 @@ This MVP is symphony-aligned: in-memory orchestrator with no persistent database
 3. While the daemon is running, the WORKFLOW.md loader shall watch the workspace-level `WORKFLOW.md` for filesystem changes and shall re-validate the file before applying any changes.
 4. If a hot-reload attempt produces a `WORKFLOW.md` that fails validation, the roki daemon shall keep the previously valid policy in effect and log the validation failure.
 5. The WORKFLOW.md loader shall expose its parsed policy to the orchestrator through a stable schema shape that downstream specs can extend with additional keys without breaking existing consumers, and the loader shall round-trip unknown keys under the reserved extension namespaces without interpreting them.
+6. When the roki daemon launches a worker subprocess, the WORKFLOW.md loader shall render the workspace-level prompt template against the active Linear issue with the issue's identifier, title, description, label list, and bucketed lifecycle state available as named variables, and the roki daemon shall provide the rendered output as the worker subprocess's prompt input.
+7. If the workspace-level prompt template fails to render at worker launch, the roki daemon shall log the render failure and shall provide a deterministic fallback prompt that includes the Linear issue identifier, title, and description so that the worker subprocess always receives non-empty issue context.
 
 ### Requirement 7: Agent Tool Registry, `linear_graphql` Proxy, and `roki_open_worktree`
 
@@ -159,6 +161,9 @@ This MVP is symphony-aligned: in-memory orchestrator with no persistent database
 2. Every structured log event shall include the Linear issue identifier when one applies, the repository identifier when one applies (for example for worktree-scoped events), and a correlation identifier for the originating worker invocation.
 3. The roki daemon shall support a configurable log level and a configurable log destination so that the operator can route logs to stdout, a file, or both.
 4. The roki daemon shall redact the Linear API token, the Linear webhook secret, and any other operator-declared secrets from every structured log event before emission.
+5. While a worker subprocess is running, the roki daemon shall capture every line emitted on the subprocess's standard error stream and shall surface each non-empty line as a structured log event at warn severity tagged with the issue identifier and the worker's correlation identifier.
+6. Where the operator opts into per-issue debug capture through the documented CLI flag or configuration block, the roki daemon shall append every line emitted on each worker subprocess's standard output and standard error streams to a per-issue file under the configured debug-log directory, and each appended line shall carry an RFC 3339 timestamp with nanosecond resolution and a stream tag identifying standard output or standard error.
+7. If the per-issue debug log file cannot be opened or appended to, the roki daemon shall log the failure with the offending file path and shall continue running the worker without aborting the launch.
 
 ### Requirement 13: Cross-Spec Extension Surface
 
