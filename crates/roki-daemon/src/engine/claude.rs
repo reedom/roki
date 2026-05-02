@@ -36,12 +36,15 @@
 //! can locate the envelope deterministically without depending on a JSON
 //! parser at the agent end.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use serde::Serialize;
+use ::time::OffsetDateTime;
+use ::time::format_description::well_known::Rfc3339;
+use tokio::fs::{File, OpenOptions};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::Command;
 use tokio::sync::{Mutex, mpsc};
@@ -241,6 +244,11 @@ pub enum LaunchError {
 pub struct ClaudeEngineAdapter {
     binary: PathBuf,
     registry: Option<Arc<dyn Registry>>,
+    /// Optional root directory for per-issue debug logs. When `Some`, the
+    /// supervisor opens `<root>/<team>/<issue>.log` for each launch and
+    /// tees stdout + stderr lines into it with RFC3339-nanos timestamps.
+    /// Wired from the `--debug` CLI flag + `[debug].dir` config key.
+    debug_dir: Option<PathBuf>,
 }
 
 impl std::fmt::Debug for ClaudeEngineAdapter {
@@ -248,6 +256,7 @@ impl std::fmt::Debug for ClaudeEngineAdapter {
         f.debug_struct("ClaudeEngineAdapter")
             .field("binary", &self.binary)
             .field("registry", &self.registry.as_ref().map(|_| "<registry>"))
+            .field("debug_dir", &self.debug_dir)
             .finish()
     }
 }
@@ -257,6 +266,7 @@ impl Default for ClaudeEngineAdapter {
         Self {
             binary: PathBuf::from("claude"),
             registry: None,
+            debug_dir: None,
         }
     }
 }
@@ -273,7 +283,18 @@ impl ClaudeEngineAdapter {
         Self {
             binary,
             registry: None,
+            debug_dir: None,
         }
+    }
+
+    /// Enable per-issue debug-log capture at `dir`. The supervisor will
+    /// create `<dir>/<team>/<issue>.log` on the first launched-line of
+    /// each session and append timestamped stdout/stderr lines to it.
+    /// Failure to create the file is logged at WARN and does not fail
+    /// the launch — debug capture is best-effort observability.
+    pub fn with_debug_dir(mut self, dir: PathBuf) -> Self {
+        self.debug_dir = Some(dir);
+        self
     }
 
     /// Attach a tool [`Registry`] used to compose the worker's tool catalog
@@ -361,6 +382,10 @@ impl ClaudeEngineAdapter {
         command.arg("--print");
         command.arg("--output-format");
         command.arg("stream-json");
+        // `claude` rejects `--output-format=stream-json` under `--print`
+        // unless `--verbose` is also set; the supervisor relies on
+        // stream-json for every lifecycle event it parses.
+        command.arg("--verbose");
 
         match &ctx.permission.mode {
             // Req 9.3: forward the operator-resolved allowlist to the worker.
@@ -397,6 +422,10 @@ impl ClaudeEngineAdapter {
             .stdout
             .take()
             .ok_or(LaunchError::MissingPipe { which: "stdout" })?;
+        let stderr = child
+            .stderr
+            .take()
+            .ok_or(LaunchError::MissingPipe { which: "stderr" })?;
 
         // Hand the prelude envelope + prompt to the agent. The supervisor
         // closes stdin afterwards so the agent observes EOF on its prompt
@@ -411,6 +440,34 @@ impl ClaudeEngineAdapter {
         let policy = ctx.policy;
         let last_event_at = Arc::new(Mutex::new(Instant::now()));
         let stall_flag = Arc::new(Mutex::new(false));
+
+        // Optional debug-log handle: best-effort. Failure to open the file
+        // is logged at WARN and the launch proceeds without capture so the
+        // observability path never breaks the orchestrator's hot path.
+        let debug_log = match self.debug_dir.as_deref() {
+            Some(root) => match open_debug_log(root, ctx.issue.as_str()).await {
+                Ok((path, file)) => {
+                    tracing::info!(
+                        target: "engine.claude.debug",
+                        issue = %ctx.issue.as_str(),
+                        path = %path.display(),
+                        "debug log opened",
+                    );
+                    Some(Arc::new(Mutex::new(file)))
+                }
+                Err(err) => {
+                    tracing::warn!(
+                        target: "engine.claude.debug",
+                        issue = %ctx.issue.as_str(),
+                        root = %root.display(),
+                        error = %err,
+                        "failed to open per-issue debug log; launch will proceed without capture",
+                    );
+                    None
+                }
+            },
+            None => None,
+        };
 
         // ---- Stall watchdog ------------------------------------------------
         // Polls `last_event_at` against the configured stall window
@@ -453,8 +510,12 @@ impl ClaudeEngineAdapter {
         let mut reader = BufReader::new(stdout).lines();
         let stdout_last = Arc::clone(&last_event_at);
         let events_for_stream = events.clone();
+        let stdout_debug = debug_log.clone();
         let stream_task = tokio::spawn(async move {
             while let Ok(Some(line)) = reader.next_line().await {
+                if let Some(file) = stdout_debug.as_ref() {
+                    write_debug_line(file, "STDOUT", &line).await;
+                }
                 if let Some(event) = parse_line(&line) {
                     *stdout_last.lock().await = Instant::now();
                     // Task 3.4 / req 7.4: when the agent invokes a tool we
@@ -481,6 +542,21 @@ impl ClaudeEngineAdapter {
                 }
             }
         });
+
+        // ---- stderr reader -------------------------------------------------
+        // Drains the child's stderr line-by-line. Without this, a `claude`
+        // binary that exits non-cleanly (auth failure, missing flag, network
+        // error) is invisible: the supervisor only sees the exit code. The
+        // pipe is also `Stdio::piped()` so an undrained buffer would
+        // eventually block the child once the OS pipe filled.
+        //
+        // Lines are emitted under a stable target so operators can grep them;
+        // upstream `claude` may include argv/flag echoes here, so treat the
+        // log target as containing operator-tier debug output and route it
+        // accordingly in any redaction layer downstream specs add.
+        let stderr_reader = BufReader::new(stderr).lines();
+        let stderr_debug = debug_log.clone();
+        let stderr_task = tokio::spawn(drain_stderr(stderr_reader, stderr_debug));
 
         // ---- Main supervisor loop ----------------------------------------
         // Wait for either the child to exit or the stall watchdog to fire.
@@ -533,6 +609,7 @@ impl ClaudeEngineAdapter {
         // Drain any final stream events so the orchestrator sees every line
         // the child managed to emit before the watchdog killed it.
         let _ = stream_task.await;
+        let _ = stderr_task.await;
 
         // Re-check the stall flag in case the child happened to exit at the
         // same instant the watchdog fired; the stall outcome wins because
@@ -550,6 +627,92 @@ impl ClaudeEngineAdapter {
         let _ = events.send(SupervisedEvent::Exited(final_outcome)).await;
 
         Ok(final_outcome)
+    }
+}
+
+async fn drain_stderr<R>(
+    mut reader: tokio::io::Lines<BufReader<R>>,
+    debug: Option<Arc<Mutex<File>>>,
+) where
+    R: tokio::io::AsyncRead + Unpin,
+{
+    while let Ok(Some(line)) = reader.next_line().await {
+        if let Some(file) = debug.as_ref() {
+            write_debug_line(file, "STDERR", &line).await;
+        }
+        if line.is_empty() {
+            continue;
+        }
+        tracing::warn!(target: "engine.claude.stderr", line = %line, "claude stderr");
+    }
+}
+
+/// Resolve `<root>/<team>/<issue>.log`, create parent dirs, and open in
+/// append mode. The team segment is the prefix of the issue identifier
+/// before the first `-` (e.g. `RDM-7` → `RDM`); identifiers without a
+/// dash are bucketed under `unscoped`. Both segments are sanitised to
+/// `[A-Za-z0-9_.-]` to keep the path inside the configured root.
+async fn open_debug_log(root: &Path, issue: &str) -> std::io::Result<(PathBuf, File)> {
+    let (team_raw, _) = issue.split_once('-').unwrap_or(("unscoped", ""));
+    let team = sanitize_path_segment(team_raw);
+    let issue_seg = sanitize_path_segment(issue);
+    let dir = root.join(&team);
+    tokio::fs::create_dir_all(&dir).await?;
+    let path = dir.join(format!("{issue_seg}.log"));
+    let file = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+        .await?;
+    Ok((path, file))
+}
+
+/// Append `<RFC3339-nanos> [<stream>] <line>\n` to the debug log. Errors
+/// are logged once at WARN per launch via tracing; the supervisor never
+/// fails a launch over a debug write.
+async fn write_debug_line(file: &Mutex<File>, stream: &str, line: &str) {
+    let ts = OffsetDateTime::now_utc()
+        .format(&Rfc3339)
+        .unwrap_or_else(|_| String::from("0000-00-00T00:00:00Z"));
+    let mut buf = String::with_capacity(ts.len() + stream.len() + line.len() + 8);
+    buf.push_str(&ts);
+    buf.push_str(" [");
+    buf.push_str(stream);
+    buf.push_str("] ");
+    buf.push_str(line);
+    buf.push('\n');
+    let mut guard = file.lock().await;
+    if let Err(err) = guard.write_all(buf.as_bytes()).await {
+        tracing::warn!(
+            target: "engine.claude.debug",
+            error = %err,
+            stream = stream,
+            "failed to write to per-issue debug log",
+        );
+    }
+}
+
+/// Replace any character outside `[A-Za-z0-9_-]` with `_` so a malformed
+/// issue identifier cannot escape the configured debug root via `..` or
+/// path separators. Dots are dropped entirely — Linear identifiers shaped
+/// `[A-Z]+-\d+` never contain them, and dropping `.` rules out `..` /
+/// hidden-file / path-traversal segments without a separate guard. Empty
+/// input collapses to `unscoped`.
+fn sanitize_path_segment(input: &str) -> String {
+    let cleaned: String = input
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '_' || c == '-' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    if cleaned.is_empty() {
+        String::from("unscoped")
+    } else {
+        cleaned
     }
 }
 

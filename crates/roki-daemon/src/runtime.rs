@@ -197,6 +197,9 @@ pub async fn run_with_shutdown(
         }
         config.permission_strategy = PermissionStrategy::DangerouslySkipPermissions;
     }
+    if args.debug {
+        config.debug.enabled = true;
+    }
 
     // ---- 2. resolve secrets, then reinitialise logging with redaction ---
     // Post-7.1f: one workspace-level webhook HMAC secret. Resolved from
@@ -267,9 +270,19 @@ pub async fn run_with_shutdown(
         "failed to resolve platform cache dir for session tempdirs (set $HOME or supply an explicit override)".to_string()
     })?);
     let worktree_registry = WorktreeRegistry::new();
-    let engine = Arc::new(ClaudeEngineLauncher::new(ClaudeEngineAdapter::with_binary(
-        claude_binary.clone(),
-    )));
+    let engine_adapter = {
+        let mut adapter = ClaudeEngineAdapter::with_binary(claude_binary.clone());
+        if config.debug.enabled {
+            info!(
+                target: "engine.claude.debug",
+                dir = %config.debug.dir.display(),
+                "per-issue debug log capture enabled",
+            );
+            adapter = adapter.with_debug_dir(config.debug.dir.clone());
+        }
+        adapter
+    };
+    let engine = Arc::new(ClaudeEngineLauncher::new(engine_adapter));
     let event_bus = Arc::new(EventBus::with_default_capacity());
     let hook_registry = Arc::new(HookRegistry::new());
 

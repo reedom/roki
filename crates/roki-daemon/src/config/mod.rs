@@ -111,6 +111,11 @@ pub struct Config {
     /// filter `git worktree list --porcelain` entries during the
     /// startup recovery scan.
     pub recovery: RecoveryConfig,
+
+    /// Per-issue debug log configuration. Disabled by default; the
+    /// `--debug` CLI flag (or a future config-only switch) flips
+    /// `enabled` and the bootstrap forwards `dir` to the engine adapter.
+    pub debug: DebugConfig,
 }
 
 /// Resolved workspace-level Linear configuration (post-7.1a).
@@ -156,6 +161,28 @@ pub struct LinearConfig {
 pub struct WorkflowConfig {
     /// Filesystem path to the workspace-level `WORKFLOW.md`. Required.
     pub path: PathBuf,
+}
+
+/// Resolved per-issue debug log configuration.
+///
+/// `enabled` is flipped on by the `--debug` CLI flag. `dir` is the root
+/// directory where per-issue log files are written; the engine adapter
+/// creates `<dir>/<team>/<issue>.log` on the first stdout/stderr line of
+/// each launch. Default `dir` is `./roki-debug/` (resolved relative to the
+/// daemon's CWD at startup).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DebugConfig {
+    pub enabled: bool,
+    pub dir: PathBuf,
+}
+
+impl Default for DebugConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            dir: PathBuf::from("./roki-debug"),
+        }
+    }
 }
 
 /// Resolved restart-recovery configuration (post-7.1e).
@@ -208,6 +235,18 @@ struct ConfigFile {
 
     #[serde(default)]
     recovery: Option<RecoveryFile>,
+
+    #[serde(default)]
+    debug: Option<DebugFile>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DebugFile {
+    /// Root directory for per-issue debug logs. Absent → default
+    /// `./roki-debug` (relative to CWD at startup).
+    #[serde(default)]
+    dir: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -531,6 +570,7 @@ impl Config {
         let linear = resolve_linear_block(file.linear.as_ref())?;
         let workflow = resolve_workflow_block(file.workflow.as_ref())?;
         let recovery = resolve_recovery_block(file.recovery.as_ref())?;
+        let debug = resolve_debug_block(file.debug.as_ref())?;
 
         Ok(Self {
             linear_token,
@@ -545,8 +585,29 @@ impl Config {
             linear,
             workflow,
             recovery,
+            debug,
         })
     }
+}
+
+/// Resolve the optional `[debug]` block. The block is purely additive:
+/// when omitted, the resolver returns `DebugConfig::default()` which
+/// leaves `enabled` off and points `dir` at `./roki-debug`. The CLI
+/// `--debug` flag is the only thing that sets `enabled`.
+fn resolve_debug_block(debug: Option<&DebugFile>) -> Result<DebugConfig, ConfigError> {
+    let mut resolved = DebugConfig::default();
+    if let Some(block) = debug
+        && let Some(dir) = block.dir.as_ref()
+    {
+        if dir.as_os_str().is_empty() {
+            return Err(ConfigError::InvalidField {
+                field: "debug.dir".to_string(),
+                reason: "must not be empty".to_string(),
+            });
+        }
+        resolved.dir = dir.clone();
+    }
+    Ok(resolved)
 }
 
 /// Resolve the optional `[recovery]` block. Absent keys fall back to

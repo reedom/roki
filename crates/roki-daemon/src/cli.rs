@@ -71,6 +71,13 @@ pub struct RunArgs {
     /// config-file permission strategy. Every worker launch emits a WARN log.
     #[arg(long)]
     pub dangerously_skip_permissions: bool,
+
+    /// Capture each worker's claude stdout/stderr into a per-issue debug log.
+    /// Output directory is `[debug].dir` from the config file (default
+    /// `./roki-debug/`). Layout is `<dir>/<team>/<issue>.log`; each line is
+    /// prefixed `<RFC3339-nanos> [STDOUT|STDERR] `.
+    #[arg(long)]
+    pub debug: bool,
 }
 
 impl Cli {

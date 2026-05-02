@@ -388,6 +388,7 @@ async fn bootstrap_drives_issue_through_documented_happy_path() {
         bind: None,
         port: None,
         dangerously_skip_permissions: false,
+        debug: false,
     };
     let (handles_tx, handles_rx) = oneshot::channel::<BootstrapHandles>();
     let run_shutdown = shutdown.clone();
