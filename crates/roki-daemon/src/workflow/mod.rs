@@ -33,7 +33,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
 
 pub use schema::workflow_schema;
-pub use watcher::{WatchError, WorkflowHandle};
+pub use watcher::{WatchError, WorkflowHandle, WorkflowSnapshotter};
 
 /// Sandbox mode applied to each agent worker subprocess (Requirement 9.1, 9.2).
 ///

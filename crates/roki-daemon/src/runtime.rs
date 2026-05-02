@@ -255,6 +255,7 @@ pub async fn run_with_shutdown(
                 )
             })?;
     let workflow_policy = workflow_handle.current();
+    let workflow_snapshotter = workflow_handle.snapshotter();
     let workflow_handles: Vec<WorkflowHandle> = vec![workflow_handle];
     let workflow_policies: Vec<Arc<WorkflowPolicy>> = vec![Arc::clone(&workflow_policy)];
 
@@ -375,7 +376,9 @@ pub async fn run_with_shutdown(
 
     let orchestrator = orchestrator
         .with_engine_policy(engine_policy)
-        .with_tool_factory(tool_factory);
+        .with_tool_factory(tool_factory)
+        .with_workflow(workflow_snapshotter)
+        .with_permission_strategy(config.permission_strategy.clone());
     let orchestrator_read = orchestrator.read_handle();
     info!(
         decisions = recovery_decisions.len(),

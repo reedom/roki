@@ -37,6 +37,22 @@ pub enum WatchError {
 /// underlying [`watch::Receiver`] can be exposed in future tasks if a
 /// subscribe-style API is required by the orchestrator; for task 2.3 the
 /// snapshot accessor is enough.
+/// Cloneable snapshot accessor handed out by [`WorkflowHandle::snapshotter`].
+///
+/// Holds only a [`watch::Receiver`]; cloning is cheap and the underlying
+/// channel always exposes the most recently published policy.
+#[derive(Clone)]
+pub struct WorkflowSnapshotter {
+    rx: watch::Receiver<Arc<WorkflowPolicy>>,
+}
+
+impl WorkflowSnapshotter {
+    /// Snapshot of the most recently validated policy.
+    pub fn current(&self) -> Arc<WorkflowPolicy> {
+        self.rx.borrow().clone()
+    }
+}
+
 pub struct WorkflowHandle {
     rx: watch::Receiver<Arc<WorkflowPolicy>>,
     /// Owns the debouncer + bridge task; dropping stops both. The fields are
@@ -162,6 +178,20 @@ impl WorkflowHandle {
     /// every successful reload.
     pub fn current(&self) -> Arc<WorkflowPolicy> {
         self.rx.borrow().clone()
+    }
+
+    /// Cloneable snapshot accessor.
+    ///
+    /// The handle itself owns the debouncer + bridge task and is therefore
+    /// not `Clone`. Long-lived consumers (notably the orchestrator's
+    /// per-issue actors) need a clone-friendly view: this method returns
+    /// one that always reflects the latest hot-reloaded policy without
+    /// keeping the watcher alive — dropping the handle still tears the
+    /// debouncer down.
+    pub fn snapshotter(&self) -> WorkflowSnapshotter {
+        WorkflowSnapshotter {
+            rx: self.rx.clone(),
+        }
     }
 
     /// Wait for the next successful reload (used by tests + future

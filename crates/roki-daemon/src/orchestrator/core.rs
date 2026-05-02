@@ -53,12 +53,13 @@ use crate::orchestrator::recovery::{
 use crate::orchestrator::state::{
     CorrelationId, IssueId, TransitionEvent, TransitionTrigger, VetoDecision, WorkerState,
 };
+use crate::config::PermissionStrategy;
 use crate::permissions::{PermissionMode, PermissionSource, ResolvedPermission};
 use crate::session::SessionManager;
 use crate::shutdown::ShutdownSignal;
 use crate::tools::{WorkerToolFactory, WtTool};
 use crate::tracker::model::{IssueState as TrackerIssueState, NormalizedIssue};
-use crate::workflow::{ElicitationsMode, SandboxMode};
+use crate::workflow::{ElicitationsMode, SandboxMode, WorkflowSnapshotter};
 use crate::worktrees::WorktreeRegistry;
 
 /// Error type re-exported for the engine launcher trait so downstream test
@@ -220,6 +221,20 @@ pub struct Orchestrator {
     /// supply a [`crate::tools::DefaultWorkerToolFactory`] so each worker
     /// sees `linear_graphql` and a per-issue `roki_open_worktree`.
     tool_factory: Option<Arc<dyn WorkerToolFactory>>,
+    /// Cloneable snapshot accessor for the workspace-level WORKFLOW.md
+    /// policy. When present, every launch renders `prompt_template`
+    /// against the live `NormalizedIssue` to build the agent prompt and
+    /// sources `sandbox` / `elicitations` for the resolved permission.
+    /// `None` keeps the legacy stub behaviour (empty prompt, hardcoded
+    /// permission) used by lower-level orchestrator tests; production
+    /// always sets this via `Orchestrator::with_workflow`.
+    workflow: Option<WorkflowSnapshotter>,
+    /// Operator-level permission strategy from `Config::permission_strategy`.
+    /// When present, every launch resolves into a [`ResolvedPermission`]
+    /// whose mode reflects the operator's choice and whose sandbox /
+    /// elicitations come from the workflow snapshot. `None` falls back to
+    /// the legacy stub permission (used by orchestrator-only tests).
+    permission_strategy: Option<PermissionStrategy>,
 }
 
 impl Orchestrator {
@@ -260,7 +275,33 @@ impl Orchestrator {
             poisoned: Arc::new(RwLock::new(HashSet::new())),
             engine_policy: EnginePolicy::default(),
             tool_factory: None,
+            workflow: None,
+            permission_strategy: None,
         }
+    }
+
+    /// Attach the workspace-level [`WorkflowSnapshotter`]. The orchestrator
+    /// reads `current()` on every launch to render `prompt_template`
+    /// against the active issue and to source `sandbox` / `elicitations`
+    /// for the resolved permission. Production wiring lives in
+    /// [`crate::runtime::run_with_shutdown`].
+    #[must_use]
+    pub fn with_workflow(mut self, workflow: WorkflowSnapshotter) -> Self {
+        self.workflow = Some(workflow);
+        self
+    }
+
+    /// Attach the operator-level permission strategy
+    /// (`Config::permission_strategy`). When set, the orchestrator builds
+    /// the [`ResolvedPermission`] for every launch from this mode + the
+    /// active workflow's `sandbox` / `elicitations`. Without it, the
+    /// adapter sees the legacy hardcoded stub permission — kept for
+    /// lower-level orchestrator tests that do not exercise the engine
+    /// adapter's permission flag.
+    #[must_use]
+    pub fn with_permission_strategy(mut self, strategy: PermissionStrategy) -> Self {
+        self.permission_strategy = Some(strategy);
+        self
     }
 
     /// Attach a [`WorkerToolFactory`] (task 7.1f). The orchestrator
@@ -479,6 +520,8 @@ impl Orchestrator {
             engine_policy: self.engine_policy,
             shutdown: self.shutdown.clone(),
             tool_factory: self.tool_factory.clone(),
+            workflow: self.workflow.clone(),
+            permission_strategy: self.permission_strategy.clone(),
         };
         tokio::spawn(async move { actor.run(rx).await });
     }
@@ -526,6 +569,13 @@ struct WorkerActor {
     /// `Arc<dyn Registry>` carrying both `linear_graphql` and the
     /// per-issue `roki_open_worktree` tool.
     tool_factory: Option<Arc<dyn WorkerToolFactory>>,
+    /// Workspace WORKFLOW.md snapshotter. Used per-launch to render the
+    /// prompt template against the active issue and to source the
+    /// sandbox / elicitations defaults for the resolved permission.
+    workflow: Option<WorkflowSnapshotter>,
+    /// Operator-level permission strategy carried from the orchestrator.
+    /// `None` falls back to the legacy hardcoded permission.
+    permission_strategy: Option<PermissionStrategy>,
 }
 
 impl WorkerActor {
@@ -607,7 +657,7 @@ impl WorkerActor {
                 {
                     return;
                 }
-                self.try_promote_to_active(correlation, rx).await;
+                self.try_promote_to_active(issue, correlation, rx).await;
             }
             (WorkerState::AwaitingReview, TrackerIssueState::Terminal) => {
                 self.try_terminal_success(correlation).await;
@@ -643,6 +693,7 @@ impl WorkerActor {
     /// accumulation is a downstream-spec concern, out of scope for the MVP).
     async fn try_promote_to_active(
         &self,
+        issue: &NormalizedIssue,
         correlation: CorrelationId,
         rx: &mut mpsc::Receiver<ActorCommand>,
     ) {
@@ -698,7 +749,7 @@ impl WorkerActor {
                 max_attempts = self.engine_policy.max_attempts,
                 "launching worker (retry-budget loop)",
             );
-            let outcome = self.launch_once(correlation, &workspace_dir).await;
+            let outcome = self.launch_once(issue, correlation, &workspace_dir).await;
 
             match outcome {
                 Some(WorkerOutcome::CleanExit) => {
@@ -830,6 +881,7 @@ impl WorkerActor {
     /// programmer error in production paths).
     async fn launch_once(
         &self,
+        issue: &NormalizedIssue,
         correlation: CorrelationId,
         workspace_dir: &std::path::Path,
     ) -> Option<WorkerOutcome> {
@@ -844,12 +896,30 @@ impl WorkerActor {
             Some(factory) => factory.build_for_issue(&self.key).catalog(),
             None => Vec::new(),
         };
+        let workflow_snapshot = self.workflow.as_ref().map(|w| w.current());
+        let prompt = match workflow_snapshot.as_ref() {
+            Some(policy) => render_prompt(&policy.prompt_template, issue, &self.key)
+                .unwrap_or_else(|err| {
+                    warn!(
+                        target: "orchestrator",
+                        issue = %self.key.as_str(),
+                        error = %err,
+                        "prompt template render failed; falling back to a minimal prompt",
+                    );
+                    fallback_prompt(issue, &self.key)
+                }),
+            None => String::new(),
+        };
+        let permission =
+            resolve_launch_permission(self.permission_strategy.as_ref(), workflow_snapshot.as_deref());
         let ctx = build_worker_context(
             self.key.clone(),
             correlation,
             workspace_dir.to_path_buf(),
             self.engine_policy,
             tool_catalog,
+            prompt,
+            permission,
         );
         let launch_handle = tokio::spawn(async move { engine.launch(ctx, events_tx).await });
 
@@ -1174,23 +1244,124 @@ fn build_worker_context(
     workspace_dir: PathBuf,
     policy: EnginePolicy,
     tool_catalog: Vec<crate::tools::ToolDescriptor>,
+    prompt: String,
+    permission: ResolvedPermission,
 ) -> WorkerContext {
     WorkerContext {
         issue,
         correlation_id: correlation,
         workspace_dir,
-        prompt: String::new(),
+        prompt,
         tool_catalog,
-        permission: ResolvedPermission {
+        permission,
+        policy,
+        additional_context: None,
+    }
+}
+
+/// Render the workflow's `prompt_template` against the active issue.
+///
+/// The template is parsed every launch — the policy snapshot is refreshed
+/// per launch to pick up hot-reloads, and template parsing is cheap
+/// relative to the engine subprocess spawn. Failures bubble up so the
+/// caller can fall back to a deterministic minimal prompt rather than
+/// shipping an empty string to the agent.
+///
+/// Globals exposed:
+///
+/// * `issue.id` — the human-readable identifier (e.g. `RDM-7`).
+/// * `issue.title`, `issue.description` — display fields.
+/// * `issue.labels` — array of label names.
+/// * `issue.state` — bucketed lifecycle state (`Active`, `Review`,
+///   `Terminal`, `Other`).
+fn render_prompt(
+    template: &str,
+    issue: &NormalizedIssue,
+    fallback_id: &IssueId,
+) -> Result<String, String> {
+    let parser = liquid::ParserBuilder::with_stdlib()
+        .build()
+        .map_err(|e| format!("liquid parser init failed: {e}"))?;
+    let parsed = parser
+        .parse(template)
+        .map_err(|e| format!("liquid template parse failed: {e}"))?;
+    let id = if issue.issue.as_str().is_empty() {
+        fallback_id.as_str()
+    } else {
+        issue.issue.as_str()
+    };
+    let globals = liquid::object!({
+        "issue": {
+            "id": id,
+            "title": issue.title.clone(),
+            "description": issue.description.clone(),
+            "labels": issue.labels.clone(),
+            "state": format!("{:?}", issue.state),
+        },
+    });
+    parsed
+        .render(&globals)
+        .map_err(|e| format!("liquid render failed: {e}"))
+}
+
+/// Deterministic fallback used when the operator's `prompt_template`
+/// fails to render. Surfaces enough issue context that the agent can
+/// still make forward progress without re-reading the WORKFLOW.md file.
+fn fallback_prompt(issue: &NormalizedIssue, fallback_id: &IssueId) -> String {
+    let id = if issue.issue.as_str().is_empty() {
+        fallback_id.as_str()
+    } else {
+        issue.issue.as_str()
+    };
+    format!(
+        "Linear issue {id}: {title}\n\n{description}",
+        id = id,
+        title = issue.title,
+        description = issue.description,
+    )
+}
+
+/// Build the [`ResolvedPermission`] handed to the engine adapter. When
+/// the orchestrator was constructed without an operator strategy (test
+/// path), the legacy stub is returned so existing fixtures keep
+/// observing the historical shape. Production callers always wire
+/// `Orchestrator::with_permission_strategy`.
+fn resolve_launch_permission(
+    strategy: Option<&PermissionStrategy>,
+    workflow: Option<&crate::workflow::WorkflowPolicy>,
+) -> ResolvedPermission {
+    let Some(strategy) = strategy else {
+        return ResolvedPermission {
             mode: PermissionMode::Allowlist {
                 settings_path: PathBuf::new(),
             },
             sandbox: SandboxMode::WorkspaceWrite,
             elicitations: ElicitationsMode::Reject,
             mode_source: PermissionSource::Operator,
-        },
-        policy,
-        additional_context: None,
+        };
+    };
+    let mode = PermissionMode::from(strategy.clone());
+    let (sandbox, elicitations) = match workflow {
+        Some(p) => (p.sandbox, p.elicitations),
+        None => (SandboxMode::WorkspaceWrite, ElicitationsMode::Reject),
+    };
+    if matches!(mode, PermissionMode::DangerousFallback) {
+        // Requirement 9.4: log the elevated-permission decision once per
+        // launch. Post-7.1f there is no per-repo binding; the daemon is
+        // workspace-level, so the repo field is fixed.
+        warn!(
+            target: "permissions",
+            scope = "workspace",
+            mode = "dangerous_fallback",
+            source = "operator",
+            "launching worker with dangerously-skip-permissions",
+        );
+    }
+    ResolvedPermission {
+        mode,
+        sandbox,
+        elicitations,
+        mode_source: PermissionSource::Operator,
     }
 }
 
@@ -1353,5 +1524,80 @@ mod tests {
 
         shutdown.trigger();
         let _ = tokio::time::timeout(std::time::Duration::from_secs(2), handle).await;
+    }
+
+    fn sample_issue() -> NormalizedIssue {
+        NormalizedIssue {
+            issue: IssueId::new("RDM-7"),
+            title: "add README.md".to_string(),
+            description: "Repo: reedom/foo\n\nAdd a README.".to_string(),
+            state: TrackerIssueState::Active,
+            labels: vec!["docs".to_string()],
+        }
+    }
+
+    #[test]
+    fn render_prompt_substitutes_issue_fields() {
+        let template = "Issue {{ issue.id }}: {{ issue.title }}\n\
+                        State {{ issue.state }} | Labels: {% for l in issue.labels %}{{ l }}{% endfor %}\n\
+                        Body:\n{{ issue.description }}";
+        let rendered =
+            render_prompt(template, &sample_issue(), &IssueId::new("RDM-7")).expect("render");
+        assert!(rendered.contains("Issue RDM-7: add README.md"));
+        assert!(rendered.contains("State Active"));
+        assert!(rendered.contains("Labels: docs"));
+        assert!(rendered.contains("Repo: reedom/foo"));
+        assert!(rendered.contains("Add a README."));
+    }
+
+    #[test]
+    fn render_prompt_surfaces_template_parse_errors() {
+        // An unclosed `{%` block is a parse error. The orchestrator falls
+        // back to `fallback_prompt` on this case rather than shipping a
+        // half-rendered string to the agent.
+        let err =
+            render_prompt("{% if foo", &sample_issue(), &IssueId::new("RDM-7")).expect_err("parse");
+        assert!(err.contains("liquid template parse failed"));
+    }
+
+    #[test]
+    fn fallback_prompt_includes_id_title_and_description() {
+        let body = fallback_prompt(&sample_issue(), &IssueId::new("RDM-7"));
+        assert!(body.contains("RDM-7"));
+        assert!(body.contains("add README.md"));
+        assert!(body.contains("Add a README."));
+    }
+
+    #[test]
+    fn resolve_launch_permission_without_strategy_returns_legacy_stub() {
+        let resolved = resolve_launch_permission(None, None);
+        assert!(matches!(resolved.mode, PermissionMode::Allowlist { ref settings_path } if settings_path.as_os_str().is_empty()));
+        assert_eq!(resolved.sandbox, SandboxMode::WorkspaceWrite);
+        assert_eq!(resolved.elicitations, ElicitationsMode::Reject);
+    }
+
+    #[test]
+    fn resolve_launch_permission_propagates_dangerous_strategy() {
+        let resolved = resolve_launch_permission(
+            Some(&PermissionStrategy::DangerouslySkipPermissions),
+            None,
+        );
+        assert!(matches!(resolved.mode, PermissionMode::DangerousFallback));
+        assert_eq!(resolved.mode_source, PermissionSource::Operator);
+    }
+
+    #[test]
+    fn resolve_launch_permission_propagates_allowlist_settings_path() {
+        let path = PathBuf::from("/etc/roki/claude-settings.json");
+        let resolved = resolve_launch_permission(
+            Some(&PermissionStrategy::Allowlist {
+                settings_path: path.clone(),
+            }),
+            None,
+        );
+        match resolved.mode {
+            PermissionMode::Allowlist { settings_path } => assert_eq!(settings_path, path),
+            other => panic!("expected Allowlist, got {other:?}"),
+        }
     }
 }
