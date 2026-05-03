@@ -10,10 +10,6 @@ use walkdir::WalkDir;
 
 const DEFAULT_DOC_ROOT: &str = "docs";
 
-/// Roots scanned for `*.md` files with `refs:` frontmatter, in addition to
-/// `${ROKI_DOC_ROOT}`. Path-agnostic — kind enforcement comes from the manifest.
-const STATIC_SCAN_ROOTS: &[&str] = &[".kiro/steering", ".kiro/specs"];
-
 const SKIP_DIRS: &[&str] = &[".git", "target", "node_modules"];
 
 #[derive(Parser)]
@@ -282,13 +278,10 @@ fn build_graph(
     let mut id_to_doc: HashMap<String, String> = HashMap::new();
     let mut errors: Vec<String> = Vec::new();
 
-    let mut roots: Vec<PathBuf> = STATIC_SCAN_ROOTS
-        .iter()
-        .map(|p| root.join(p))
-        .collect();
-    roots.push(root.join(doc_root));
-
-    for scan in roots {
+    let scan_roots = derive_scan_roots(manifest, doc_root);
+    let mut visited_files: BTreeSet<PathBuf> = BTreeSet::new();
+    for rel in scan_roots {
+        let scan = root.join(&rel);
         if !scan.exists() {
             continue;
         }
@@ -307,6 +300,9 @@ fn build_graph(
                 continue;
             }
             let rel = path.strip_prefix(root).unwrap_or(path).to_path_buf();
+            if !visited_files.insert(rel.clone()) {
+                continue;
+            }
 
             let raw = match fs::read_to_string(path) {
                 Ok(s) => s,
@@ -389,6 +385,39 @@ fn build_graph(
         },
         errors,
     ))
+}
+
+/// Derive scan roots from the kind manifest by stripping each `path_glob` down
+/// to its longest non-glob prefix (the dir we walk). The configured doc root is
+/// always included as a root so the global `map.md` can be discovered as a node.
+fn derive_scan_roots(manifest: &Manifest, doc_root: &Path) -> BTreeSet<PathBuf> {
+    let mut roots: BTreeSet<PathBuf> = BTreeSet::new();
+    roots.insert(doc_root.to_path_buf());
+    for kind in manifest.kinds.values() {
+        for glob in &kind.path_globs {
+            roots.insert(glob_root(glob));
+        }
+    }
+    roots
+}
+
+fn glob_root(glob: &str) -> PathBuf {
+    let meta_idx = glob.find(['*', '?', '[']);
+    match meta_idx {
+        None => Path::new(glob)
+            .parent()
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| PathBuf::from(".")),
+        Some(idx) => {
+            let prefix = &glob[..idx];
+            let trimmed = prefix.rsplit_once('/').map(|(a, _)| a).unwrap_or("");
+            if trimmed.is_empty() {
+                PathBuf::from(".")
+            } else {
+                PathBuf::from(trimmed)
+            }
+        }
+    }
 }
 
 fn extract_frontmatter(raw: &str) -> Option<&str> {
@@ -1010,5 +1039,28 @@ mod tests {
     #[test]
     fn frontmatter_absent() {
         assert!(extract_frontmatter("# title only\n").is_none());
+    }
+
+    #[test]
+    fn glob_root_literal_path() {
+        assert_eq!(glob_root(".kiro/steering/roadmap.md"), PathBuf::from(".kiro/steering"));
+    }
+
+    #[test]
+    fn glob_root_with_meta_in_middle() {
+        assert_eq!(glob_root(".kiro/specs/*/brief.md"), PathBuf::from(".kiro/specs"));
+        assert_eq!(glob_root("docs/fr/[0-9]*.md"), PathBuf::from("docs/fr"));
+        assert_eq!(glob_root("crates/*/README.md"), PathBuf::from("crates"));
+    }
+
+    #[test]
+    fn glob_root_no_dir() {
+        assert_eq!(glob_root("*.md"), PathBuf::from("."));
+        assert_eq!(glob_root("README.md"), PathBuf::from(""));
+    }
+
+    #[test]
+    fn glob_root_double_star() {
+        assert_eq!(glob_root("docs/**/*.md"), PathBuf::from("docs"));
     }
 }
