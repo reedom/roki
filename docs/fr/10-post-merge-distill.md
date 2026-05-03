@@ -5,7 +5,19 @@ refs:
   title: "Post-Merge Distill"
   spec: roki-distill-postmerge
   implements:
-    - requirements:roki-distill-postmerge
+    - req:roki-distill-postmerge:1
+    - req:roki-distill-postmerge:2
+    - req:roki-distill-postmerge:3
+    - req:roki-distill-postmerge:4
+    - req:roki-distill-postmerge:5
+    - req:roki-distill-postmerge:6
+    - req:roki-distill-postmerge:7
+    - req:roki-distill-postmerge:8
+    - req:roki-distill-postmerge:9
+    - req:roki-distill-postmerge:10
+    - req:roki-distill-postmerge:11
+    - req:roki-distill-postmerge:12
+    - req:roki-distill-postmerge:13
 ---
 
 # FR 10: Post-Merge Distill

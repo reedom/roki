@@ -5,7 +5,12 @@ refs:
   title: "roki-tui"
   spec: roki-observability
   implements:
-    - requirements:roki-observability
+    - req:roki-observability:8
+    - req:roki-observability:9
+    - req:roki-observability:10
+    - req:roki-observability:11
+    - req:roki-observability:6.4
+    - req:roki-observability:14.4
 ---
 
 # FR 16: roki-tui

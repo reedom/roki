@@ -5,7 +5,14 @@ refs:
   title: "Pre-PR Gate"
   spec: roki-review-gate
   implements:
-    - requirements:roki-review-gate
+    - req:roki-review-gate:1
+    - req:roki-review-gate:2
+    - req:roki-review-gate:3
+    - req:roki-review-gate:4
+    - req:roki-review-gate:5
+    - req:roki-review-gate:6
+    - req:roki-review-gate:7
+    - req:roki-review-gate:8
 ---
 
 # FR 09: Pre-PR Gate

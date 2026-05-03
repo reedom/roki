@@ -4,6 +4,9 @@ refs:
   kind: fr
   title: "Worker Execution"
   spec: roki-mvp
+  implements:
+    - req:roki-mvp:5
+    - req:roki-mvp:9
 ---
 
 # FR 07: Worker Execution

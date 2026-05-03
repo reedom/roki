@@ -5,7 +5,15 @@ refs:
   title: "Pre-Implementation Gate"
   spec: roki-spec-gate
   implements:
-    - requirements:roki-spec-gate
+    - req:roki-spec-gate:1
+    - req:roki-spec-gate:2
+    - req:roki-spec-gate:3
+    - req:roki-spec-gate:4
+    - req:roki-spec-gate:5
+    - req:roki-spec-gate:6
+    - req:roki-spec-gate:7
+    - req:roki-spec-gate:8
+    - req:roki-spec-gate:9
 ---
 
 # FR 08: Pre-Implementation Gate

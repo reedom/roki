@@ -4,6 +4,8 @@ refs:
   kind: fr
   title: "Operator Notifications"
   spec: roki-mvp
+  implements:
+    - req:roki-mvp:12
 ---
 
 # FR 14: Operator Notifications

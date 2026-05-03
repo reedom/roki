@@ -6,6 +6,15 @@ refs:
   spec: roki-review-gate
   implements:
     - roadmap
+  provides:
+    - req:roki-review-gate:1
+    - req:roki-review-gate:2
+    - req:roki-review-gate:3
+    - req:roki-review-gate:4
+    - req:roki-review-gate:5
+    - req:roki-review-gate:6
+    - req:roki-review-gate:7
+    - req:roki-review-gate:8
 ---
 
 # Requirements Document

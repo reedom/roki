@@ -4,6 +4,8 @@ refs:
   kind: fr
   title: "Extension Surface"
   spec: roki-mvp
+  implements:
+    - req:roki-mvp:13
 ---
 
 # FR 12: Extension Surface

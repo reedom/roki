@@ -6,6 +6,24 @@ refs:
   spec: roki-observability
   implements:
     - roadmap
+  provides:
+    - req:roki-observability:1
+    - req:roki-observability:2
+    - req:roki-observability:3
+    - req:roki-observability:4
+    - req:roki-observability:5
+    - req:roki-observability:6
+    - req:roki-observability:6.4
+    - req:roki-observability:7
+    - req:roki-observability:8
+    - req:roki-observability:9
+    - req:roki-observability:10
+    - req:roki-observability:11
+    - req:roki-observability:12
+    - req:roki-observability:13
+    - req:roki-observability:14
+    - req:roki-observability:14.4
+    - req:roki-observability:15
 ---
 
 # Requirements Document
