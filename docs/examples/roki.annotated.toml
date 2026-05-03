@@ -1,0 +1,87 @@
+# Annotated reference: every key in roki.toml, with comments
+# Schema canonical: docs/reference/config.md
+# Minimal working: docs/examples/roki.minimal.toml
+#
+# Source-value notation:
+#   { env  = "VAR_NAME" }            — read from an environment variable
+#   { file = "/path/to/secret" }     — read from a file (newline trimmed)
+#   "literal-value"                   — written inline (not recommended)
+
+# ============================================================
+# [linear] — Linear access (required)
+# ============================================================
+[linear]
+# Where to fetch the API token from. Refuses startup if it cannot be resolved
+api_token = { env = "LINEAR_API_TOKEN" }
+# Alternative: api_token = { file = "/etc/roki/linear-token" }
+
+# Where to fetch the webhook HMAC secret from
+webhook_secret = { env = "LINEAR_WEBHOOK_SECRET" }
+
+# Assignee subject to admission
+# Specifying "me" resolves to the API token holder
+# Refuses startup if unresolvable / multiple resolutions
+assignee = "me"
+# Alternative: assignee = "user-uuid-or-email"
+
+# Set of Linear workflow state names to admit (optional)
+# default: ["Todo"]
+# Refuses startup on empty set
+admit_states = ["Todo"]
+# Example: admit_states = ["Todo", "Backlog"]
+
+# ============================================================
+# [workflow] — WORKFLOW.md path (required)
+# ============================================================
+[workflow]
+# Refuses startup if missing / unreadable
+path = "./WORKFLOW.md"
+
+# ============================================================
+# [server] — Webhook receiver bind (optional, can be overridden via CLI)
+# ============================================================
+[server]
+bind = "127.0.0.1"   # CLI: --bind <addr>
+port = 8080          # CLI: --port <num>
+
+# ============================================================
+# [[repos]] — Allowlist (0+, ghq identifiers)
+# ============================================================
+# Refuses startup on duplicates
+# Booting with an empty allowlist is fine, but any repo returned by the judge
+#   will fail allowlist validation → admitted issues route to Skipped
+
+[[repos]]
+ghq = "github.com/your-org/repo-a"
+
+[[repos]]
+ghq = "github.com/your-org/repo-b"
+
+# ============================================================
+# [judge] — Setup judge (optional)
+# ============================================================
+[judge]
+# When omitted, uses the documented default model
+# (a small model in the same Claude family as the worker)
+model = "claude-haiku-4-5"
+
+# ============================================================
+# [permissions] — Worker permission strategy (required)
+# ============================================================
+[permissions]
+# "settings-allowlist": via Claude Code's --settings allowlist (recommended)
+# "dangerously-skip":   pinned to --dangerously-skip-permissions
+#                        (fallback for when the allowlist cannot be trusted)
+strategy = "settings-allowlist"
+# Can be overridden at runtime via the --dangerously-skip-permissions CLI flag
+
+# ============================================================
+# [notifications.slack] — daemon-only failure notifications (optional)
+# ============================================================
+# Block absent:                warning + every Slack post is skipped (the daemon still boots)
+# Block present + cannot resolve:    refuses startup
+[notifications.slack]
+# Either webhook-URL based or bot-token based
+# webhook_url = { env = "SLACK_WEBHOOK_URL" }
+bot_token = { env = "SLACK_BOT_TOKEN" }
+channel = "#roki-alerts"

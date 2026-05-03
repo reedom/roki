@@ -1,0 +1,23 @@
+# Minimal roki.toml — smallest configuration that boots
+# Annotated reference for every key: docs/examples/roki.annotated.toml
+# Schema canonical: docs/reference/config.md
+
+[linear]
+# Linear API token (used read-only by the daemon)
+api_token = { env = "LINEAR_API_TOKEN" }
+# Linear webhook HMAC secret (used by the webhook receiver for verification)
+webhook_secret = { env = "LINEAR_WEBHOOK_SECRET" }
+# Assignee to admit. "me" resolves to the API token holder
+assignee = "me"
+
+[workflow]
+path = "./WORKFLOW.md"
+
+# Add one or more repos to the allowlist
+# (booting with an empty allowlist is fine, but any repo returned by the judge
+#  will route the issue to Skipped)
+[[repos]]
+ghq = "github.com/your-org/your-repo"
+
+[permissions]
+strategy = "settings-allowlist"
