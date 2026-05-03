@@ -1,3 +1,13 @@
+---
+refs:
+  id: fr:11-agent-tool-boundary
+  kind: fr
+  title: "Agent Tool Boundary"
+  spec: roki-mvp
+  implements:
+    - req:roki-mvp:7
+---
+
 # FR 11: Agent Tool Boundary
 
 > The principle that the daemon never registers / proxies / wraps any agent-side tool. The exception: each gate spec registers exactly one **read-only self-diagnosis tool** (`kiro_spec_status` / `kiro_review_status`).

@@ -1,3 +1,22 @@
+---
+refs:
+  id: fr:01-daemon-lifecycle
+  kind: fr
+  title: "Daemon Lifecycle"
+  spec: roki-mvp
+  implements:
+    - req:roki-mvp:1
+  depends_on:
+    - fr:02-configuration
+    - fr:13-observability-logs
+  related:
+    - ref:cli
+    - design:roki-mvp:bootstrap
+  modules:
+    - crates/roki-daemon/src/runtime.rs
+    - crates/roki-daemon/src/config/mod.rs
+---
+
 # FR 01: Daemon Lifecycle
 
 > The lifecycle of the single-binary daemon launched by `roki run`.

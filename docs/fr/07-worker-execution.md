@@ -1,3 +1,11 @@
+---
+refs:
+  id: fr:07-worker-execution
+  kind: fr
+  title: "Worker Execution"
+  spec: roki-mvp
+---
+
 # FR 07: Worker Execution
 
 > One bounded `claude --print --output-format stream-json` invocation per admitted ticket. Includes permission strategy, retry budget, max-turns, and stall detection.

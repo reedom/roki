@@ -1,3 +1,13 @@
+---
+refs:
+  id: fr:05-setup-judge
+  kind: fr
+  title: "Setup Judge"
+  spec: roki-mvp
+  implements:
+    - req:roki-mvp:4
+---
+
 # FR 05: Setup Judge
 
 > A short pre-flight one-shot `claude` invocation that classifies which repo (or repos) an admitted ticket targets.

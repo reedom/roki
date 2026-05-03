@@ -1,3 +1,19 @@
+---
+refs:
+  id: fr:13-observability-logs
+  kind: fr
+  title: "Observability Logs"
+  spec: roki-mvp
+  implements:
+    - req:roki-mvp:11
+  related:
+    - ref:log-events
+    - ref:cli
+    - ref:config
+    - fr:14-operator-notifications
+    - fr:15-http-api
+---
+
 # FR 13: Observability Logs
 
 > A single structured logging pipeline shared by the daemon, every gate, and the distill phase. Includes per-issue debug capture, surfacing of subprocess stderr, and secret redaction.

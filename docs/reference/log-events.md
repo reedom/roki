@@ -1,3 +1,12 @@
+---
+refs:
+  id: ref:log-events
+  kind: reference
+  title: "Structured Log Events"
+  related:
+    - fr:13-observability-logs
+---
+
 # Reference: Structured Log Events
 
 The **canonical reference** for the structured log events that roki emits.

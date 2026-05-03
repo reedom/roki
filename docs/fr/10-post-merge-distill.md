@@ -1,3 +1,13 @@
+---
+refs:
+  id: fr:10-post-merge-distill
+  kind: fr
+  title: "Post-Merge Distill"
+  spec: roki-distill-postmerge
+  implements:
+    - requirements:roki-distill-postmerge
+---
+
 # FR 10: Post-Merge Distill
 
 > A post-terminal phase wedged between `TerminalSuccess` and workspace deletion. The agent classifies flow-type artifacts (kiro `design.md` / `tasks.md`, superpowers spec, plan output, scratch notes) into **delete / archive / distill**, processes them, and the daemon validates the manifest before allowing cleanup.

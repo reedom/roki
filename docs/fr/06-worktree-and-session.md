@@ -1,3 +1,15 @@
+---
+refs:
+  id: fr:06-worktree-and-session
+  kind: fr
+  title: "Worktree and Session Lifecycle"
+  spec: roki-mvp
+  implements:
+    - req:roki-mvp:4
+  related:
+    - design:roki-mvp:worktree-workspace
+---
+
 # FR 06: Worktree and Session Lifecycle
 
 > The daemon materializes / cleans up per-issue session tempdirs and git worktrees. The path-safety module is reused by the distill phase as well.

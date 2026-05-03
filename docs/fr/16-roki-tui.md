@@ -1,3 +1,13 @@
+---
+refs:
+  id: fr:16-roki-tui
+  kind: fr
+  title: "roki-tui"
+  spec: roki-observability
+  implements:
+    - requirements:roki-observability
+---
+
 # FR 16: roki-tui
 
 > A ratatui binary shipped as a cargo target independent of the daemon. It calls the HTTP API in a refresh loop and renders active workers / per-issue state / escalations. Has local-only escalation acknowledgement and a manual refresh action.

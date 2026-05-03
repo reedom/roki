@@ -1,3 +1,11 @@
+---
+refs:
+  id: fr:14-operator-notifications
+  kind: fr
+  title: "Operator Notifications"
+  spec: roki-mvp
+---
+
 # FR 14: Operator Notifications
 
 > Send daemon-only failures (the kind that the agent cannot write back to Linear) to Slack.

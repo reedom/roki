@@ -1,3 +1,14 @@
+---
+refs:
+  id: ref:config
+  kind: reference
+  title: "Configuration Schema"
+  related:
+    - ref:cli
+    - fr:02-configuration
+    - fr:12-extension-surface
+---
+
 # Reference: Configuration Schema
 
 The **canonical schema reference** for `roki.toml` (per workspace) and `WORKFLOW.md` (Liquid + Markdown, hot-reloaded).

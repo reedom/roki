@@ -1,3 +1,11 @@
+---
+refs:
+  id: fr:12-extension-surface
+  kind: fr
+  title: "Extension Surface"
+  spec: roki-mvp
+---
+
 # FR 12: Extension Surface
 
 > The traits, hooks, and contracts that downstream specs use to plug in without forking the orchestrator core.

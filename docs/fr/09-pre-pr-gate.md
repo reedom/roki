@@ -1,3 +1,13 @@
+---
+refs:
+  id: fr:09-pre-pr-gate
+  kind: fr
+  title: "Pre-PR Gate"
+  spec: roki-review-gate
+  implements:
+    - requirements:roki-review-gate
+---
+
 # FR 09: Pre-PR Gate
 
 > Gate `AwaitingReview -> TerminalSuccess` with a vetoable hook. Do not let it reach `TerminalSuccess` without a structured `review.md` (per-criterion pass + code references). On failure, run a fix loop that returns to `Active` with the findings as context.

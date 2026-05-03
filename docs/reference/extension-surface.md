@@ -1,3 +1,13 @@
+---
+refs:
+  id: ref:extension-surface
+  kind: reference
+  title: "Extension Surface"
+  related:
+    - fr:12-extension-surface
+    - ref:config
+---
+
 # Reference: Extension Surface
 
 The **canonical reference** for the traits / hooks / context channels that downstream specs use to plug in without forking the orchestrator core.

@@ -1,3 +1,20 @@
+---
+refs:
+  id: ref:cli
+  kind: reference
+  title: "CLI Flags"
+  implements:
+    - req:roki-mvp:1.6
+    - req:roki-mvp:2.5
+    - req:roki-mvp:9.4
+    - req:roki-mvp:11.6
+  related:
+    - ref:config
+    - fr:01-daemon-lifecycle
+    - fr:07-worker-execution
+    - fr:13-observability-logs
+---
+
 # Reference: CLI Flags
 
 The **canonical reference** for the CLI flags accepted by the `roki run` subcommand.

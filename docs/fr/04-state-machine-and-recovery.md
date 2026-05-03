@@ -1,3 +1,14 @@
+---
+refs:
+  id: fr:04-state-machine-and-recovery
+  kind: fr
+  title: "State Machine and Restart Recovery"
+  spec: roki-mvp
+  implements:
+    - req:roki-mvp:8
+    - req:roki-mvp:10
+---
+
 # FR 04: State Machine and Restart Recovery
 
 > The per-issue in-memory state machine, and restart recovery without persistence. Vetoable transition hooks are the plug-in seam for downstream specs.

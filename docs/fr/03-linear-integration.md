@@ -1,3 +1,13 @@
+---
+refs:
+  id: fr:03-linear-integration
+  kind: fr
+  title: "Linear Integration"
+  spec: roki-mvp
+  implements:
+    - req:roki-mvp:3
+---
+
 # FR 03: Linear Integration
 
 > Discovery, admission, and deduplication of Linear tickets. Webhook is the hot path; polling is the fallback. The daemon is read-only.

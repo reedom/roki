@@ -1,3 +1,22 @@
+---
+refs:
+  id: fr:02-configuration
+  kind: fr
+  title: "Configuration"
+  spec: roki-mvp
+  implements:
+    - req:roki-mvp:2
+    - req:roki-mvp:6
+  depends_on:
+    - ref:config
+  related:
+    - ref:cli
+    - fr:12-extension-surface
+  modules:
+    - crates/roki-daemon/src/config/
+    - crates/roki-daemon/src/workflow/
+---
+
 # FR 02: Configuration
 
 > Two configuration surfaces: `roki.toml` (per workspace) and `WORKFLOW.md` (Liquid + Markdown, hot-reloaded).

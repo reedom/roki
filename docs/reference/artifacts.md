@@ -1,3 +1,12 @@
+---
+refs:
+  id: ref:artifacts
+  kind: reference
+  title: "Public Artifacts"
+  related:
+    - fr:10-post-merge-distill
+---
+
 # Reference: Public Artifacts
 
 The **canonical reference** for the paths and required elements of the **public artifacts** that operators and downstream specs read or write.

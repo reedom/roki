@@ -1,3 +1,13 @@
+---
+refs:
+  id: fr:08-pre-implementation-gate
+  kind: fr
+  title: "Pre-Implementation Gate"
+  spec: roki-spec-gate
+  implements:
+    - requirements:roki-spec-gate
+---
+
 # FR 08: Pre-Implementation Gate
 
 > Gate `Queued -> Active` with a vetoable hook. Do not let the worker enter `Active` unless `.kiro/specs/<issue>/requirements.md` (in EARS form) exists.
