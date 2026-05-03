@@ -38,10 +38,11 @@ pub use watcher::{WatchError, WorkflowHandle, WorkflowSnapshotter};
 /// Sandbox mode applied to each agent worker subprocess (Requirement 9.1, 9.2).
 ///
 /// The default is `WorkspaceWrite`; per-repo overrides come from `WORKFLOW.md`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum SandboxMode {
     /// Agent may write only inside its workspace (default).
+    #[default]
     WorkspaceWrite,
     /// Agent has read-only access.
     ReadOnly,
@@ -49,26 +50,15 @@ pub enum SandboxMode {
     Unrestricted,
 }
 
-impl Default for SandboxMode {
-    fn default() -> Self {
-        Self::WorkspaceWrite
-    }
-}
-
 /// Elicitation policy applied at worker launch (Requirement 9.1).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum ElicitationsMode {
     /// Reject any elicitation request from the agent (default).
+    #[default]
     Reject,
     /// Allow elicitations.
     Allow,
-}
-
-impl Default for ElicitationsMode {
-    fn default() -> Self {
-        Self::Reject
-    }
 }
 
 /// Backoff knobs honoured by the orchestrator (design.md "Workflow loader").

@@ -15,16 +15,22 @@ use std::time::Duration;
 
 use roki_daemon::orchestrator::state::IssueId;
 use roki_daemon::orchestrator::tracker_bridge::TrackerBridge;
+use roki_daemon::tracker::assignee::AssigneeAdmission;
 use roki_daemon::tracker::model::{IssueState, NormalizedIssue};
 use tokio::sync::mpsc;
 
 fn issue(_repo: &str, issue: &str, state: IssueState) -> NormalizedIssue {
+    issue_with_assignee(issue, state, None)
+}
+
+fn issue_with_assignee(issue: &str, state: IssueState, assignee: Option<&str>) -> NormalizedIssue {
     NormalizedIssue {
         issue: IssueId::new(issue),
         title: String::new(),
         description: String::new(),
         state,
         labels: Vec::new(),
+        assignee_user_id: assignee.map(ToString::to_string),
     }
 }
 
@@ -128,6 +134,61 @@ async fn forwards_different_issues() {
 
     drop(poll_tx);
     drop(web_tx);
+    handle.await.expect("bridge task");
+}
+
+#[tokio::test]
+async fn assignee_filter_drops_unassigned_first_observation() {
+    let (poll_tx, poll_rx) = mpsc::channel::<NormalizedIssue>(8);
+    let (web_tx, web_rx) = mpsc::channel::<NormalizedIssue>(8);
+    let (out_tx, mut out_rx) = mpsc::channel::<NormalizedIssue>(8);
+
+    let bridge = TrackerBridge::new_with_assignee(
+        poll_rx,
+        web_rx,
+        out_tx,
+        AssigneeAdmission::new("user-me").expect("test assignee"),
+    );
+    let handle = tokio::spawn(bridge.run());
+
+    poll_tx
+        .send(issue_with_assignee("ENG-1", IssueState::Active, None))
+        .await
+        .expect("send unassigned");
+    drop(poll_tx);
+    drop(web_tx);
+
+    assert!(out_rx.recv().await.is_none());
+    handle.await.expect("bridge task");
+}
+
+#[tokio::test]
+async fn assignee_filter_forwards_assignment_loss_for_admitted_issue() {
+    let (poll_tx, poll_rx) = mpsc::channel::<NormalizedIssue>(8);
+    let (web_tx, web_rx) = mpsc::channel::<NormalizedIssue>(8);
+    let (out_tx, mut out_rx) = mpsc::channel::<NormalizedIssue>(8);
+
+    let bridge = TrackerBridge::new_with_assignee(
+        poll_rx,
+        web_rx,
+        out_tx,
+        AssigneeAdmission::new("user-me").expect("test assignee"),
+    );
+    let handle = tokio::spawn(bridge.run());
+
+    let admitted = issue_with_assignee("ENG-1", IssueState::Active, Some("user-me"));
+    let lost = issue_with_assignee("ENG-1", IssueState::Active, Some("user-other"));
+    poll_tx.send(admitted.clone()).await.expect("send admitted");
+    poll_tx
+        .send(lost.clone())
+        .await
+        .expect("send lost assignment");
+    drop(poll_tx);
+    drop(web_tx);
+
+    assert_eq!(recv_with_timeout(&mut out_rx).await, Some(admitted));
+    assert_eq!(recv_with_timeout(&mut out_rx).await, Some(lost));
+    assert!(out_rx.recv().await.is_none());
     handle.await.expect("bridge task");
 }
 

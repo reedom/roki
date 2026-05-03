@@ -50,6 +50,7 @@ use crate::config::SecretString;
 use crate::orchestrator::recovery::{RecoveryIssueLifecycle, RecoveryLinearReader};
 use crate::orchestrator::state::IssueId;
 use crate::tools::RateLimitState;
+use crate::tracker::assignee::AssigneeAdmission;
 use crate::tracker::model::{IssueState as TrackerIssueState, NormalizedIssue};
 
 /// Default request timeout for the underlying reqwest client. Matches the
@@ -66,12 +67,12 @@ const REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 /// We use `issueSearch` to keep the implementation small. The query
 /// returns at most a handful of issues; the recovery client filters by
 /// `identifier == requested_id` to find the exact match.
-const ISSUE_SEARCH_QUERY: &str = "query IssueSearch($query: String!) {\n  issueSearch(query: $query, first: 5) {\n    nodes {\n      id\n      identifier\n      title\n      description\n      state { type name }\n      labels { nodes { name } }\n    }\n  }\n}";
+const ISSUE_SEARCH_QUERY: &str = "query IssueSearch($query: String!) {\n  issueSearch(query: $query, first: 5) {\n    nodes {\n      id\n      identifier\n      title\n      description\n      state { type name }\n      assignee { id }\n      labels { nodes { name } }\n    }\n  }\n}";
 
-/// GraphQL query that fetches every active issue the API token can see.
-/// Mirrors the polling tracker's surface so recovery sees the same
-/// active-issue slice the polling loop would on its next tick.
-const ACTIVE_ISSUES_QUERY: &str = "query ActiveIssues($filter: IssueFilter, $first: Int) {\n  issues(filter: $filter, first: $first) {\n    nodes {\n      id\n      identifier\n      title\n      description\n      state { type name }\n      labels { nodes { name } }\n    }\n  }\n}";
+/// GraphQL query that fetches every active issue assigned to the resolved
+/// Linear assignee. Mirrors the polling tracker's surface so recovery sees
+/// the same active-issue slice the polling loop would on its next tick.
+const ACTIVE_ISSUES_QUERY: &str = "query ActiveIssues($filter: IssueFilter, $first: Int) {\n  issues(filter: $filter, first: $first) {\n    nodes {\n      id\n      identifier\n      title\n      description\n      state { type name }\n      assignee { id }\n      labels { nodes { name } }\n    }\n  }\n}";
 
 /// Production [`RecoveryLinearReader`] backed by an HTTP client against
 /// the Linear GraphQL endpoint.
@@ -79,6 +80,7 @@ pub struct LinearRecoveryReader {
     endpoint: String,
     token: SecretString,
     rate_limit: Arc<dyn RateLimitState>,
+    assignee: AssigneeAdmission,
     http: reqwest::Client,
 }
 
@@ -90,6 +92,7 @@ impl LinearRecoveryReader {
         endpoint: impl Into<String>,
         token: SecretString,
         rate_limit: Arc<dyn RateLimitState>,
+        assignee: AssigneeAdmission,
     ) -> Self {
         let http = reqwest::Client::builder()
             .timeout(REQUEST_TIMEOUT)
@@ -99,6 +102,7 @@ impl LinearRecoveryReader {
             endpoint: endpoint.into(),
             token,
             rate_limit,
+            assignee,
             http,
         }
     }
@@ -180,6 +184,10 @@ impl RecoveryLinearReader for LinearRecoveryReader {
 
         let lifecycle = classify_state(node.state.kind.as_deref().unwrap_or(""));
         let normalized = node_to_normalized(node);
+        if lifecycle == RecoveryIssueLifecycle::Active && !self.assignee.matches_issue(&normalized)
+        {
+            return Ok((RecoveryIssueLifecycle::Unknown, Some(normalized)));
+        }
         Ok((lifecycle, Some(normalized)))
     }
 
@@ -195,8 +203,11 @@ impl RecoveryLinearReader for LinearRecoveryReader {
 
         let body = json!({
             "query": ACTIVE_ISSUES_QUERY,
-            "variables": {
-                "filter": { "state": { "type": { "in": ["unstarted", "started"] } } },
+                "variables": {
+                "filter": {
+                    "state": { "type": { "in": ["unstarted", "started"] } },
+                    "assignee": { "id": { "eq": self.assignee.user_id() } }
+                },
                 "first": 100,
             },
         });
@@ -294,6 +305,7 @@ fn node_to_normalized(node: IssueNode) -> NormalizedIssue {
         description: node.description.unwrap_or_default(),
         state,
         labels,
+        assignee_user_id: node.assignee.map(|assignee| assignee.id),
     }
 }
 
@@ -326,6 +338,13 @@ struct IssueNode {
     state: StateField,
     #[serde(default)]
     labels: Option<LabelsEnvelope>,
+    #[serde(default)]
+    assignee: Option<AssigneeField>,
+}
+
+#[derive(Debug, Deserialize)]
+struct AssigneeField {
+    id: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -351,6 +370,13 @@ struct LabelNode {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Arc;
+
+    use serde_json::json;
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    use crate::tools::NoopRateLimit;
 
     #[test]
     fn classify_state_maps_active_buckets() {
@@ -375,5 +401,51 @@ mod tests {
         assert_eq!(classify_state("triage"), RecoveryIssueLifecycle::Unknown);
         assert_eq!(classify_state("backlog"), RecoveryIssueLifecycle::Unknown);
         assert_eq!(classify_state(""), RecoveryIssueLifecycle::Unknown);
+    }
+
+    #[tokio::test]
+    async fn lookup_issue_treats_active_issue_assigned_elsewhere_as_unknown() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "data": {
+                    "issueSearch": {
+                        "nodes": [
+                            {
+                                "id": "linear-issue-1",
+                                "identifier": "ENG-1",
+                                "title": "Implement admission",
+                                "description": "Active but assigned away.",
+                                "state": { "type": "started", "name": "In Progress" },
+                                "assignee": { "id": "user-other" },
+                                "labels": { "nodes": [] }
+                            }
+                        ]
+                    }
+                }
+            })))
+            .mount(&server)
+            .await;
+        let reader = LinearRecoveryReader::new(
+            server.uri(),
+            SecretString::new("lin_test"),
+            Arc::new(NoopRateLimit),
+            AssigneeAdmission::new("user-me").unwrap(),
+        );
+
+        let (lifecycle, issue) = reader
+            .lookup_issue(&IssueId::new("ENG-1"))
+            .await
+            .expect("lookup issue");
+
+        assert_eq!(lifecycle, RecoveryIssueLifecycle::Unknown);
+        assert_eq!(
+            issue
+                .expect("normalized issue is retained for diagnostics")
+                .assignee_user_id
+                .as_deref(),
+            Some("user-other"),
+        );
     }
 }

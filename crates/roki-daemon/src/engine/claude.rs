@@ -41,9 +41,9 @@ use std::process::Stdio;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use serde::Serialize;
 use ::time::OffsetDateTime;
 use ::time::format_description::well_known::Rfc3339;
+use serde::Serialize;
 use tokio::fs::{File, OpenOptions};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::Command;

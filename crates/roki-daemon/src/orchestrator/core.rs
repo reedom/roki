@@ -41,6 +41,7 @@ use thiserror::Error;
 use tokio::sync::mpsc;
 use tracing::{debug, info, warn};
 
+use crate::config::PermissionStrategy;
 use crate::engine::policy::{EnginePolicy, WorkerOutcome};
 use crate::engine::{SupervisedEvent, WorkerContext};
 use crate::orchestrator::events::EventBus;
@@ -53,11 +54,11 @@ use crate::orchestrator::recovery::{
 use crate::orchestrator::state::{
     CorrelationId, IssueId, TransitionEvent, TransitionTrigger, VetoDecision, WorkerState,
 };
-use crate::config::PermissionStrategy;
 use crate::permissions::{PermissionMode, PermissionSource, ResolvedPermission};
 use crate::session::SessionManager;
 use crate::shutdown::ShutdownSignal;
 use crate::tools::{WorkerToolFactory, WtTool};
+use crate::tracker::assignee::AssigneeAdmission;
 use crate::tracker::model::{IssueState as TrackerIssueState, NormalizedIssue};
 use crate::workflow::{ElicitationsMode, SandboxMode, WorkflowSnapshotter};
 use crate::worktrees::WorktreeRegistry;
@@ -235,6 +236,11 @@ pub struct Orchestrator {
     /// elicitations come from the workflow snapshot. `None` falls back to
     /// the legacy stub permission (used by orchestrator-only tests).
     permission_strategy: Option<PermissionStrategy>,
+    /// Optional daemon-side Linear assignee admission predicate. Production
+    /// wiring supplies this after resolving `[linear].assignee`; lower-level
+    /// orchestrator tests can omit it and continue to exercise raw state
+    /// transitions.
+    assignee_admission: Option<AssigneeAdmission>,
 }
 
 impl Orchestrator {
@@ -277,6 +283,7 @@ impl Orchestrator {
             tool_factory: None,
             workflow: None,
             permission_strategy: None,
+            assignee_admission: None,
         }
     }
 
@@ -301,6 +308,16 @@ impl Orchestrator {
     #[must_use]
     pub fn with_permission_strategy(mut self, strategy: PermissionStrategy) -> Self {
         self.permission_strategy = Some(strategy);
+        self
+    }
+
+    /// Attach daemon-side Linear assignee admission. The orchestrator uses
+    /// this only for already-admitted issues: first-observation filtering is
+    /// owned by [`TrackerBridge`], while assignment loss during an actor's
+    /// lifetime is cleaned up here.
+    #[must_use]
+    pub fn with_assignee_admission(mut self, admission: AssigneeAdmission) -> Self {
+        self.assignee_admission = Some(admission);
         self
     }
 
@@ -522,6 +539,7 @@ impl Orchestrator {
             tool_factory: self.tool_factory.clone(),
             workflow: self.workflow.clone(),
             permission_strategy: self.permission_strategy.clone(),
+            assignee_admission: self.assignee_admission.clone(),
         };
         tokio::spawn(async move { actor.run(rx).await });
     }
@@ -576,6 +594,25 @@ struct WorkerActor {
     /// Operator-level permission strategy carried from the orchestrator.
     /// `None` falls back to the legacy hardcoded permission.
     permission_strategy: Option<PermissionStrategy>,
+    /// Resolved Linear assignee admission predicate. Used to detect
+    /// reassignment away while the actor is already alive.
+    assignee_admission: Option<AssigneeAdmission>,
+}
+
+enum LaunchStepResult {
+    Outcome {
+        outcome: WorkerOutcome,
+        deferred_tracker: Option<NormalizedIssue>,
+    },
+    AssignmentLost,
+    Interrupted,
+    NoTerminal,
+}
+
+enum BackoffSleepResult {
+    Completed,
+    AssignmentLost,
+    Interrupted,
 }
 
 impl WorkerActor {
@@ -642,6 +679,11 @@ impl WorkerActor {
         rx: &mut mpsc::Receiver<ActorCommand>,
     ) {
         let current = self.read_current_state();
+
+        if self.is_assignment_loss(issue) {
+            self.handle_assignment_loss(current, correlation).await;
+            return;
+        }
 
         match (current, issue.state) {
             (WorkerState::Discovered, TrackerIssueState::Active)
@@ -749,10 +791,15 @@ impl WorkerActor {
                 max_attempts = self.engine_policy.max_attempts,
                 "launching worker (retry-budget loop)",
             );
-            let outcome = self.launch_once(issue, correlation, &workspace_dir).await;
+            let outcome = self
+                .launch_once(issue, correlation, &workspace_dir, rx)
+                .await;
 
             match outcome {
-                Some(WorkerOutcome::CleanExit) => {
+                LaunchStepResult::Outcome {
+                    outcome: WorkerOutcome::CleanExit,
+                    deferred_tracker,
+                } => {
                     // Advance to `AwaitingReview` so the tracker can later
                     // promote to `TerminalSuccess`. Counter is not reset —
                     // the state machine forbids re-entering `Active` after
@@ -764,9 +811,18 @@ impl WorkerActor {
                         correlation,
                     )
                     .await;
+                    if deferred_tracker
+                        .as_ref()
+                        .is_some_and(|event| event.state == TrackerIssueState::Terminal)
+                    {
+                        self.try_terminal_success(correlation).await;
+                    }
                     return;
                 }
-                Some(WorkerOutcome::NonCleanExit { .. }) => {
+                LaunchStepResult::Outcome {
+                    outcome: WorkerOutcome::NonCleanExit { .. },
+                    ..
+                } => {
                     let next_failures = self.increment_consecutive_failures();
                     let max_attempts = self.engine_policy.max_attempts;
                     if max_attempts <= next_failures {
@@ -817,8 +873,14 @@ impl WorkerActor {
                     // Sleep the Backoff window, but abort cleanly on shutdown
                     // or on an explicit Shutdown command from the orchestrator
                     // so the daemon honours its bounded shutdown contract.
-                    if !self.sleep_backoff(delay, rx).await {
-                        return;
+                    match self.sleep_backoff(delay, rx).await {
+                        BackoffSleepResult::Completed => {}
+                        BackoffSleepResult::AssignmentLost => {
+                            self.handle_assignment_loss(WorkerState::Backoff, correlation)
+                                .await;
+                            return;
+                        }
+                        BackoffSleepResult::Interrupted => return,
                     }
 
                     let advanced = self
@@ -834,14 +896,27 @@ impl WorkerActor {
                     }
                     // Loop and try the next attempt.
                 }
-                Some(WorkerOutcome::TurnBudgetExhausted) | Some(WorkerOutcome::Stalled { .. }) => {
+                LaunchStepResult::Outcome {
+                    outcome: WorkerOutcome::TurnBudgetExhausted,
+                    ..
+                }
+                | LaunchStepResult::Outcome {
+                    outcome: WorkerOutcome::Stalled { .. },
+                    ..
+                } => {
                     // Agent-authored failures: re-running with the same
                     // prompt and budget repeats the same outcome. Route
                     // directly to TerminalFailure with no Backoff cycle,
                     // matching SPEC.md §9.5.
                     let outcome_reason = match outcome {
-                        Some(WorkerOutcome::TurnBudgetExhausted) => "turn_budget_exhausted",
-                        Some(WorkerOutcome::Stalled { .. }) => "stalled",
+                        LaunchStepResult::Outcome {
+                            outcome: WorkerOutcome::TurnBudgetExhausted,
+                            ..
+                        } => "turn_budget_exhausted",
+                        LaunchStepResult::Outcome {
+                            outcome: WorkerOutcome::Stalled { .. },
+                            ..
+                        } => "stalled",
                         _ => unreachable!(),
                     };
                     info!(
@@ -860,7 +935,15 @@ impl WorkerActor {
                     .await;
                     return;
                 }
-                None => {
+                LaunchStepResult::AssignmentLost => {
+                    self.handle_assignment_loss(WorkerState::Active, correlation)
+                        .await;
+                    return;
+                }
+                LaunchStepResult::Interrupted => {
+                    return;
+                }
+                LaunchStepResult::NoTerminal => {
                     warn!(
                         target: "orchestrator",
                         issue = %self.key.as_str(),
@@ -884,7 +967,8 @@ impl WorkerActor {
         issue: &NormalizedIssue,
         correlation: CorrelationId,
         workspace_dir: &std::path::Path,
-    ) -> Option<WorkerOutcome> {
+        rx: &mut mpsc::Receiver<ActorCommand>,
+    ) -> LaunchStepResult {
         let (events_tx, mut events_rx) = mpsc::channel::<SupervisedEvent>(64);
         let engine = Arc::clone(&self.engine);
         // Task 7.1f: build the per-worker tool registry. The factory
@@ -910,8 +994,10 @@ impl WorkerActor {
                 }),
             None => String::new(),
         };
-        let permission =
-            resolve_launch_permission(self.permission_strategy.as_ref(), workflow_snapshot.as_deref());
+        let permission = resolve_launch_permission(
+            self.permission_strategy.as_ref(),
+            workflow_snapshot.as_deref(),
+        );
         let ctx = build_worker_context(
             self.key.clone(),
             correlation,
@@ -922,23 +1008,55 @@ impl WorkerActor {
             permission,
         );
         let launch_handle = tokio::spawn(async move { engine.launch(ctx, events_tx).await });
+        let mut deferred_tracker: Option<NormalizedIssue> = None;
 
-        let mut terminal: Option<WorkerOutcome> = None;
-        while let Some(event) = events_rx.recv().await {
-            match event {
-                SupervisedEvent::Lifecycle(_) => {
-                    // Per-event observability is owned by the supervisor;
-                    // the orchestrator does not act on individual lifecycle
-                    // events for the MVP.
+        loop {
+            tokio::select! {
+                biased;
+                maybe_cmd = rx.recv() => {
+                    match maybe_cmd {
+                        Some(ActorCommand::Tracker(observed)) if self.is_assignment_loss(&observed) => {
+                            launch_handle.abort();
+                            let _ = launch_handle.await;
+                            return LaunchStepResult::AssignmentLost;
+                        }
+                        Some(ActorCommand::Tracker(observed)) => {
+                            deferred_tracker = Some(observed);
+                            debug!(
+                                target: "orchestrator",
+                                issue = %self.key.as_str(),
+                                "tracker event observed during active launch; deferring until launch outcome",
+                            );
+                        }
+                        Some(ActorCommand::Shutdown) | None => {
+                            launch_handle.abort();
+                            let _ = launch_handle.await;
+                            return LaunchStepResult::Interrupted;
+                        }
+                    }
                 }
-                SupervisedEvent::Exited(outcome) => {
-                    terminal = Some(outcome);
-                    break;
+                maybe_event = events_rx.recv() => {
+                    match maybe_event {
+                        Some(SupervisedEvent::Lifecycle(_)) => {
+                            // Per-event observability is owned by the supervisor;
+                            // the orchestrator does not act on individual lifecycle
+                            // events for the MVP.
+                        }
+                        Some(SupervisedEvent::Exited(outcome)) => {
+                            let _ = launch_handle.await;
+                            return LaunchStepResult::Outcome {
+                                outcome,
+                                deferred_tracker,
+                            };
+                        }
+                        None => {
+                            let _ = launch_handle.await;
+                            return LaunchStepResult::NoTerminal;
+                        }
+                    }
                 }
             }
         }
-        let _ = launch_handle.await;
-        terminal
     }
 
     /// Sleep the configured Backoff window. Returns `true` if the sleep
@@ -947,7 +1065,11 @@ impl WorkerActor {
     /// explicit `ActorCommand::Shutdown` arriving on the actor inbox, in
     /// which case the caller must unwind and let the actor's outer loop
     /// observe shutdown / terminal-end on the next iteration.
-    async fn sleep_backoff(&self, delay: Duration, rx: &mut mpsc::Receiver<ActorCommand>) -> bool {
+    async fn sleep_backoff(
+        &self,
+        delay: Duration,
+        rx: &mut mpsc::Receiver<ActorCommand>,
+    ) -> BackoffSleepResult {
         tokio::select! {
             biased;
             () = self.shutdown.wait() => {
@@ -956,38 +1078,38 @@ impl WorkerActor {
                     issue = %self.key.as_str(),
                     "Backoff sleep aborted by shutdown signal",
                 );
-                false
+                BackoffSleepResult::Interrupted
             }
             cmd = rx.recv() => {
-                if matches!(cmd, Some(ActorCommand::Shutdown) | None) {
-                    debug!(
-                        target: "orchestrator",
-                        issue = %self.key.as_str(),
-                        "Backoff sleep aborted by inbox shutdown",
-                    );
-                    false
-                } else {
-                    // Tracker events delivered during a Backoff window are
-                    // intentionally dropped: the actor is committed to the
-                    // current launch attempt and the next tracker event will
-                    // be re-evaluated against the freshly resumed Active
-                    // state once the loop continues. Keep sleeping for the
-                    // remaining window — we approximate this by sleeping the
-                    // full delay; missing a partial window here is acceptable
-                    // because Backoff is a coarse-grained mechanism.
-                    debug!(
-                        target: "orchestrator",
-                        issue = %self.key.as_str(),
-                        "tracker event during Backoff window; sleeping out the remainder",
-                    );
-                    tokio::select! {
-                        biased;
-                        () = self.shutdown.wait() => false,
-                        () = tokio::time::sleep(delay) => true,
+                match cmd {
+                    Some(ActorCommand::Tracker(observed)) if self.is_assignment_loss(&observed) => {
+                        BackoffSleepResult::AssignmentLost
+                    }
+                    Some(ActorCommand::Tracker(_)) => {
+                        // Tracker events delivered during a Backoff window are
+                        // intentionally dropped unless they prove assignment loss.
+                        debug!(
+                            target: "orchestrator",
+                            issue = %self.key.as_str(),
+                            "tracker event during Backoff window; sleeping out the remainder",
+                        );
+                        tokio::select! {
+                            biased;
+                            () = self.shutdown.wait() => BackoffSleepResult::Interrupted,
+                            () = tokio::time::sleep(delay) => BackoffSleepResult::Completed,
+                        }
+                    }
+                    Some(ActorCommand::Shutdown) | None => {
+                        debug!(
+                            target: "orchestrator",
+                            issue = %self.key.as_str(),
+                            "Backoff sleep aborted by inbox shutdown",
+                        );
+                        BackoffSleepResult::Interrupted
                     }
                 }
             }
-            () = tokio::time::sleep(delay) => true,
+            () = tokio::time::sleep(delay) => BackoffSleepResult::Completed,
         }
     }
 
@@ -1068,6 +1190,50 @@ impl WorkerActor {
             return;
         }
 
+        self.cleanup_resources("terminal_success").await;
+    }
+
+    fn is_assignment_loss(&self, issue: &NormalizedIssue) -> bool {
+        self.assignee_admission
+            .as_ref()
+            .is_some_and(|admission| !admission.matches_issue(issue))
+    }
+
+    async fn handle_assignment_loss(&self, current: WorkerState, correlation: CorrelationId) {
+        let allowed_from = matches!(
+            current,
+            WorkerState::Active | WorkerState::Backoff | WorkerState::AwaitingReview
+        );
+        if !allowed_from {
+            debug!(
+                target: "orchestrator",
+                issue = %self.key.as_str(),
+                state = ?current,
+                "assignment-loss signal ignored for non-running issue state",
+            );
+            return;
+        }
+
+        info!(
+            target: "orchestrator",
+            issue = %self.key.as_str(),
+            state = ?current,
+            "issue reassigned away from configured assignee; cleaning without retry",
+        );
+        if self
+            .commit_transition(
+                current,
+                WorkerState::Cleaning,
+                TransitionTrigger::TrackerEvent,
+                correlation,
+            )
+            .await
+        {
+            self.cleanup_resources("assignment_loss").await;
+        }
+    }
+
+    async fn cleanup_resources(&self, reason: &'static str) {
         // Task 7.1d: walk every worktree the agent registered for this
         // issue and call `wt.remove` per entry. Iteration is in
         // registration order so per-arc logs are stable. A removal
@@ -1084,6 +1250,7 @@ impl WorkerActor {
                         issue = %self.key.as_str(),
                         repo = %entry.repo.as_str(),
                         path = %entry.path.display(),
+                        reason,
                         "worktree removed",
                     );
                 }
@@ -1095,6 +1262,7 @@ impl WorkerActor {
                         repo = %entry.repo.as_str(),
                         path = %entry.path.display(),
                         error = %err,
+                        reason,
                         "worktree remove failed",
                     );
                 }
@@ -1106,6 +1274,7 @@ impl WorkerActor {
                 debug!(
                     target: "orchestrator",
                     issue = %self.key.as_str(),
+                    reason,
                     "session tempdir removed",
                 );
             }
@@ -1115,6 +1284,7 @@ impl WorkerActor {
                     target: "orchestrator",
                     issue = %self.key.as_str(),
                     error = %err,
+                    reason,
                     "session tempdir remove failed",
                 );
             }
@@ -1398,6 +1568,20 @@ mod tests {
         }
     }
 
+    struct PendingEngine;
+
+    #[async_trait]
+    impl EngineLauncher for PendingEngine {
+        async fn launch(
+            &self,
+            _ctx: WorkerContext,
+            _events: mpsc::Sender<SupervisedEvent>,
+        ) -> Result<WorkerOutcome, LaunchError> {
+            std::future::pending::<()>().await;
+            unreachable!("pending future is aborted by the assignment-loss path")
+        }
+    }
+
     /// Stub `WtTool` for the orchestrator's unit tests. `wt.remove` is the
     /// only method the orchestrator core invokes on this trait
     /// (`switch_create` belongs to the agent tool and is exercised in
@@ -1466,6 +1650,27 @@ mod tests {
             description: String::new(),
             state,
             labels: Vec::new(),
+            assignee_user_id: None,
+        }
+    }
+
+    fn assigned_issue_event(state: TrackerIssueState, assignee: &str) -> NormalizedIssue {
+        NormalizedIssue {
+            assignee_user_id: Some(assignee.to_string()),
+            ..issue_event(state)
+        }
+    }
+
+    fn slow_assignment_loss_backoff_policy() -> EnginePolicy {
+        EnginePolicy {
+            backoff: crate::engine::policy::BackoffPolicy {
+                initial: std::time::Duration::from_secs(5),
+                max: std::time::Duration::from_secs(5),
+                multiplier: 1.0,
+            },
+            backoff_floor: std::time::Duration::from_secs(5),
+            max_attempts: 2,
+            ..EnginePolicy::default()
         }
     }
 
@@ -1526,6 +1731,139 @@ mod tests {
         let _ = tokio::time::timeout(std::time::Duration::from_secs(2), handle).await;
     }
 
+    #[tokio::test]
+    async fn active_assignment_loss_routes_to_cleaning_without_retry() {
+        let engine = Arc::new(PendingEngine);
+        let (orch, tx, shutdown) = fresh_orchestrator(engine);
+        let read_handle = orch.read_handle();
+        let orch = orch.with_assignee_admission(AssigneeAdmission::new("user-me").unwrap());
+        let handle = tokio::spawn(async move { orch.run().await });
+
+        tx.send(assigned_issue_event(TrackerIssueState::Active, "user-me"))
+            .await
+            .expect("send assigned active");
+
+        let reached_active = wait_for_state(&read_handle, WorkerState::Active).await;
+        assert!(
+            reached_active,
+            "issue should reach Active before reassignment"
+        );
+
+        tx.send(assigned_issue_event(
+            TrackerIssueState::Active,
+            "user-other",
+        ))
+        .await
+        .expect("send reassignment away");
+
+        let reached_cleaning = wait_for_state(&read_handle, WorkerState::Cleaning).await;
+        assert!(
+            reached_cleaning,
+            "assignment loss must route the active issue to Cleaning",
+        );
+
+        shutdown.trigger();
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(2), handle).await;
+    }
+
+    #[tokio::test]
+    async fn backoff_assignment_loss_routes_to_cleaning_without_relaunch() {
+        let launches = Arc::new(AtomicUsize::new(0));
+        let engine = Arc::new(StubEngine {
+            outcome: WorkerOutcome::NonCleanExit { code: 1 },
+            launches: Arc::clone(&launches),
+        });
+        let (orch, tx, shutdown) = fresh_orchestrator(engine);
+        let read_handle = orch.read_handle();
+        let orch = orch
+            .with_engine_policy(slow_assignment_loss_backoff_policy())
+            .with_assignee_admission(AssigneeAdmission::new("user-me").unwrap());
+        let handle = tokio::spawn(async move { orch.run().await });
+
+        tx.send(assigned_issue_event(TrackerIssueState::Active, "user-me"))
+            .await
+            .expect("send assigned active");
+
+        let reached_backoff = wait_for_state(&read_handle, WorkerState::Backoff).await;
+        assert!(
+            reached_backoff,
+            "issue should reach Backoff before reassignment"
+        );
+
+        tx.send(assigned_issue_event(
+            TrackerIssueState::Active,
+            "user-other",
+        ))
+        .await
+        .expect("send reassignment away");
+
+        let reached_cleaning = wait_for_state(&read_handle, WorkerState::Cleaning).await;
+        assert!(
+            reached_cleaning,
+            "assignment loss must route the backoff issue to Cleaning",
+        );
+        assert_eq!(
+            launches.load(AtomicOrdering::SeqCst),
+            1,
+            "assignment loss during Backoff must not relaunch the worker",
+        );
+
+        shutdown.trigger();
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(2), handle).await;
+    }
+
+    #[tokio::test]
+    async fn awaiting_review_assignment_loss_routes_to_cleaning() {
+        let engine = Arc::new(StubEngine {
+            outcome: WorkerOutcome::CleanExit,
+            launches: Arc::new(AtomicUsize::new(0)),
+        });
+        let (orch, tx, shutdown) = fresh_orchestrator(engine);
+        let read_handle = orch.read_handle();
+        let orch = orch.with_assignee_admission(AssigneeAdmission::new("user-me").unwrap());
+        let handle = tokio::spawn(async move { orch.run().await });
+
+        tx.send(assigned_issue_event(TrackerIssueState::Active, "user-me"))
+            .await
+            .expect("send assigned active");
+
+        let reached_awaiting_review =
+            wait_for_state(&read_handle, WorkerState::AwaitingReview).await;
+        assert!(
+            reached_awaiting_review,
+            "issue should reach AwaitingReview before reassignment"
+        );
+
+        tx.send(assigned_issue_event(
+            TrackerIssueState::Active,
+            "user-other",
+        ))
+        .await
+        .expect("send reassignment away");
+
+        let reached_cleaning = wait_for_state(&read_handle, WorkerState::Cleaning).await;
+        assert!(
+            reached_cleaning,
+            "assignment loss must route the awaiting-review issue to Cleaning",
+        );
+
+        shutdown.trigger();
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(2), handle).await;
+    }
+
+    async fn wait_for_state(read_handle: &OrchestratorReadHandle, expected: WorkerState) -> bool {
+        for _ in 0..200 {
+            if read_handle
+                .issue(&IssueId::new("ENG-1"))
+                .is_some_and(|state| state.state == expected)
+            {
+                return true;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+        false
+    }
+
     fn sample_issue() -> NormalizedIssue {
         NormalizedIssue {
             issue: IssueId::new("RDM-7"),
@@ -1533,6 +1871,7 @@ mod tests {
             description: "Repo: reedom/foo\n\nAdd a README.".to_string(),
             state: TrackerIssueState::Active,
             labels: vec!["docs".to_string()],
+            assignee_user_id: None,
         }
     }
 
@@ -1571,17 +1910,17 @@ mod tests {
     #[test]
     fn resolve_launch_permission_without_strategy_returns_legacy_stub() {
         let resolved = resolve_launch_permission(None, None);
-        assert!(matches!(resolved.mode, PermissionMode::Allowlist { ref settings_path } if settings_path.as_os_str().is_empty()));
+        assert!(
+            matches!(resolved.mode, PermissionMode::Allowlist { ref settings_path } if settings_path.as_os_str().is_empty())
+        );
         assert_eq!(resolved.sandbox, SandboxMode::WorkspaceWrite);
         assert_eq!(resolved.elicitations, ElicitationsMode::Reject);
     }
 
     #[test]
     fn resolve_launch_permission_propagates_dangerous_strategy() {
-        let resolved = resolve_launch_permission(
-            Some(&PermissionStrategy::DangerouslySkipPermissions),
-            None,
-        );
+        let resolved =
+            resolve_launch_permission(Some(&PermissionStrategy::DangerouslySkipPermissions), None);
         assert!(matches!(resolved.mode, PermissionMode::DangerousFallback));
         assert_eq!(resolved.mode_source, PermissionSource::Operator);
     }

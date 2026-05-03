@@ -81,6 +81,7 @@ fn sample_issue(_repo: &str, issue: &str) -> NormalizedIssue {
         description: "test".to_string(),
         state: TrackerIssueState::Active,
         labels: Vec::new(),
+        assignee_user_id: None,
     }
 }
 

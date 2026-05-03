@@ -207,6 +207,7 @@ fn normalize(envelope: WebhookEnvelope, _state: &WebhookState) -> NormalizedIssu
         description: data.description.unwrap_or_default(),
         state: bucket,
         labels,
+        assignee_user_id: data.assignee.map(|assignee| assignee.id),
     }
 }
 
@@ -232,6 +233,13 @@ struct WebhookIssueData {
     state: WebhookStateField,
     #[serde(default)]
     labels: Option<WebhookLabelsEnvelope>,
+    #[serde(default)]
+    assignee: Option<WebhookAssigneeField>,
+}
+
+#[derive(Debug, Deserialize)]
+struct WebhookAssigneeField {
+    id: String,
 }
 
 #[derive(Debug, Deserialize)]

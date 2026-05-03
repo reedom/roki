@@ -15,6 +15,7 @@
 //! Polling cadence cap (<= 5 min per scope, Requirement 3.2) and 429
 //! exponential backoff (Requirement 3.3) are enforced inside [`linear`].
 
+pub mod assignee;
 pub mod linear;
 pub mod model;
 pub mod webhook;

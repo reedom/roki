@@ -150,6 +150,11 @@ pub struct LinearConfig {
     /// the only way for an integration test to drive the bootstrap with a
     /// known secret.
     pub webhook_secret_file: Option<PathBuf>,
+
+    /// Linear assignee selector. Required. The special value `me`
+    /// resolves to the Linear viewer for the configured API token during
+    /// bootstrap; any other value is resolved through Linear's users query.
+    pub assignee: String,
 }
 
 /// Resolved workspace-level workflow configuration (post-7.1a).
@@ -309,6 +314,11 @@ struct LinearFile {
     /// secret.
     #[serde(default)]
     webhook_secret_file: Option<PathBuf>,
+
+    /// Required Linear assignee selector. `me` means the Linear user
+    /// associated with the configured API token.
+    #[serde(default)]
+    assignee: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -675,10 +685,25 @@ fn resolve_linear_block(linear: Option<&LinearFile>) -> Result<LinearConfig, Con
         .token_env
         .clone()
         .unwrap_or_else(|| DEFAULT_LINEAR_TOKEN_ENV.to_string());
+    let assignee = match linear.assignee.as_deref() {
+        Some(value) if !value.trim().is_empty() => value.trim().to_string(),
+        Some(_) => {
+            return Err(ConfigError::InvalidField {
+                field: "linear.assignee".to_string(),
+                reason: "must not be empty".to_string(),
+            });
+        }
+        None => {
+            return Err(ConfigError::MissingField {
+                field: "linear.assignee".to_string(),
+            });
+        }
+    };
     Ok(LinearConfig {
         token_env,
         webhook_secret_env,
         webhook_secret_file,
+        assignee,
     })
 }
 
@@ -933,6 +958,7 @@ max_concurrent_workers = 3
 [linear]
 token_env = "MY_LINEAR_TOKEN"
 webhook_secret_env = "ROKI_LINEAR_WEBHOOK_SECRET"
+assignee = "me"
 
 [workflow]
 path = "/srv/policy/WORKFLOW.md"
@@ -968,6 +994,7 @@ repo = "owner/core"
         assert_eq!(cfg.repos.len(), 1);
         assert_eq!(cfg.repos[0].repo, "owner/core");
         assert_eq!(cfg.linear.webhook_secret_env, "ROKI_LINEAR_WEBHOOK_SECRET");
+        assert_eq!(cfg.linear.assignee, "me");
         assert_eq!(
             cfg.workflow.path.to_str().unwrap(),
             "/srv/policy/WORKFLOW.md"
@@ -1007,6 +1034,7 @@ strategy = "dangerously_skip_permissions"
 [linear]
 token_env = "MY_LINEAR_TOKEN"
 webhook_secret_env = "ROKI_LINEAR_WEBHOOK_SECRET"
+assignee = "me"
 
 [workflow]
 path = "/srv/policy/WORKFLOW.md"
@@ -1176,6 +1204,7 @@ strategy = "dangerously_skip_permissions"
 [linear]
 token_file = "{}"
 webhook_secret_env = "ROKI_LINEAR_WEBHOOK_SECRET"
+assignee = "me"
 
 [workflow]
 path = "/srv/policy/WORKFLOW.md"
@@ -1207,6 +1236,7 @@ strategy = "dangerously_skip_permissions"
 [linear]
 token_env = "MY_LINEAR_TOKEN"
 webhook_secret_env = "ROKI_LINEAR_WEBHOOK_SECRET"
+assignee = "me"
 
 [workflow]
 path = "/srv/policy/WORKFLOW.md"
@@ -1266,6 +1296,7 @@ claude_binary = "/usr/local/bin/claude-test"
 [linear]
 token_env = "MY_LINEAR_TOKEN"
 webhook_secret_env = "ROKI_LINEAR_WEBHOOK_SECRET"
+assignee = "me"
 
 [workflow]
 path = "/srv/policy/WORKFLOW.md"
@@ -1289,6 +1320,7 @@ strategy = "dangerously_skip_permissions"
 [linear]
 token_env = "MY_LINEAR_TOKEN"
 webhook_secret_env = "ROKI_LINEAR_WEBHOOK_SECRET"
+assignee = "me"
 
 [workflow]
 path = "/srv/policy/WORKFLOW.md"
@@ -1319,6 +1351,7 @@ max_concurrent_workers = 3
 [linear]
 token_env = "MY_LINEAR_TOKEN"
 webhook_secret_env = "ROKI_LINEAR_WEBHOOK_SECRET"
+assignee = "me"
 
 [workflow]
 path = "/srv/policy/WORKFLOW.md"
@@ -1360,6 +1393,7 @@ repo = "owner/infra"
         let body = r#"
 [linear]
 token_env = "MY_LINEAR_TOKEN"
+assignee = "me"
 
 [workflow]
 path = "/srv/policy/WORKFLOW.md"
@@ -1376,6 +1410,49 @@ repo = "owner/core"
     }
 
     #[test]
+    fn linear_block_requires_assignee() {
+        let body = r#"
+[linear]
+token_env = "MY_LINEAR_TOKEN"
+webhook_secret_env = "ROKI_LINEAR_WEBHOOK_SECRET"
+
+[workflow]
+path = "/srv/policy/WORKFLOW.md"
+
+[permissions]
+strategy = "dangerously_skip_permissions"
+
+[[repos]]
+repo = "owner/core"
+"#;
+        let err = Config::load_from_str(body, &fixture_path(), &env_with_token())
+            .expect_err("missing assignee must be refused");
+        assert_eq!(err.field(), Some("linear.assignee"));
+    }
+
+    #[test]
+    fn linear_block_rejects_empty_assignee() {
+        let body = r#"
+[linear]
+token_env = "MY_LINEAR_TOKEN"
+webhook_secret_env = "ROKI_LINEAR_WEBHOOK_SECRET"
+assignee = "  "
+
+[workflow]
+path = "/srv/policy/WORKFLOW.md"
+
+[permissions]
+strategy = "dangerously_skip_permissions"
+
+[[repos]]
+repo = "owner/core"
+"#;
+        let err = Config::load_from_str(body, &fixture_path(), &env_with_token())
+            .expect_err("empty assignee must be refused");
+        assert_eq!(err.field(), Some("linear.assignee"));
+    }
+
+    #[test]
     fn workflow_block_is_required() {
         // Requirement 2.4: refuse to start if the workspace-level workflow
         // path is absent.
@@ -1383,6 +1460,7 @@ repo = "owner/core"
 [linear]
 token_env = "MY_LINEAR_TOKEN"
 webhook_secret_env = "ROKI_LINEAR_WEBHOOK_SECRET"
+assignee = "me"
 
 [permissions]
 strategy = "dangerously_skip_permissions"
@@ -1403,6 +1481,7 @@ repo = "owner/core"
 [linear]
 token_env = "MY_LINEAR_TOKEN"
 webhook_secret_env = "ROKI_LINEAR_WEBHOOK_SECRET"
+assignee = "me"
 
 [workflow]
 path = "/srv/policy/WORKFLOW.md"
@@ -1437,6 +1516,7 @@ repo = "owner/core"
 [linear]
 token_env = "MY_LINEAR_TOKEN"
 webhook_secret_env = "ROKI_LINEAR_WEBHOOK_SECRET"
+assignee = "me"
 
 [workflow]
 path = "/srv/policy/WORKFLOW.md"
@@ -1468,6 +1548,7 @@ workflow_path = "/srv/git/core/WORKFLOW.md"
 [linear]
 token_env = "MY_LINEAR_TOKEN"
 webhook_secret_env = "ROKI_LINEAR_WEBHOOK_SECRET"
+assignee = "me"
 
 [workflow]
 path = "/srv/policy/WORKFLOW.md"
@@ -1512,6 +1593,7 @@ key = "ENG"
 [linear]
 token_env = "MY_LINEAR_TOKEN"
 webhook_secret_env = "ROKI_LINEAR_WEBHOOK_SECRET"
+assignee = "me"
 
 [workflow]
 path = "/srv/policy/WORKFLOW.md"
@@ -1539,6 +1621,7 @@ repo = "owner/core"
 [linear]
 token_env = "MY_LINEAR_TOKEN"
 webhook_secret_env = "ROKI_LINEAR_WEBHOOK_SECRET"
+assignee = "me"
 
 [workflow]
 path = "/srv/policy/WORKFLOW.md"
@@ -1565,6 +1648,7 @@ repo = "owner/core"
 [linear]
 token_env = "MY_LINEAR_TOKEN"
 webhook_secret_env = "ROKI_LINEAR_WEBHOOK_SECRET"
+assignee = "me"
 endpoint = "http://127.0.0.1:9999/graphql"
 
 [workflow]

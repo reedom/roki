@@ -122,6 +122,7 @@ fn started_payload() -> Value {
                         "title": "bootstrap smoke",
                         "description": "drive the daemon end-to-end",
                         "state": { "type": "started", "name": "In Progress" },
+                        "assignee": { "id": "user-me" },
                         "labels": { "nodes": [] },
                         "team": { "key": "ENG" }
                     }
@@ -142,10 +143,23 @@ fn completed_payload() -> Value {
                         "title": "bootstrap smoke",
                         "description": "drive the daemon end-to-end",
                         "state": { "type": "completed", "name": "Done" },
+                        "assignee": { "id": "user-me" },
                         "labels": { "nodes": [] },
                         "team": { "key": "ENG" }
                     }
                 ]
+            }
+        }
+    })
+}
+
+fn viewer_payload() -> Value {
+    json!({
+        "data": {
+            "viewer": {
+                "id": "user-me",
+                "name": "Bootstrap User",
+                "email": "bootstrap@example.com"
             }
         }
     })
@@ -164,6 +178,7 @@ fn webhook_envelope() -> Value {
             "title": "bootstrap smoke",
             "description": "Body text",
             "state": { "type": "started", "name": "In Progress" },
+            "assignee": { "id": "user-me" },
             "team": { "key": "ENG" },
             "labels": { "nodes": [ { "name": "bug" } ] }
         }
@@ -227,6 +242,7 @@ token_file = "{token_file_str}"
 endpoint = "{server_uri}/graphql"
 webhook_secret_env = "ROKI_BOOTSTRAP_TEST_WEBHOOK_SECRET"
 webhook_secret_file = "{webhook_secret_path_str}"
+assignee = "me"
 
 [workflow]
 path = "{workflow_path_str}"
@@ -356,6 +372,12 @@ async fn bootstrap_drives_issue_through_documented_happy_path() {
     // `completed` payload so the actor advances through TerminalSuccess
     // → Cleaning end-to-end.
     let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/graphql"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(viewer_payload()))
+        .up_to_n_times(1)
+        .mount(&server)
+        .await;
     Mock::given(method("POST"))
         .and(path("/graphql"))
         .respond_with(ResponseTemplate::new(200).set_body_json(started_payload()))

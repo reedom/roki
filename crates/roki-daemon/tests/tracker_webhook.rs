@@ -66,6 +66,7 @@ fn issue_payload() -> serde_json::Value {
             "title": "Fix the thing",
             "description": "Body text",
             "state": { "type": "started", "name": "In Progress" },
+            "assignee": { "id": "user-me" },
             "team": { "key": "ENG" },
             "labels": { "nodes": [ { "name": "bug" }, { "name": "p1" } ] }
         }
@@ -93,6 +94,7 @@ async fn correctly_signed_payload_emits_normalized_issue() {
     assert_eq!(received.description, "Body text");
     assert_eq!(received.state, IssueState::Active);
     assert_eq!(received.labels, vec!["bug".to_string(), "p1".to_string()]);
+    assert_eq!(received.assignee_user_id.as_deref(), Some("user-me"));
 }
 
 #[tokio::test]

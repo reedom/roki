@@ -70,6 +70,7 @@ impl StubLinearReader {
                 RecoveryIssueLifecycle::Unknown => TrackerIssueState::Other,
             },
             labels: Vec::new(),
+            assignee_user_id: Some("user-me".to_string()),
         };
         (lifecycle, payload)
     }

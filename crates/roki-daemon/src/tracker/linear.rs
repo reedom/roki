@@ -22,13 +22,10 @@
 //! * a `tokio::sync::oneshot::Receiver<()>` shutdown channel;
 //! * an `mpsc::Sender<NormalizedIssue>` sink the orchestrator drains.
 //!
-//! Post-task-7.1c the per-scope filter is gone: the adapter polls every
-//! active issue the API token can see and the agent decides on its first
-//! turn whether the ticket is in scope. [`ScopeWatch`] survives only as a
-//! build-compat shim that stamps a `RepoId` onto emitted [`NormalizedIssue`]
-//! events — the orchestrator already ignores `NormalizedIssue.repo`. The
-//! shim disappears with the bootstrap rewrite in 7.1f, when `runtime.rs`
-//! switches to a single workspace-level constructor.
+//! Post-task-8 the poller requests the active issue slice assigned to the
+//! configured Linear user. Assignment is still rechecked downstream by the
+//! shared admission component so webhook and polling observations follow the
+//! same worker-admission rule.
 
 use std::sync::Arc;
 use std::sync::Mutex;
@@ -47,6 +44,7 @@ use tracing::{debug, info, warn};
 use crate::config::SecretString;
 use crate::orchestrator::state::{IssueId, RepoId};
 use crate::tools::RateLimitState;
+use crate::tracker::assignee::AssigneeAdmission;
 use crate::tracker::model::{IssueState, NormalizedIssue};
 use crate::tracker::{RefreshAccepted, TrackerRefresh};
 
@@ -68,11 +66,9 @@ const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 /// Build-compat shim carrying the `RepoId` stamp the tracker writes onto
 /// emitted [`NormalizedIssue`] events.
 ///
-/// Post-task-7.1c the polling adapter does NOT filter by team or label; it
-/// queries every active issue the API token can see. The orchestrator
-/// already ignores `NormalizedIssue.repo`. This struct exists only so the
-/// 7.1f bootstrap rewrite in `runtime.rs` can be done as a single follow-up
-/// without an intermediate breaking change.
+/// Post-task-7.1c the polling adapter does NOT filter by team or label; post
+/// task 8 it filters by the resolved Linear assignee. This struct is retained
+/// only as the compatibility wrapper for the constructor's historical shape.
 #[derive(Debug, Clone)]
 pub struct ScopeWatch {
     pub repo: RepoId,
@@ -94,6 +90,10 @@ pub struct LinearTrackerConfig {
     /// Shared rate-limit state. The `linear_graphql` proxy and the tracker
     /// both consult this view so a 429 from one path defers the other.
     pub rate_limit: Arc<dyn RateLimitState>,
+    /// Resolved Linear assignee admission predicate. Polling uses the user id
+    /// in the server-side issue filter and normalized events carry the
+    /// assignee id for the bridge's shared admission check.
+    pub assignee: AssigneeAdmission,
 }
 
 /// Per-scope mutable state shared between the polling loop and the
@@ -174,20 +174,19 @@ impl ScopeShared {
 /// Post-task-7.1c the tracker spawns exactly one workspace-level polling
 /// loop regardless of how many entries appear in [`LinearTrackerConfig`]'s
 /// `scopes` field — the agent-driven design eliminated per-scope
-/// pre-classification (see design-agent-driven-repo-selection.md). The
-/// first scope's `repo` is used as the build-compat stamp on emitted
-/// [`NormalizedIssue`] events; the orchestrator already ignores
-/// `NormalizedIssue.repo`.
+/// pre-classification (see design-agent-driven-repo-selection.md). Post-task-8
+/// that workspace poll is narrowed to the resolved Linear assignee.
 pub struct LinearTracker {
     endpoint: String,
     cadence: Duration,
     /// Single workspace-level polling target. The first entry from
     /// `LinearTrackerConfig.scopes` is consumed; additional entries are
-    /// dropped because the post-task-7.1c poller queries the entire Linear
-    /// workspace the API token can see.
+    /// dropped because the post-task-7.1c poller is workspace-level and
+    /// post-task-8 narrows that stream by resolved Linear assignee.
     scope: ScopeWatch,
     token: SecretString,
     rate_limit: Arc<dyn RateLimitState>,
+    assignee: AssigneeAdmission,
     http: reqwest::Client,
     /// Single workspace-level shared state. Cloned into the [`LinearTrackerHandle`]
     /// so nudges reach the workspace poller.
@@ -220,6 +219,7 @@ impl LinearTracker {
             scope,
             token: config.token,
             rate_limit: config.rate_limit,
+            assignee: config.assignee,
             http,
             scope_state,
         }
@@ -250,6 +250,7 @@ impl LinearTracker {
         let endpoint = Arc::new(self.endpoint);
         let token = Arc::new(self.token);
         let rate_limit = self.rate_limit.clone();
+        let assignee = self.assignee.clone();
         let http = self.http.clone();
         let cadence = self.cadence;
         let scope = self.scope.clone();
@@ -276,6 +277,7 @@ impl LinearTracker {
                 endpoint,
                 token,
                 rate_limit,
+                assignee,
                 http,
                 cadence,
                 workspace_sink,
@@ -360,6 +362,7 @@ async fn run_scope(
     endpoint: Arc<String>,
     token: Arc<SecretString>,
     rate_limit: Arc<dyn RateLimitState>,
+    assignee: AssigneeAdmission,
     http: reqwest::Client,
     cadence: Duration,
     sink: mpsc::Sender<NormalizedIssue>,
@@ -429,6 +432,7 @@ async fn run_scope(
             token.expose(),
             &scope,
             rate_limit.as_ref(),
+            &assignee,
         )
         .await
         {
@@ -489,10 +493,11 @@ async fn poll_once(
     token: &str,
     scope: &ScopeWatch,
     rate_limit: &dyn RateLimitState,
+    assignee: &AssigneeAdmission,
 ) -> Result<Vec<NormalizedIssue>, PollError> {
     let body = json!({
         "query": ACTIVE_ISSUES_QUERY,
-        "variables": active_issues_variables(),
+        "variables": active_issues_variables(assignee.user_id()),
     });
 
     let response = http
@@ -583,24 +588,24 @@ fn clamp_cadence(cadence: Duration) -> Duration {
     cadence
 }
 
-/// GraphQL query that fetches the active-issue slice for the entire
-/// workspace the API token can see.
+/// GraphQL query that fetches the active-issue slice for the configured
+/// Linear assignee.
 ///
 /// The query intentionally requests just the fields [`NormalizedIssue`]
 /// needs (Requirement 3.4) so we do not pull more from Linear than necessary.
-/// Post-task-7.1c the query no longer narrows by team/label — the daemon
-/// admits every active issue and the agent's first turn decides whether the
-/// ticket is in scope (see design-agent-driven-repo-selection.md).
-const ACTIVE_ISSUES_QUERY: &str = "query ActiveIssues($filter: IssueFilter, $first: Int) {\n  issues(filter: $filter, first: $first) {\n    nodes {\n      id\n      identifier\n      title\n      description\n      state { type name }\n      labels { nodes { name } }\n    }\n  }\n}";
+/// The filter narrows by assignee id. The normalized response still carries
+/// `assignee { id }` so the shared admission path can fail closed if Linear
+/// ever returns an unassigned or differently assigned issue.
+const ACTIVE_ISSUES_QUERY: &str = "query ActiveIssues($filter: IssueFilter, $first: Int) {\n  issues(filter: $filter, first: $first) {\n    nodes {\n      id\n      identifier\n      title\n      description\n      state { type name }\n      assignee { id }\n      labels { nodes { name } }\n    }\n  }\n}";
 
 /// Build the `IssueFilter` for the workspace poller.
 ///
-/// Post-task-7.1c the daemon no longer pre-classifies issues by team or
-/// label. The polling tracker requests every active issue the API token can
-/// see; the agent decides on its first turn whether the ticket is in scope.
-fn active_issues_variables() -> Value {
+fn active_issues_variables(assignee_id: &str) -> Value {
     let active_states = json!({ "type": { "in": ["unstarted", "started"] } });
-    let filter = json!({ "state": active_states });
+    let filter = json!({
+        "state": active_states,
+        "assignee": { "id": { "eq": assignee_id } },
+    });
     json!({ "filter": filter, "first": 100 })
 }
 
@@ -626,6 +631,7 @@ fn node_to_normalized(node: IssueNode) -> NormalizedIssue {
         description: node.description.unwrap_or_default(),
         state,
         labels,
+        assignee_user_id: node.assignee.map(|assignee| assignee.id),
     }
 }
 
@@ -666,6 +672,13 @@ struct IssueNode {
     state: StateField,
     #[serde(default)]
     labels: Option<LabelsEnvelope>,
+    #[serde(default)]
+    assignee: Option<AssigneeField>,
+}
+
+#[derive(Debug, Deserialize)]
+struct AssigneeField {
+    id: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -761,13 +774,11 @@ mod tests {
     }
 
     #[test]
-    fn active_issues_variables_filters_only_by_active_state() {
-        // Post-task-7.1c: the per-scope team/label filter is gone; the
-        // daemon polls every active issue the API token can see and the
-        // agent decides which tickets are in scope on its first turn.
-        let vars = active_issues_variables();
+    fn active_issues_variables_filters_by_active_state_and_assignee() {
+        let vars = active_issues_variables("user-me");
         assert_eq!(vars["filter"]["state"]["type"]["in"][0], "unstarted");
         assert_eq!(vars["filter"]["state"]["type"]["in"][1], "started");
+        assert_eq!(vars["filter"]["assignee"]["id"]["eq"], "user-me");
         assert!(vars["filter"]["team"].is_null());
         assert!(vars["filter"]["labels"].is_null());
     }
@@ -799,6 +810,9 @@ mod tests {
             labels: Some(LabelsEnvelope {
                 nodes: vec![LabelNode { name: "bug".into() }],
             }),
+            assignee: Some(AssigneeField {
+                id: "user-me".into(),
+            }),
         };
         let _ = scope; // post-7.1f: scope is no longer threaded into node_to_normalized
         let normalized = node_to_normalized(node);
@@ -807,6 +821,7 @@ mod tests {
         assert_eq!(normalized.description, "body");
         assert_eq!(normalized.state, IssueState::Active);
         assert_eq!(normalized.labels, vec!["bug".to_string()]);
+        assert_eq!(normalized.assignee_user_id.as_deref(), Some("user-me"));
     }
 
     #[test]
@@ -824,12 +839,14 @@ mod tests {
                 name: None,
             },
             labels: None,
+            assignee: None,
         };
         let _ = scope;
         let normalized = node_to_normalized(node);
         assert_eq!(normalized.state, IssueState::Other);
         assert_eq!(normalized.description, "");
         assert!(normalized.labels.is_empty());
+        assert!(normalized.assignee_user_id.is_none());
     }
 
     fn idle_scope_state() -> Arc<ScopeShared> {

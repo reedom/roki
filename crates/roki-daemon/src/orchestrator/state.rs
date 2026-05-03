@@ -262,14 +262,17 @@ pub const fn legal_transition(from: WorkerState, to: WorkerState) -> bool {
         (Active, Backoff) => true,
         (Active, Stalled) => true,
         (Active, TerminalFailure) => true,
+        (Active, Cleaning) => true,
 
         // Backoff and stall recovery.
         (Backoff, Active) => true,
+        (Backoff, Cleaning) => true,
         (Stalled, Backoff) => true,
 
         // Review loop.
         (AwaitingReview, TerminalSuccess) => true,
         (AwaitingReview, Active) => true,
+        (AwaitingReview, Cleaning) => true,
 
         // Cleanup interim and terminal-end.
         (TerminalSuccess, Cleaning) => true,
@@ -317,12 +320,15 @@ mod tests {
             (Active, Backoff, true, false),
             (Active, Stalled, true, false),
             (Active, TerminalFailure, true, false),
+            (Active, Cleaning, true, false),
             // Backoff / stall recovery.
             (Backoff, Active, true, false),
+            (Backoff, Cleaning, true, false),
             (Stalled, Backoff, true, false),
             // Review loop.
             (AwaitingReview, TerminalSuccess, true, true),
             (AwaitingReview, Active, true, false),
+            (AwaitingReview, Cleaning, true, false),
             // Cleanup interim.
             (TerminalSuccess, Cleaning, true, true),
         ]

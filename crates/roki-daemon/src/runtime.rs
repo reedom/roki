@@ -69,6 +69,7 @@ use crate::shutdown::{
     SHUTDOWN_WINDOW, ShutdownSignal, await_workers_with_window, install_signal_handlers,
 };
 use crate::tools::{GhqTool, NoopRateLimit, RateLimitState, RealGhq, RealWt, WtTool};
+use crate::tracker::assignee::resolve_linear_assignee;
 use crate::tracker::linear::{LinearTracker, LinearTrackerConfig, ScopeWatch};
 use crate::tracker::model::NormalizedIssue;
 use crate::tracker::webhook::{WebhookState, router as webhook_router};
@@ -308,6 +309,26 @@ pub async fn run_with_shutdown(
         .or_else(|| std::env::var("ROKI_LINEAR_ENDPOINT").ok())
         .unwrap_or_else(|| DEFAULT_LINEAR_ENDPOINT.to_string());
 
+    let assignee_admission = resolve_linear_assignee(
+        &linear_endpoint,
+        &config.linear_token,
+        &config.linear.assignee,
+        Arc::clone(&rate_limit),
+    )
+    .await
+    .with_context(|| {
+        format!(
+            "failed to resolve config field `linear.assignee` selector `{}`",
+            config.linear.assignee,
+        )
+    })?;
+    info!(
+        target: "tracker.assignee",
+        selector = %config.linear.assignee,
+        assignee_user_id = %assignee_admission.user_id(),
+        "resolved Linear assignee admission filter",
+    );
+
     let mut recovery_repos: Vec<RecoveryRepoInput> = Vec::with_capacity(config.repos.len());
     for repo in &config.repos {
         match ghq.list_path(&repo.repo).await {
@@ -335,6 +356,7 @@ pub async fn run_with_shutdown(
         linear_endpoint.clone(),
         crate::config::SecretString::new(config.linear_token.expose().to_string()),
         Arc::clone(&rate_limit),
+        assignee_admission.clone(),
     );
 
     let recovery_pattern = config.recovery.issue_branch_pattern.clone();
@@ -378,7 +400,8 @@ pub async fn run_with_shutdown(
         .with_engine_policy(engine_policy)
         .with_tool_factory(tool_factory)
         .with_workflow(workflow_snapshotter)
-        .with_permission_strategy(config.permission_strategy.clone());
+        .with_permission_strategy(config.permission_strategy.clone())
+        .with_assignee_admission(assignee_admission.clone());
     let orchestrator_read = orchestrator.read_handle();
     info!(
         decisions = recovery_decisions.len(),
@@ -410,7 +433,7 @@ pub async fn run_with_shutdown(
     // build-compat shim (collapsed inside `LinearTracker::new` to a
     // single workspace-level loop); we pass one synthetic entry so the
     // existing constructor signature stays intact while the daemon polls
-    // every active issue the API token can see.
+    // active issues assigned to the resolved Linear assignee.
     let tracker = LinearTracker::new(LinearTrackerConfig {
         endpoint: linear_endpoint.clone(),
         cadence: config.polling_cadence,
@@ -419,6 +442,7 @@ pub async fn run_with_shutdown(
         }],
         token: SecretString::new(config.linear_token.expose().to_string()),
         rate_limit: Arc::clone(&rate_limit),
+        assignee: assignee_admission.clone(),
     });
     let (tracker_shutdown_tx, tracker_shutdown_rx) = oneshot::channel::<()>();
     let tracker_shutdowns: Vec<oneshot::Sender<()>> = vec![tracker_shutdown_tx];
@@ -429,7 +453,12 @@ pub async fn run_with_shutdown(
     drop(polling_tx_master);
 
     // ---- 7. tracker bridge ---------------------------------------------
-    let bridge = TrackerBridge::new(polling_rx_master, webhook_rx_master, inbox_tx);
+    let bridge = TrackerBridge::new_with_assignee(
+        polling_rx_master,
+        webhook_rx_master,
+        inbox_tx,
+        assignee_admission,
+    );
     let bridge_handle = tokio::spawn(bridge.run());
 
     // ---- 8. axum server bind -------------------------------------------
@@ -684,6 +713,7 @@ mod tests {
             token_env: "LINEAR_API_TOKEN".to_string(),
             webhook_secret_env: env_var.to_string(),
             webhook_secret_file: None,
+            assignee: "me".to_string(),
         }
     }
 
@@ -729,6 +759,7 @@ mod tests {
             token_env: "LINEAR_API_TOKEN".to_string(),
             webhook_secret_env: "ROKI_FAKE_WEBHOOK_SECRET".to_string(),
             webhook_secret_file: Some(path.clone()),
+            assignee: "me".to_string(),
         };
         // Even though `webhook_secret_env` names a real var, the
         // file-backed source wins so the test seam is deterministic.
@@ -747,6 +778,7 @@ mod tests {
             token_env: "LINEAR_API_TOKEN".to_string(),
             webhook_secret_env: String::new(),
             webhook_secret_file: Some(path.clone()),
+            assignee: "me".to_string(),
         };
         let err = resolve_workspace_webhook_secret_with(&linear, |_| None)
             .expect_err("empty file must be refused");
@@ -773,6 +805,7 @@ port = 7878
 [linear]
 token_env = "LINEAR_API_TOKEN"
 webhook_secret_env = "ROKI_LINEAR_WEBHOOK_SECRET"
+assignee = "me"
 
 [workflow]
 path = "/srv/policy/WORKFLOW.md"

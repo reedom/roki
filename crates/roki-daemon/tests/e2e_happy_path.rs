@@ -9,8 +9,8 @@
 //! * a `wiremock` server stands in for Linear's GraphQL endpoint;
 //! * a `LinearTracker` polls that server and emits `NormalizedIssue` events;
 //! * a `TrackerBridge` fans the polling stream into the orchestrator inbox
-//!   with `(repo, issue, target_state)` dedup;
-//! * an `Orchestrator` consumes the inbox and drives a per-`(repo, issue)`
+//!   with `(issue, target_state)` dedup;
+//! * an `Orchestrator` consumes the inbox and drives a per-issue
 //!   worker actor that launches the `fake_claude` example binary as the
 //!   `claude` engine adapter;
 //! * a `RecordingObserver` subscribed to the orchestrator's `EventBus`
@@ -60,6 +60,7 @@ use roki_daemon::orchestrator::state::{CorrelationId, RepoId, TransitionEvent, W
 use roki_daemon::orchestrator::tracker_bridge::TrackerBridge;
 use roki_daemon::shutdown::ShutdownSignal;
 use roki_daemon::tools::NoopRateLimit;
+use roki_daemon::tracker::assignee::AssigneeAdmission;
 use roki_daemon::tracker::linear::{LinearTracker, LinearTrackerConfig, ScopeWatch};
 use roki_daemon::tracker::model::NormalizedIssue;
 use serde_json::{Value, json};
@@ -70,6 +71,7 @@ use roki_daemon::session::SessionManager;
 use roki_daemon::worktrees::WorktreeRegistry;
 
 const TEST_TOKEN: &str = "lin_e2e_happy_path_token";
+const TEST_ASSIGNEE: &str = "user-me";
 const TEST_REPO: &str = "core";
 const TEST_ISSUE: &str = "ENG-1";
 
@@ -126,6 +128,7 @@ fn started_payload() -> Value {
                         "title": "Happy path",
                         "description": "drive the orchestrator end-to-end",
                         "state": { "type": "started", "name": "In Progress" },
+                        "assignee": { "id": TEST_ASSIGNEE },
                         "labels": { "nodes": [] },
                         "team": { "key": "ENG" }
                     }
@@ -149,6 +152,7 @@ fn completed_payload() -> Value {
                         "title": "Happy path",
                         "description": "drive the orchestrator end-to-end",
                         "state": { "type": "completed", "name": "Done" },
+                        "assignee": { "id": TEST_ASSIGNEE },
                         "labels": { "nodes": [] },
                         "team": { "key": "ENG" }
                     }
@@ -305,6 +309,7 @@ async fn e2e_happy_path_drives_full_lifecycle() {
         }],
         token: SecretString::new(TEST_TOKEN),
         rate_limit: Arc::new(NoopRateLimit),
+        assignee: AssigneeAdmission::new(TEST_ASSIGNEE).expect("test assignee"),
     };
     let tracker = LinearTracker::new(tracker_config);
     let (tracker_shutdown_tx, tracker_shutdown_rx) = tokio::sync::oneshot::channel::<()>();

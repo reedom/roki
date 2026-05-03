@@ -17,6 +17,7 @@ use std::time::{Duration, Instant};
 use roki_daemon::config::SecretString;
 use roki_daemon::orchestrator::state::RepoId;
 use roki_daemon::tools::NoopRateLimit;
+use roki_daemon::tracker::assignee::AssigneeAdmission;
 use roki_daemon::tracker::linear::{LinearTracker, LinearTrackerConfig, ScopeWatch};
 use roki_daemon::tracker::model::IssueState;
 use serde_json::{Value, json};
@@ -26,6 +27,7 @@ use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, Request, ResponseTemplate};
 
 const TEST_TOKEN: &str = "lin_api_test_super_secret_value";
+const TEST_ASSIGNEE: &str = "user-me";
 
 fn payload_with_two_issues() -> Value {
     json!({
@@ -38,6 +40,7 @@ fn payload_with_two_issues() -> Value {
                         "title": "First issue",
                         "description": "the first issue body",
                         "state": { "type": "started", "name": "In Progress" },
+                        "assignee": { "id": "user-me" },
                         "labels": { "nodes": [{ "name": "bug" }, { "name": "p1" }] },
                         "team": { "key": "ENG" }
                     },
@@ -47,6 +50,7 @@ fn payload_with_two_issues() -> Value {
                         "title": "Second issue",
                         "description": "the second issue body",
                         "state": { "type": "completed", "name": "Done" },
+                        "assignee": { "id": "user-me" },
                         "labels": { "nodes": [] },
                         "team": { "key": "ENG" }
                     }
@@ -71,6 +75,10 @@ fn scope_watch() -> ScopeWatch {
     }
 }
 
+fn assignee() -> AssigneeAdmission {
+    AssigneeAdmission::new(TEST_ASSIGNEE).expect("test assignee")
+}
+
 #[tokio::test]
 async fn cadence_cap_respects_configured_interval() {
     // Cadence: 1 second per scope. Run the loop ~3.3 seconds.
@@ -93,6 +101,7 @@ async fn cadence_cap_respects_configured_interval() {
         scopes: vec![scope_watch()],
         token: SecretString::new(TEST_TOKEN),
         rate_limit: Arc::new(NoopRateLimit),
+        assignee: assignee(),
     };
 
     let (tx, _rx) = mpsc::channel(16);
@@ -151,6 +160,7 @@ async fn http_429_defers_next_request_to_same_endpoint() {
         scopes: vec![scope_watch()],
         token: SecretString::new(TEST_TOKEN),
         rate_limit: Arc::new(NoopRateLimit),
+        assignee: assignee(),
     };
 
     let (tx, _rx) = mpsc::channel(16);
@@ -215,6 +225,7 @@ async fn valid_payload_normalizes_to_normalized_issue() {
         scopes: vec![scope_watch()],
         token: SecretString::new(TEST_TOKEN),
         rate_limit: Arc::new(NoopRateLimit),
+        assignee: assignee(),
     };
 
     let (tx, mut rx) = mpsc::channel(16);
@@ -248,6 +259,7 @@ async fn valid_payload_normalizes_to_normalized_issue() {
     assert_eq!(one.description, "the first issue body");
     assert_eq!(one.state, IssueState::Active);
     assert_eq!(one.labels, vec!["bug".to_string(), "p1".to_string()]);
+    assert_eq!(one.assignee_user_id.as_deref(), Some(TEST_ASSIGNEE));
     // Post-7.1f: NormalizedIssue.repo was dropped — the agent picks the
     // repo at runtime via roki_open_worktree.
 
@@ -277,6 +289,7 @@ async fn graphql_request_carries_authorization_header_and_query_body() {
         scopes: vec![scope_watch()],
         token: SecretString::new(TEST_TOKEN),
         rate_limit: Arc::new(NoopRateLimit),
+        assignee: assignee(),
     };
 
     let (tx, _rx) = mpsc::channel(16);
@@ -314,9 +327,8 @@ async fn graphql_request_carries_authorization_header_and_query_body() {
         .get("query")
         .and_then(Value::as_str)
         .expect("body has `query`");
-    // Post-task-7.1c the query targets Linear's `issues` field with a state
-    // filter only — there is no team-or-scope narrowing because the agent
-    // decides on its first turn whether the ticket is in scope.
+    // Post-task-8 the query targets Linear's `issues` field with both a state
+    // filter and the configured assignee id.
     assert!(
         query.contains("issues"),
         "query should target the issues resource; got: {query}",
@@ -329,6 +341,11 @@ async fn graphql_request_carries_authorization_header_and_query_body() {
     assert!(
         variables["filter"]["team"].is_null(),
         "filter must not narrow by team; got: {variables}",
+    );
+    assert_eq!(
+        variables["filter"]["assignee"]["id"]["eq"].as_str(),
+        Some(TEST_ASSIGNEE),
+        "filter must narrow by resolved assignee id; got: {variables}",
     );
 }
 
@@ -374,6 +391,7 @@ async fn workspace_poll_emits_one_event_per_issue_regardless_of_repo_count() {
         scopes: many_scopes,
         token: SecretString::new(TEST_TOKEN),
         rate_limit: Arc::new(NoopRateLimit),
+        assignee: assignee(),
     };
 
     let (tx, mut rx) = mpsc::channel(32);

@@ -12,6 +12,8 @@
 //! * `title`, `description` — display fields.
 //! * `state` — bucketed state (Requirement 3.4).
 //! * `labels` — every label name attached to the issue (Requirement 3.4).
+//! * `assignee_user_id` — the Linear user id currently assigned to the issue,
+//!   when Linear supplied assignment data.
 //!
 //! Task 7.1c dropped the `team_or_scope` field; task 7.1f dropped the
 //! vestigial `repo` field. Post-agent-driven-selection the daemon does not
@@ -69,6 +71,7 @@ pub struct NormalizedIssue {
     pub description: String,
     pub state: IssueState,
     pub labels: Vec<String>,
+    pub assignee_user_id: Option<String>,
 }
 
 #[cfg(test)]

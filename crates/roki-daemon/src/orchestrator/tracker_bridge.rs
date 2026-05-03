@@ -9,15 +9,17 @@
 //! design.md pins:
 //!
 //! > Risks: webhook duplicate delivery. Mitigation: orchestrator transitions
-//! > are idempotent on `(repo, issue, target_state)`.
+//! > are idempotent on `(issue, target_state)`.
 //! > — design.md, Implementation Notes for the TrackerAdapter
 //!
 //! The orchestrator already treats illegal `(previous, next)` pairs as
 //! no-ops, but a duplicate event still wakes a per-actor task and produces
 //! observability noise. The bridge keeps the orchestrator's transition
 //! stream noiseless by short-circuiting at the source: only forward a
-//! `NormalizedIssue` when its `(repo, issue, state)` triple differs from
-//! the most recently forwarded triple for the same `(repo, issue)` key.
+//! `NormalizedIssue` when its `(issue, state)` pair differs from the most
+//! recently forwarded state for that issue. Assignment-loss signals for
+//! previously admitted issues bypass same-state deduplication so cleanup can
+//! run even when Linear's workflow state remains `Active`.
 //!
 //! ## Idempotence model
 //!
@@ -33,8 +35,7 @@
 //! orchestrator's actor for the issue. State changes still propagate.
 //!
 //! Task 7.1b collapsed the dedup key from `(repo, issue, target_state)` to
-//! `(issue, target_state)`. The incoming `NormalizedIssue.repo` field is
-//! ignored here; repo association moves onto the (post-7.1d)
+//! `(issue, target_state)`. Repo association now lives on the
 //! `WorktreeRegistry`, which is per-worker rather than per-tracker-event.
 //!
 //! ## Linear writes are forbidden here
@@ -57,12 +58,13 @@
 //! orchestrator's `tracker_inbox.recv()` resolves with `None` once the
 //! bridge has fully drained.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use tokio::sync::mpsc;
 use tracing::{debug, trace};
 
 use crate::orchestrator::state::IssueId;
+use crate::tracker::assignee::AssigneeAdmission;
 use crate::tracker::model::{IssueState, NormalizedIssue};
 
 /// Merge polling and webhook [`NormalizedIssue`] streams into the
@@ -78,6 +80,8 @@ pub struct TrackerBridge {
     webhook: Option<mpsc::Receiver<NormalizedIssue>>,
     out: mpsc::Sender<NormalizedIssue>,
     last_forwarded: HashMap<IssueId, IssueState>,
+    assignee: Option<AssigneeAdmission>,
+    admitted: HashSet<IssueId>,
 }
 
 impl TrackerBridge {
@@ -96,7 +100,26 @@ impl TrackerBridge {
             webhook: Some(webhook),
             out,
             last_forwarded: HashMap::new(),
+            assignee: None,
+            admitted: HashSet::new(),
         }
+    }
+
+    /// Build a bridge with the daemon-side Linear assignee admission filter
+    /// enabled. First observations that are unassigned or assigned to a
+    /// different user are dropped before they can create an orchestrator
+    /// actor. If an issue was previously admitted and later arrives with a
+    /// non-matching assignee, the event is forwarded even when its workflow
+    /// state is unchanged so the actor can clean up assignment loss.
+    pub fn new_with_assignee(
+        polling: mpsc::Receiver<NormalizedIssue>,
+        webhook: mpsc::Receiver<NormalizedIssue>,
+        out: mpsc::Sender<NormalizedIssue>,
+        assignee: AssigneeAdmission,
+    ) -> Self {
+        let mut bridge = Self::new(polling, webhook, out);
+        bridge.assignee = Some(assignee);
+        bridge
     }
 
     /// Drive the bridge until both inputs close.
@@ -163,6 +186,39 @@ impl TrackerBridge {
         let key = event.issue.clone();
         let incoming_state = event.state;
 
+        if let Some(assignee) = self.assignee.as_ref() {
+            if assignee.matches_issue(&event) {
+                self.admitted.insert(key.clone());
+            } else if self.admitted.remove(&key) {
+                self.last_forwarded.remove(&key);
+                let actual = event.assignee_user_id.as_deref().unwrap_or("<unassigned>");
+                debug!(
+                    target: "tracker_bridge",
+                    issue = %key.as_str(),
+                    configured_assignee = %assignee.user_id(),
+                    actual_assignee = %actual,
+                    "previously admitted issue lost assignment; forwarding cleanup signal",
+                );
+                if self.out.send(event).await.is_err() {
+                    debug!(
+                        target: "tracker_bridge",
+                        "orchestrator inbox closed; bridge will exit",
+                    );
+                }
+                return;
+            } else {
+                let actual = event.assignee_user_id.as_deref().unwrap_or("<unassigned>");
+                debug!(
+                    target: "tracker_bridge",
+                    issue = %key.as_str(),
+                    configured_assignee = %assignee.user_id(),
+                    actual_assignee = %actual,
+                    "issue assignment mismatch; dropping before worker admission",
+                );
+                return;
+            }
+        }
+
         if let Some(last) = self.last_forwarded.get(&key)
             && *last == incoming_state
         {
@@ -205,6 +261,7 @@ mod tests {
             description: String::new(),
             state,
             labels: Vec::new(),
+            assignee_user_id: None,
         }
     }
 

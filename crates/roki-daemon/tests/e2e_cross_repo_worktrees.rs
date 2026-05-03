@@ -92,6 +92,7 @@ fn issue_event(state: TrackerIssueState) -> NormalizedIssue {
         description: String::new(),
         state,
         labels: Vec::new(),
+        assignee_user_id: None,
     }
 }
 

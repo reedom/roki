@@ -50,6 +50,7 @@ use roki_daemon::orchestrator::state::{RepoId, TransitionEvent, WorkerState};
 use roki_daemon::orchestrator::tracker_bridge::TrackerBridge;
 use roki_daemon::shutdown::ShutdownSignal;
 use roki_daemon::tools::NoopRateLimit;
+use roki_daemon::tracker::assignee::AssigneeAdmission;
 use roki_daemon::tracker::linear::{LinearTracker, LinearTrackerConfig, ScopeWatch};
 use roki_daemon::tracker::model::NormalizedIssue;
 use serde_json::{Value, json};
@@ -60,6 +61,7 @@ use roki_daemon::session::SessionManager;
 use roki_daemon::worktrees::WorktreeRegistry;
 
 const TEST_TOKEN: &str = "lin_e2e_failure_retry_token";
+const TEST_ASSIGNEE: &str = "user-me";
 const TEST_REPO: &str = "core";
 const TEST_ISSUE: &str = "ENG-9";
 
@@ -117,6 +119,7 @@ fn started_payload() -> Value {
                         "title": "Failure path",
                         "description": "drive the orchestrator's retry budget to exhaustion",
                         "state": { "type": "started", "name": "In Progress" },
+                        "assignee": { "id": TEST_ASSIGNEE },
                         "labels": { "nodes": [] },
                         "team": { "key": "ENG" }
                     }
@@ -295,6 +298,7 @@ async fn e2e_failure_path_retry_budget_exhaustion() {
         }],
         token: SecretString::new(TEST_TOKEN),
         rate_limit: Arc::new(NoopRateLimit),
+        assignee: AssigneeAdmission::new(TEST_ASSIGNEE).expect("test assignee"),
     };
     let tracker = LinearTracker::new(tracker_config);
     let (tracker_shutdown_tx, tracker_shutdown_rx) = tokio::sync::oneshot::channel::<()>();

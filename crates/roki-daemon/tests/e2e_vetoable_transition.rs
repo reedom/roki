@@ -151,6 +151,7 @@ fn issue_event(_repo: &str, issue: &str, state: TrackerIssueState) -> Normalized
         description: String::new(),
         state,
         labels: Vec::new(),
+        assignee_user_id: None,
     }
 }
 

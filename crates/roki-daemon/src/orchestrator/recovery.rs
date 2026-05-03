@@ -630,6 +630,7 @@ fn synthetic_active_event(issue: &IssueId, payload: Option<&NormalizedIssue>) ->
         description: String::new(),
         state: TrackerIssueState::Active,
         labels: Vec::new(),
+        assignee_user_id: None,
     }
 }
 
