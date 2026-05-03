@@ -481,7 +481,7 @@ fn build_edges(
 
 fn cmd_validate(
     root: &Path,
-    _manifest: &Manifest,
+    manifest: &Manifest,
     graph: &Graph,
     parse_errors: &[String],
 ) -> Result<ExitCode> {
@@ -499,6 +499,45 @@ fn cmd_validate(
             }
         }
     }
+
+    // Strict glob coverage: any file matching a kind's `path_globs` MUST appear
+    // in the graph (i.e., have a `refs:` block declaring some kind).
+    let in_graph: BTreeSet<PathBuf> = graph
+        .docs
+        .values()
+        .map(|d| d.rel_path.clone())
+        .collect();
+    for kind in manifest.kinds.values() {
+        for pat in &kind.path_globs {
+            let absolute = format!("{}/{}", root.display(), pat);
+            let matches = match glob::glob(&absolute) {
+                Ok(m) => m,
+                Err(e) => {
+                    errors.push(format!("kind `{}`: bad glob `{}`: {e}", kind.name, pat));
+                    continue;
+                }
+            };
+            for entry in matches {
+                let path = match entry {
+                    Ok(p) => p,
+                    Err(e) => {
+                        errors.push(format!("kind `{}` glob `{}`: {e}", kind.name, pat));
+                        continue;
+                    }
+                };
+                let rel = path.strip_prefix(root).unwrap_or(&path).to_path_buf();
+                if !in_graph.contains(&rel) {
+                    errors.push(format!(
+                        "{}: matches kind `{}` glob `{}` but has no `refs:` block",
+                        rel.display(),
+                        kind.name,
+                        pat
+                    ));
+                }
+            }
+        }
+    }
+
     if errors.is_empty() {
         println!("OK ({} docs)", graph.docs.len());
         Ok(ExitCode::SUCCESS)
