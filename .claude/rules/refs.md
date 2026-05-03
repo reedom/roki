@@ -1,11 +1,15 @@
 ---
-description: "Doc cross-reference graph: judgment calls the post-edit hook cannot make"
-globs: "**/*.md, .kiro/**, docs/**, crates/**, docs/kinds.md"
+description: "Doc cross-reference graph: judgment calls the post-edit hook cannot make. Trigger-specific excerpts of this rule are auto-injected by .claude/hooks/refs-postedit.sh."
+paths: **/*.md
 ---
 
 # Cross-reference rule
 
-The post-edit hook auto-runs `validate` (after `.md` edits) and `touched <file>` (after source / spec / kinds edits). **This rule covers only what the hook cannot decide.** Do not re-run those commands manually unless investigating a specific failure.
+The post-edit hook (`.claude/hooks/refs-postedit.sh`) auto-runs `validate` after every `.md` edit and `touched <file>` after every source edit under `crates/`. When an edit matches one of the four triggers below (new `.md`, `requirements.md` edit, source change, `kinds.md` edit), the hook also injects the matching excerpt of this rule into context.
+
+For the full reference of `roki-doctools` itself (subcommands, frontmatter schema, workflows, troubleshooting), invoke the `roki-doctools` skill — see `.claude/skills/roki-doctools/SKILL.md`.
+
+**This rule covers only what the hook cannot decide.** Do not re-run `validate` or `touched` manually unless investigating a specific failure.
 
 ## Trigger: creating a new `.md`
 
@@ -42,6 +46,14 @@ If any other doc may reference the new requirement (now or later), add the new I
 ## Trigger: rename / delete of a doc
 
 Every reference to the old ID elsewhere in the graph becomes dangling. Update the references; the hook surfaces leftovers on next edit.
+
+## Trigger: editing the body of a graph-linked `.md`
+
+The hook surfaces the doc's immediate `implements` / `depends_on` / `related` / `modules` plus reverse direct impact via `roki-doctools show`. For `requirements.md`, the hook additionally lists each `provides:` ID's direct consumers via `impact --depth 1`.
+
+Treat the surfaced list as a **content-drift checklist**: if this edit changed observable behavior (not a typo or prose-only tweak), each linked doc may need a matching wording update so the two stay coherent. Skim the listed docs and update any whose body would otherwise drift from this file's new content. The validator cannot detect prose drift — only the human / agent reading the diff can.
+
+Skip sweep when the edit is a typo, formatting, or pure clarification with no behavioral change.
 
 ## Trigger: editing `docs/kinds.md`
 
