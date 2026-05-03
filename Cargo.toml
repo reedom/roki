@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/roki-daemon"]
+members = ["crates/roki-daemon", "crates/roki-doctools"]
 
 # Downstream specs (notably roki-observability) will append additional members
 # such as `crates/roki-tui` and `crates/roki-api-types` to this list. Keep this
