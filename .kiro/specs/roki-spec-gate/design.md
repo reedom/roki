@@ -1,3 +1,13 @@
+---
+refs:
+  id: design:roki-spec-gate
+  kind: design
+  title: "roki-spec-gate Design"
+  spec: roki-spec-gate
+  implements:
+    - requirements:roki-spec-gate
+---
+
 # Design Document
 
 ## Overview

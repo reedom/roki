@@ -1,3 +1,13 @@
+---
+refs:
+  id: tasks:roki-spec-gate
+  kind: tasks
+  title: "roki-spec-gate Tasks"
+  spec: roki-spec-gate
+  depends_on:
+    - design:roki-spec-gate
+---
+
 # Implementation Plan
 
 - [ ] 1. Foundation: gate module scaffolding and configuration

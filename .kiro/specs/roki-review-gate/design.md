@@ -1,3 +1,13 @@
+---
+refs:
+  id: design:roki-review-gate
+  kind: design
+  title: "roki-review-gate Design"
+  spec: roki-review-gate
+  implements:
+    - requirements:roki-review-gate
+---
+
 # Design Document
 
 ## Overview

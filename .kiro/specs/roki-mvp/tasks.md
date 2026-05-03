@@ -1,3 +1,13 @@
+---
+refs:
+  id: tasks:roki-mvp
+  kind: tasks
+  title: "roki-mvp Tasks"
+  spec: roki-mvp
+  depends_on:
+    - design:roki-mvp
+---
+
 # Implementation Plan
 
 - [x] 1. Foundation: project scaffolding, configuration, and logging
@@ -66,11 +76,12 @@
 
 - [x] 2.3 (P) Implement the WORKFLOW.md loader, schema, and hot reload
   - Parse YAML front matter, render the Liquid body, and validate the resulting structure against the published JSON-Schema.
+  - Expose the validated prompt template and issue variables needed for worker launch rendering, including issue identifier, title, description, labels, and bucketed lifecycle state.
   - Type `WorkflowPolicy.extension` as `serde_json::Value` so downstream specs can `serde_json::from_value` their reserved sub-slice into their own typed struct.
   - Reserve and round-trip (without interpretation) all four canonical sub-namespaces: `extension.gates.spec.*`, `extension.gates.review.*`, `extension.server.*`, `extension.distill.*`.
   - Implement filesystem watching with debounce and a last-known-good fallback that preserves the prior valid policy on failed reload.
   - Observable completion: an integration test feeds a valid `WORKFLOW.md` containing keys under all four reserved namespaces and asserts they round-trip through `WorkflowPolicy.extension` byte-for-byte; mutating the file to be invalid causes the loader to retain the prior valid policy in memory and emit a structured validation-failure log event identifying the bad key path.
-  - _Requirements: 6.1, 6.2, 6.3, 6.4, 6.5, 13.5_
+  - _Requirements: 6.1, 6.2, 6.3, 6.4, 6.5, 6.6, 13.5_
   - _Boundary: workflow_
 
 - [x] 2.4 (P) Implement the agent tool registry and the `linear_graphql` proxy
@@ -126,10 +137,13 @@
 
 - [x] 2.10 Implement the engine adapter subprocess supervisor
   - Spawn `claude --print --output-format stream-json` with the issue workspace as cwd, kiro-skill-discovery flags applied (no `--bare`), the resolved permission strategy passed through, and `kill_on_drop` set on the process handle.
+  - Render the worker prompt from the current `WORKFLOW.md` policy at launch time; if rendering fails, provide a deterministic fallback prompt containing the issue identifier, title, and description.
   - Wire the stream-JSON parser, the engine policy controller, and the tool catalog into a single supervised lifecycle that emits one terminal `Exited` event for every launch.
+  - Capture every non-empty worker stderr line as a warn-level structured log event with issue and correlation context, and support opt-in per-issue debug capture of stdout/stderr streams with RFC 3339 nanosecond timestamps.
+  - If the per-issue debug log file cannot be opened or appended to, log the offending file path and continue supervising the worker.
   - Add the `additional_context: Option<serde_json::Value>` field to `WorkerContext`. When `Some(value)`, the adapter shall forward the value verbatim into the agent's session through a documented prelude envelope (a stable JSON block prepended to the session prompt under a stable key). The MVP shall not interpret the contents.
-  - Observable completion: an integration test using a fake `claude` binary drives clean-exit, non-clean-exit, and stall scenarios and asserts the orchestrator receives the corresponding lifecycle and outcome events; an additional unit test passes a non-`None` `additional_context` and asserts the value appears verbatim in the prelude envelope captured by the fake binary.
-  - _Requirements: 5.1, 5.2, 5.7, 13.4_
+  - Observable completion: an integration test using a fake `claude` binary drives clean-exit, non-clean-exit, and stall scenarios and asserts the orchestrator receives the corresponding lifecycle and outcome events; an additional unit test passes a non-`None` `additional_context` and asserts the value appears verbatim in the prelude envelope captured by the fake binary; stream-capture tests assert stderr logging, debug file append format, and non-fatal debug append failure behavior.
+  - _Requirements: 5.1, 5.2, 5.7, 6.6, 6.7, 12.5, 12.6, 12.7, 13.4_
   - _Depends: 2.7, 2.8, 2.9, 2.4, 2.3_
   - _Boundary: engine/claude_
 
@@ -236,7 +250,7 @@
 
 - [x] 7. Agent-driven repo selection: collapse multi-repo routing into the agent
 
-_Task 7.1 was split into 7.1a–7.1f after the first implementer dispatch BLOCKED on size (~16K production lines + ~4K tests + SPEC/design rewrites in one reviewer-gated unit). The 11 locked decisions in `design-agent-driven-repo-selection.md` carry through unchanged; only the envelope is split. Sub-tasks dispatched sequentially with normal subagent-per-task discipline._
+_Task 7.1 was split into 7.1a–7.1f after the first implementer dispatch BLOCKED on size (~16K production lines + ~4K tests + SPEC/design rewrites in one reviewer-gated unit). Decisions 1–6 and 8–11 in `design-agent-driven-repo-selection.md` carry through from the split. Decision 7 was superseded by the later assignee-admission requirement and is implemented by task 8. Sub-tasks dispatched sequentially with normal subagent-per-task discipline._
 
 - [x] 7.1a Drop `LinearScope` and the `routing.rs` module; shrink `RepoConfig` config schema
   - _Boundary:_ `crates/roki-daemon/src/config/{mod.rs,repos.rs}`, `crates/roki-daemon/src/routing.rs` (DELETED), `crates/roki-daemon/src/lib.rs` (drop `mod routing`), and any other production source whose ONLY change is removing references to deleted/renamed types. Tests: mechanical updates in any `tests/*.rs` that constructs `RepoConfig` literals or imports `routing::*`. Per §16: SPEC.md §2.2 update + .kiro/specs/roki-mvp/design.md update for the schema delta.
@@ -268,11 +282,11 @@ _Task 7.1 was split into 7.1a–7.1f after the first implementer dispatch BLOCKE
 
 - [x] 7.1c Single `LinearTracker` + single webhook route + single HMAC secret
   - _Boundary:_ `crates/roki-daemon/src/tracker/{linear.rs,webhook.rs,model.rs}` and their tests (`tests/tracker_linear.rs`, `tests/tracker_webhook.rs`, `tests/tracker_bridge.rs`). Bootstrap glue lands in 7.1f.
-  - Collapse per-repo trackers to one. The single tracker polls the entire Linear workspace using the API token; no `scope` filter. Honor the existing global `polling_cadence` and 5-min cap.
+  - Collapse per-repo trackers to one. The single tracker polls the entire Linear workspace using the API token; no `scope` filter. Honor the existing global `polling_cadence` and 5-min cap. Task 8 later narrows this stream to the configured Linear assignee before worker admission.
   - Single webhook route: `POST /linear/webhook` (no per-repo path segment). HMAC-verify against `[linear].webhook_secret_env` (single secret).
   - Webhook handler decodes → `NormalizedIssue` (no repo association) → forward to orchestrator's `tracker_inbox` keyed by `IssueId`.
   - Tests update for single-route dispatch; assert per-issue dedup at the bridge.
-  - Observable completion: tracker tests pass; new test asserts the single webhook secret rejects mismatched HMACs and accepts correct ones; new test asserts polling produces one event per Linear issue regardless of how many `[[repos]]` entries are configured.
+  - Observable completion: tracker tests pass; new test asserts the single webhook secret rejects mismatched HMACs and accepts correct ones; new test asserts polling produces one event per Linear issue regardless of how many `[[repos]]` entries are configured. Task 8 supersedes this broad polling assertion with assigned-issue filtering.
   - _Depends: 7.1b_
   - _Requirements: 3.1, 3.2_
   - _Design: same as 7.1_
@@ -331,6 +345,202 @@ _Task 7.1 was split into 7.1a–7.1f after the first implementer dispatch BLOCKE
   - _Requirements: 1.1, 1.2, 2.1, 2.5, 3.1, 3.2, 4.1, 8.2, 9.5, 10.1, 12.2_
   - _Design: same as 7.1_
 
+- [x] 8. Assignee admission: only handle Linear issues assigned to the configured user
+
+- [x] 8.1 Add `[linear].assignee` configuration and startup resolution
+  - Extend the daemon configuration schema with required `[linear].assignee`; accept `me` as a special selector that resolves through Linear's current viewer for the configured API token.
+  - Resolve explicit user selectors to exactly one Linear user id before the daemon starts accepting tracker events; missing, empty, ambiguous, or unresolvable values are hard startup errors naming `[linear].assignee`.
+  - Keep the resolved user id in the daemon-side admission state; do not expose the Linear token to the agent, tool catalog, logs, or prompt.
+  - Update `SPEC.md` and the example config shape in the same change set so the daemon contract documents `assignee = "me"`.
+  - Observable completion: unit tests cover `me`, explicit selector success, missing/empty config, ambiguous selector, and Linear lookup failure; the failure cases refuse startup with the offending field named.
+  - _Requirements: 1.2, 2.8, 2.9, 12.4_
+  - _Boundary: Config, AssigneeAdmission, Logging_
+
+- [x] 8.2 Normalize assignee data and filter polling/webhook observations before orchestrator admission
+  - Extend `NormalizedIssue` with an optional Linear assignee user id and update both poll and webhook normalization to populate it when Linear provides assignment data.
+  - Make the polling query request active issues assigned to the resolved assignee where Linear server-side filtering supports it; preserve the five-minute cadence cap and 429 backoff behavior.
+  - Apply the shared assignee matcher after valid webhook HMAC verification and before forwarding to `TrackerBridge`; unassigned and other-assigned issues are acknowledged, logged with an assignment-mismatch reason, and dropped without creating a session.
+  - Preserve read-only daemon behavior: this task must not add any Linear write operation outside `linear_graphql`.
+  - Observable completion: tracker tests show assigned active issues reach the tracker bridge, unassigned/other-assigned signed webhooks do not, malformed or unsigned webhooks still fail before admission logic, and the polling request includes the resolved assignee filter.
+  - _Depends: 8.1_
+  - _Requirements: 3.1, 3.2, 3.3, 3.4, 3.5, 3.6, 3.7, 3.8, 3.9, 12.1, 12.2_
+  - _Boundary: AssigneeAdmission, TrackerAdapter, WebhookReceiver, NormalizedIssue_
+
+- [x] 8.3 Handle assignment loss in the orchestrator and restart recovery
+  - Track admitted issue ownership so a later observation that becomes unassigned or assigned to another user is classified as assignment loss rather than a worker failure.
+  - On assignment loss, stop further launches for the issue, terminate any active worker subprocess, route the issue into `Cleaning`, retain retry counters unchanged, and emit a transition/log reason distinct from `TerminalFailure`.
+  - Apply the same assignee matcher during restart recovery before `ResumeActive` or `FreshQueued`; discovered session/worktree residue for issues not active and assigned to the configured user is classified as orphaned or no-op according to the existing disk artifacts.
+  - Ensure assignment-loss cleanup still removes registered worktrees through `wt remove` and then removes the session tempdir, while preserving normal `TerminalFailure` retention behavior.
+  - Observable completion: integration tests cover reassignment away during `Active`, `Backoff`, and `AwaitingReview`, plus recovery cases where session/worktree residue belongs to an issue no longer assigned to the configured user.
+  - _Depends: 8.2_
+  - _Requirements: 3.10, 4.5, 4.6, 8.1, 8.2, 10.2, 10.3, 10.4, 12.1, 12.2_
+  - _Boundary: Orchestrator, RecoveryReconciler, SessionManager, WorktreeRegistry_
+
+- [x] 8.4 Wire assignee admission through runtime and end-to-end tests
+  - Update bootstrap composition so assignee resolution happens after Linear token resolution and redaction setup, before recovery, tracker startup, and webhook serving.
+  - Thread the resolved assignee into the single `LinearTracker`, `WebhookState`, recovery reader, and tracker bridge/admission path without changing the agent tool registry or `WORKFLOW.md` schema.
+  - Add E2E coverage for an assigned happy path (`assignee = "me"`), an other-assigned active issue that produces no session and no worker launch, and an already-running issue reassigned away that enters cleanup without retry.
+  - Run the normal validation set for this task group and update task notes with any deliberate skips caused by external `wt`/`ghq`/`claude` prerequisites.
+  - Observable completion: `cargo test --workspace`, `cargo clippy --workspace --all-targets -- -D warnings`, and `cargo fmt --all -- --check` are clean, with the new E2E cases passing deterministically across three sequential reps where external prerequisites are available.
+  - _Depends: 8.3_
+  - _Requirements: 1.1, 2.8, 2.9, 3.7, 3.8, 3.9, 3.10, 10.2, 10.3, 10.4, 12.1, 12.2, 12.3, 12.7_
+  - _Boundary: Runtime, AssigneeAdmission, TrackerAdapter, Orchestrator, E2E tests_
+
+- [x] 9. Per-issue debug capture, prompt rendering, and permission propagation
+
+- [x] 9.1 Add `--debug` CLI flag and `[debug]` configuration block
+  - Extend `RunArgs` with a `--debug` boolean flag and `Config` with a `[debug]` block carrying `enabled: bool` (default `false`) and `dir: PathBuf` (default `./roki-debug`).
+  - Resolve the effective debug-enabled state at bootstrap by combining the config block with the CLI flag (CLI override wins).
+  - Document the flag in `roki run --help` and add a config-loading test that sets `[debug]` from a TOML fixture.
+  - Observable completion: `cargo run --bin roki -- run --help` prints `--debug`; loading a config with `[debug] enabled = true, dir = "./tmp"` returns a `Config` whose `debug.enabled` is `true` and whose `dir` resolves correctly; passing `--debug` against a config with `enabled = false` produces an effective `enabled = true`.
+  - _Requirements: 1.6, 12.6_
+  - _Boundary: cli, config_
+
+- [x] 9.2 Per-issue stdout/stderr capture in the engine adapter
+  - When debug capture is enabled, append every line emitted on each worker subprocess's stdout AND stderr to a per-issue file at `<dir>/<team>/<issue>.log`, where `<team>` is split from the issue id (e.g. `RDM-7` → `RDM`).
+  - Each appended line carries an RFC 3339 timestamp with nanosecond resolution and a stream tag identifying `[STDOUT]` or `[STDERR]`.
+  - Sanitize each path segment to `[A-Za-z0-9_-]`, drop dots; reject any computed path that escapes the configured root.
+  - On open or append failure, log the failure at warn severity with the offending file path and continue running the worker without aborting the launch.
+  - Observable completion: an integration test starts a fake `claude` binary that emits 5 stdout lines and 2 stderr lines, runs the worker with `--debug`, and asserts the log file contains exactly 7 lines in arrival order with the expected timestamps and stream tags; a second test points the debug dir at an unwritable path and asserts the worker still runs to completion while a warn log names the offending path.
+  - _Depends: 9.1_
+  - _Requirements: 12.5, 12.6, 12.7_
+  - _Boundary: engine, logging_
+
+- [x] 9.3 Wire `WorkflowSnapshotter` through the orchestrator for prompt rendering
+  - Publish a `WorkflowSnapshotter` view from the workflow loader that exposes a cloneable `watch::Receiver<Arc<WorkflowPolicy>>`-backed snapshot.
+  - Add an `Orchestrator::with_workflow(WorkflowSnapshotter)` builder; thread the snapshot into every `WorkerActor` so each launch can render the worker prompt against the active issue.
+  - Replace the previously hardcoded empty prompt with a Liquid render against `{ issue: { id, title, description, labels, state } }`; on render failure, emit a structured log naming the offending block and substitute a deterministic fallback prompt that still includes issue id, title, and description.
+  - Observable completion: a unit test renders a representative `prompt_template` against a seeded `NormalizedIssue` and asserts the rendered output contains the issue id, title, and description; a second test feeds an intentionally invalid template and asserts the fallback prompt is used and a structured render-failure log is emitted.
+  - _Depends: 9.1_
+  - _Requirements: 6.6, 6.7_
+  - _Boundary: workflow, orchestrator_
+
+- [x] 9.4 Wire permission strategy through orchestrator + WorkerContext
+  - Add an `Orchestrator::with_permission_strategy(PermissionStrategy)` builder; thread the resolved strategy into every `WorkerActor` and into `WorkerContext.permission` instead of the previous hardcoded stub.
+  - Implement `resolve_launch_permission(strategy, workflow)` to combine the operator-selected strategy with any sandbox/elicitation overrides declared in `WORKFLOW.md` per worker launch.
+  - Update `e2e_bootstrap.rs` to construct `RunArgs` with `debug: false` and pass the resolved strategy explicitly.
+  - Observable completion: a unit test asserts `WorkerContext.permission` matches the configured strategy when `--dangerously-skip-permissions` is set on the CLI; a second test asserts the workflow's sandbox override propagates into the resolved permission while leaving the operator's allowlist source intact.
+  - _Depends: 9.3_
+  - _Requirements: 9.1, 9.2, 9.3, 9.4, 9.5_
+  - _Boundary: orchestrator, permissions, engine_
+
+- [ ] 10. Phase-18 amendment: setup-judge subsystem, agent-tooling boundary, and allowlist-iteration cleanup
+
+- [ ] 10.1 Drop daemon-side agent tools and document the agent-tooling boundary
+  - Remove the `tools/` module, the `Tool`/`Registry` traits, the `linear_graphql` proxy, the `roki_open_worktree` tool, and the per-worker `WorktreeRegistry` from the daemon source tree.
+  - Move `wt.rs` and `ghq.rs` shellout adapters under a new daemon-internal `exec/` module so they remain available for use by the worktree manager and recovery, but are unreachable from any worker subprocess.
+  - Strip every code path that registers, proxies, or wraps an agent-side tool from the engine adapter's launch sequence so the worker subprocess inherits the operator's local Claude Code installation as-is.
+  - Update tests that depended on the removed tools (drop, do not rewrite — replacements land in tasks 10.4, 10.5, 10.12).
+  - Observable completion: `rg "tools::|ToolRegistry|RokiOpenWorktreeTool|LinearGraphqlTool|WorktreeRegistry"` returns no hits in `crates/roki-daemon/src`; `cargo build --workspace` succeeds; the engine adapter's worker-launch argv contains no daemon-injected tool registration flags or MCP catalog overrides.
+  - _Requirements: 7.1, 7.2, 7.3_
+  - _Boundary: tools (removed), exec (added), engine_
+
+- [ ] 10.2 (P) Extend configuration with `[judge]` block and judge model resolver
+  - Add a `[judge]` block to `Config` and `ConfigFile` with an optional `model: Option<String>` field; when omitted, fall back to a documented default judge model identifier from the same Claude family as the worker model.
+  - Validate the resolved judge model identifier at startup; an unrecognized identifier is a hard refusal naming `[judge].model`.
+  - Document the new block in `roki.toml` example fixtures and surface the resolved model in a single startup structured log event.
+  - Observable completion: a unit test loads a config with `[judge] model = "claude-haiku-4-5"`, asserts the resolver returns the configured value; loading without `[judge]` returns the documented default; loading with `[judge] model = "bogus-id"` errors at startup with the offending field named.
+  - _Requirements: 2.10_
+  - _Boundary: config_
+
+- [ ] 10.3 (P) Extend WORKFLOW.md schema with two named template blocks
+  - Update the workflow JSON-Schema and the front-matter parser to require two named template blocks in the body: `prompt_template_setup` (consumed by the setup judge) and `prompt_template_worker` (consumed by the main worker).
+  - Reject at startup any `WORKFLOW.md` missing either named block, naming the offending block in the validation error.
+  - Render `prompt_template_setup` with `{ issue: { id, title, description, labels, state } }`; render `prompt_template_worker` with the same plus `{ worktree_paths: [{ repo, branch, path }] }` (the variable is populated in task 10.10 once the worktree manager exists; for this task, expose the slot and ensure the schema accepts it).
+  - On per-launch render failure for either block, emit a structured log naming the offending block and provide the deterministic fallback prompt (issue id, title, description).
+  - Update `WORKFLOW.example.md` to demonstrate both blocks plus the documented operator prerequisites (Linear MCP, `wt`/`ghq` on `$PATH`).
+  - Observable completion: a unit test feeds a `WORKFLOW.md` containing both blocks and asserts the loader produces two distinct rendered strings against a seeded issue; a second test omits `prompt_template_setup` and asserts startup refuses with the offending block named; a third test triggers a Liquid render failure and asserts the fallback prompt is used.
+  - _Requirements: 6.1, 6.6, 6.7_
+  - _Boundary: workflow_
+
+- [ ] 10.4 Implement `SetupJudge` runner and findings parser
+  - Split the engine adapter's launch entrypoint into `launch_worker(WorkerContext)` and `launch_judge_oneshot(JudgeContext)`; the judge entrypoint passes `--max-turns 1` and a hard-coded read-only sandbox + rejected-elicitations argv (the type-level pinning that prevents widening lands in task 10.7).
+  - Add a `judge/` module containing a `SetupJudge` trait with `evaluate(issue, correlation_id, cancel) -> Result<JudgeFindings, JudgeError>` and a default implementation that drives `launch_judge_oneshot`.
+  - Render `prompt_template_setup` against the active issue, invoke `claude --print --output-format stream-json --verbose --max-turns 1` with the configured judge model, and parse the subprocess's stdout as a structured findings document `{ "action": "act"|"noop", "repos"?: [string] }`.
+  - Validate every returned repo identifier against the configured `[[repos]]` allowlist; an unknown identifier returns `JudgeError::AllowlistRejection { offending, allowlist }` (no retry).
+  - On `JudgeError::Unparseable`, retry exactly once with the same input; persistent unparseability returns `Unparseable { raw_stdout, attempts: 2 }`.
+  - Honor cancellation tokens promptly so assignment loss or operator shutdown terminates the judge subprocess without waiting for stall-detection to fire.
+  - Observable completion: unit tests assert the parser accepts `noop`, accepts `act` with valid repos, rejects missing/unknown `action`, rejects `act` without `repos`, returns `AllowlistRejection` for an unknown identifier, retries once on parse failure (asserted via stub engine call counter), and returns `Unparseable { attempts: 2 }` on persistent failure.
+  - _Depends: 10.2, 10.3_
+  - _Requirements: 4.1, 4.2, 4.5, 12.8_
+  - _Boundary: judge_
+
+- [ ] 10.5 (P) Replace `WorktreeRegistry` with daemon-driven `WorktreeManager`
+  - Add a new `worktree_manager/` module exposing `WorktreeManager::setup(issue, &[RepoId]) -> Result<Vec<WorktreeEntry>, WorktreeError>` and `WorktreeManager::cleanup(issue) -> Result<CleanupReport, WorktreeError>`.
+  - `setup` resolves each repo via `GhqTool::list_paths` (or `ghq get` if missing) and creates a worktree via `WtTool::switch_create(repo_path, issue.as_str())`; defends in depth by re-validating each repo against `[[repos]]`.
+  - `cleanup` iterates every entry in the configured `[[repos]]` allowlist, runs `wt list` against each repo's local checkout, collects every worktree whose branch name equals the Linear issue identifier verbatim, and calls `WtTool::remove` on each; never deletes branches; tolerates missing local checkouts (skip with structured log) and repos with no matching branch (no-op).
+  - Reject at setup any pair of distinct issue ids that sanitize to the same branch with `IdentifierCollision`.
+  - Add a `wt list` shellout to the existing `WtTool` trait with the documented output shape.
+  - Observable completion: unit tests assert (a) `setup` calls `ghq.list_paths` and `wt.switch_create` exactly once per repo and returns deterministic `WorktreeEntry` order; (b) `setup` rejects an out-of-allowlist repo even when the judge somehow returned it; (c) `cleanup` iterates the stub allowlist, filters branches by `== issue.as_str()`, and calls `wt.remove` only on matches; (d) `cleanup` skips repos whose local checkout is absent without erroring.
+  - _Requirements: 4.3, 4.4, 4.6, 4.7, 4.8, 4.9, 10.1_
+  - _Boundary: worktree_manager, exec_
+
+- [ ] 10.6 Add `Judging` and `Skipped` states to the orchestrator state machine
+  - Extend the `WorkerState` enum with `Judging` (judge in flight) and `Skipped` (terminal end reachable only from `Judging` on `action=noop`).
+  - Update the legal-transition table to permit `Queued → Judging`, `Judging → Judging` (judge retry), `Judging → Active` (validated `act`), `Judging → Skipped` (`noop`), `Judging → TerminalFailure` (allowlist rejection or persistent unparseability), `Judging → Cleaning` (assignment loss), and `Skipped → [*]` (terminal end).
+  - Mark `Queued → Judging` and `Judging → Active` vetoable; mark the judge-internal arcs (`Judging → Judging`, `Judging → Skipped`, `Judging → TerminalFailure`) observable but non-vetoable.
+  - Add `TransitionTrigger::JudgeEvent` and ensure the existing `TransitionTrigger::AssignmentLost` path includes `Judging` as a valid source state.
+  - Observable completion: a matrix test exercises every legal transition involving `Judging` or `Skipped` and asserts the resulting `TransitionEvent` shape, the vetoable flag for the two newly vetoable transitions, and that `Skipped` is unreachable from any source other than `Judging` on `noop`.
+  - _Depends: 10.4_
+  - _Requirements: 4.4, 8.1, 8.2_
+  - _Boundary: orchestrator/state_
+
+- [ ] 10.7 (P) Pin judge subprocess to read-only sandbox at the type level
+  - Harden the `launch_judge_oneshot` entrypoint introduced in 10.4 by replacing its hard-coded argv with a typed `JudgeContext` whose `sandbox` field is a unit-variant enum (`JudgeSandbox::ReadOnlyRejectElicitations`); refuse any code path that would pass an operator-supplied `ResolvedPermission` into a judge launch.
+  - Confirm the operator-configured permission strategy continues to apply to `launch_worker(WorkerContext)` and document the asymmetry in a code comment plus a unit test.
+  - Observable completion: a unit test constructs a runtime with `--dangerously-skip-permissions` set and asserts the judge launch's argv carries the read-only sandbox flags and rejects elicitations regardless; a compile-fail (or guarded runtime) test asserts `JudgeContext` cannot be constructed with a `ResolvedPermission` of any other shape.
+  - _Depends: 10.4_
+  - _Requirements: 9.6_
+  - _Boundary: engine, permissions, judge_
+
+- [ ] 10.8 (P) Surface judge subprocess observability
+  - Drain the judge subprocess's stderr line-by-line and emit each non-empty line as a structured warn-level log event tagged with `issue`, `role: "judge"`, and `correlation_id`.
+  - Update the existing worker stderr drain to add a matching `role: "worker"` tag so downstream consumers can disambiguate.
+  - Emit a dedicated structured `judge.completed` log event on every judge run (success, retry, or final failure) recording duration, parsed `action` (when parseable), validated repos or rejection reason, and the issue identifier.
+  - Observable completion: an integration test runs the judge against a fake `claude` binary that emits one stderr line and a parseable `noop` finding, asserts one warn log with `role=judge` is captured plus one `judge.completed` log with the expected fields; a second test runs the same scenario with the worker and asserts `role=worker` is present on stderr lines.
+  - _Depends: 10.4_
+  - _Requirements: 12.5, 12.8_
+  - _Boundary: engine, judge, logging_
+
+- [ ] 10.9 Update restart recovery to use allowlist-iteration discovery
+  - Replace the per-repo `git worktree list --porcelain` walk in `RecoveryReconciler` with the same allowlist-iteration primitive `WorktreeManager::cleanup` uses (`[[repos]]` iteration + `wt list` filtered by branch matching the operator-configurable issue-id regex).
+  - Resume into `Active` directly (skipping `Judging`) for `ResumeActive` outcomes, since the previously-validated repo set is implied by the discovered worktrees.
+  - Drop the production `RecoveryLinearReader` references that pointed at the previous discovery primitive; reuse the new `WtTool::list` shellout.
+  - Observable completion: an integration test pre-seeds session tempdirs and worktrees across two `[[repos]]` entries against a Linear stub, starts the daemon, and asserts the 5-cell decision matrix produces the documented outcomes using only the new discovery primitive (`git worktree list --porcelain` is not invoked anywhere in the code path).
+  - _Depends: 10.5_
+  - _Requirements: 10.1_
+  - _Boundary: orchestrator/recovery, exec_
+
+- [ ] 10.10 Wire setup-judge through the runtime bootstrap and orchestrator
+  - In the runtime composition, build a `SetupJudge` runner alongside `WorktreeManager` and pass both into `Orchestrator::with_setup_judge` and `Orchestrator::with_worktree_manager`. Drop any leftover `with_tool_factory` references.
+  - In the orchestrator's per-issue actor, on `Queued → Judging` invoke `SetupJudge::evaluate(issue)`. On `Findings::Noop`, transition to `Skipped`. On `Findings::Act { repos }`, drive `WorktreeManager::setup(issue, &repos)` then `SessionManager::create_session(issue)` then `Active`. On `JudgeError::AllowlistRejection` or persistent `Unparseable`, transition to `TerminalFailure`. On cancellation (assignment loss or shutdown), follow the cancellation path.
+  - Forward the validated worktree paths into `WorkerContext.worktree_paths` so `prompt_template_worker` receives the `worktree_paths` named variable.
+  - On `Cleaning → [*]`, replace any remaining registry walk with `WorktreeManager::cleanup(issue)` followed by `SessionManager::remove_session(issue)`.
+  - Observable completion: an integration test drives a single issue through `Discovered → Queued → Judging → Active` with a stubbed judge that returns `act` with two repos; asserts both worktrees exist on disk after `setup`, `WorkerContext.worktree_paths` contains both entries, and `Cleaning` removes both via allowlist iteration. A second test drives the same harness with a stubbed `noop` judge and asserts the issue lands in `Skipped` with no session, no worktree, and no worker subprocess launched.
+  - _Depends: 10.4, 10.5, 10.6, 10.7_
+  - _Requirements: 4.3, 4.4, 4.7, 4.8, 6.6_
+  - _Boundary: runtime, orchestrator/core_
+
+- [ ] 10.11 Update SPEC.md and design.md in the same change set
+  - Update `SPEC.md` §3.2 (config schema) to add `[judge]` and `[debug]` rows; §6 (workflow) to describe the two named template blocks `prompt_template_setup` and `prompt_template_worker` and their named variables; add a new §"Setup judge" subsection documenting the findings schema, allowlist validation, retry-once policy, `noop`-routes-to-`Skipped` semantics, and the always-read-only sandbox invariant; update §"Agent tooling" (or add it) with the agent-tooling-boundary clause (the daemon registers no agent-side tool); update §10 (recovery) to describe the allowlist-iteration discovery primitive; update §"Per-issue state machine" to add `Judging` and `Skipped`.
+  - Confirm `.kiro/specs/roki-mvp/design.md` is consistent with the SPEC.md edits (this was largely completed in the design refresh; this task is the final cross-check).
+  - Observable completion: `rg "roki_open_worktree|linear_graphql|WorktreeRegistry"` returns no hits in `SPEC.md` except in explicit "removed in Phase 18" historical context blocks; `SPEC.md` includes the setup-judge findings schema and the agent-tooling-boundary clause verbatim from the requirements; the per-issue state machine table lists `Judging` and `Skipped`.
+  - _Depends: 10.4, 10.5, 10.6, 10.10_
+  - _Requirements: 11.1, 11.3, 11.4_
+  - _Boundary: SPEC.md, design.md_
+
+- [ ] 10.12 New tests for the Phase-18 amendment
+  - Add unit tests covering the SetupJudge findings parser, retry-once policy, allowlist validation, and sandbox invariant (covered indirectly by 10.4 and 10.7; consolidate any cross-module assertions here).
+  - Add `tests/integration_setup_judge.rs` covering judge invocation, `act` happy path, `noop`-to-`Skipped`, allowlist rejection routes to `TerminalFailure`, persistent unparseability routes to `TerminalFailure`, retry-once succeeds on the second attempt.
+  - Add `tests/integration_worktree_cleanup.rs` covering allowlist-iteration discovery and the branch-equals-issue-id filter, including cross-repo cleanup and skipping repos with no local checkout.
+  - Add `tests/integration_agent_tooling_boundary.rs` that launches a worker against a fake `claude` binary which fails the test if its argv contains any daemon-injected tool registration flag or MCP catalog override.
+  - Add `tests/e2e_skipped_arc.rs` that drives a single issue assigned to `me` through `Discovered → Queued → Judging → Skipped` with a stubbed `noop` judge, asserting no session tempdir is created, no worktree is materialized, and the worker subprocess is never launched.
+  - Update `tests/e2e_happy_path.rs` to include the judge step (judge returns `act` with one repo) before the worker is launched, and assert `worktree_paths` is populated in the worker prelude.
+  - Observable completion: every new test passes deterministically across 3 sequential reps with `-- --test-threads=1`; `cargo test --workspace`, `cargo clippy --workspace --all-targets -- -D warnings`, and `cargo fmt --all -- --check` are clean.
+  - _Depends: 10.10, 10.11_
+  - _Requirements: 4.1, 4.2, 4.4, 4.5, 4.7, 7.1, 9.6, 12.5, 12.8_
+  - _Boundary: tests_
+
 <!-- Original single-task envelope kept below for archival; superseded by 7.1a–7.1f above. -->
 
 - [ ] ~~7.1 Replace `repos.scope` daemon-side routing with agent-driven repo selection~~ (split into 7.1a–7.1f; original envelope kept below for archival)
@@ -342,7 +552,7 @@ _Task 7.1 was split into 7.1a–7.1f after the first implementer dispatch BLOCKE
     4. Tool is idempotent: second call with the same `repo` for the same worker returns the existing path without re-running `wt switch --create`.
     5. Session tempdir lives at `~/Library/Caches/roki/sessions/<issue>` on macOS / `~/.cache/roki/sessions/<issue>` on Linux (via the `dirs` crate or equivalent XDG resolver).
     6. Single workspace-level `WORKFLOW.md` configured at `[workflow].path`. Per-repo policy override is removed.
-    7. Admission filter = admit every Linear issue update. The agent decides whether to do work; WORKFLOW.md gates handle the cheap "this isn't for me" exit.
+    7. Admission filter = daemon-side assignee filter. `[linear].assignee = "me"` resolves to the Linear token owner; unassigned or other-assigned issues are ignored before session creation or worker launch. This supersedes the earlier admit-everything decision.
     8. CleanExit advances to `AwaitingReview` regardless of whether the agent ever called `roki_open_worktree` — a worker that never opened a worktree is still a valid no-op path.
     9. Restart recovery walks BOTH session tempdirs AND every configured repo's `git worktree list --porcelain` (filtered to issue-id-shaped branch names via the operator-configurable regex `^[A-Z]+-\d+$`).
     10. The `Workspace` trait is dropped. Concrete types `SessionManager` (tempdir lifecycle) and `WorktreeRegistry` (per-worker worktree tracking) replace it.
@@ -350,7 +560,7 @@ _Task 7.1 was split into 7.1a–7.1f after the first implementer dispatch BLOCKE
   - **Schema delta (breaking)**:
     - REMOVE `RepoConfig.id`, `RepoConfig.scope`, `RepoConfig.webhook_secret_env`, `RepoConfig.webhook_secret`, `RepoConfig.workflow_path`. After 7.1, `RepoConfig` is `{ repo: String }` only.
     - REMOVE the `LinearScope` enum and the `routing.rs` module entirely.
-    - ADD `[linear]` config block: `token_env: Option<String>` (defaults to `"LINEAR_API_TOKEN"`), `webhook_secret_env: String` (required), `endpoint: Option<String>` (test-only override; production omits).
+    - ADD `[linear]` config block: `token_env: Option<String>` (defaults to `"LINEAR_API_TOKEN"`), `webhook_secret_env: String` (required), `assignee: String` (required; `me` resolves to the token owner), `endpoint: Option<String>` (test-only override; production omits).
     - ADD `[workflow]` config block: `path: PathBuf` (required, single workspace-level policy file).
     - REJECT duplicate `[[repos]]` entries with the same `repo` value at config load (hard refusal naming the offending entry).
   - **State-machine impact**:
@@ -362,11 +572,12 @@ _Task 7.1 was split into 7.1a–7.1f after the first implementer dispatch BLOCKE
     - URL: `POST /linear/webhook` (no per-repo path segment).
     - HMAC verify against `[linear].webhook_secret_env` (single workspace-level secret).
     - Decode → `NormalizedIssue` (no repo association at this point).
-    - Forward to orchestrator's `tracker_inbox` keyed by `IssueId`.
-    - Spawn a worker for any new `IssueId` that isn't already in flight; the orchestrator never consults `[[repos]]` at admission time.
+    - Apply assignee admission against the resolved `[linear].assignee`.
+    - Forward matching assigned issues to orchestrator's `tracker_inbox` keyed by `IssueId`; mismatched or unassigned issues are acknowledged, logged, and ignored before worker launch.
+    - Spawn a worker for any matching assigned `IssueId` that isn't already in flight; the orchestrator never consults `[[repos]]` at admission time.
   - **Single `LinearTracker`**:
     - One poller for the entire Linear workspace (not per repo). Honor the existing global `polling_cadence` and 5-min cap.
-    - No `scope` filtering. Every issue the API token can see produces a `NormalizedIssue` event.
+    - No `scope` filtering. Active issues are filtered by the resolved Linear assignee before they can produce admitted `NormalizedIssue` events.
   - **New agent tool `roki_open_worktree`**:
     - Registered in the agent's tool registry alongside `linear_graphql`.
     - Description (verbatim, render in the agent's tool surface): "Open a git worktree for the current Linear issue in one of the configured repos. The daemon resolves the repo via ghq, creates a worktree branch named after the issue id via wt, and returns the absolute path. Idempotent — calling twice with the same repo returns the same path. Use this once per repo you intend to modify; cross-repo tickets call this multiple times."
@@ -379,7 +590,8 @@ _Task 7.1 was split into 7.1a–7.1f after the first implementer dispatch BLOCKE
     - Walk session tempdirs under `~/Library/Caches/roki/sessions/` (or platform equivalent).
     - For each configured `[[repos]]` entry, run `git worktree list --porcelain` and filter to branches matching the operator-configurable regex (default `^[A-Z]+-\d+$`).
     - Reconcile every distinct issue id discovered (from either source) against Linear via the existing `RecoveryLinearReader` trait. Provide a production `LinearTracker`-backed impl as part of this task.
-    - Decision matrix expanded: `ResumeActive` (issue active in Linear, session+worktree(s) on disk), `OrphanedSession` (session tempdir but no Linear state and no worktree), `OrphanedWorktree` (worktree but no session), `FreshQueued` (Linear issue active, nothing on disk → fresh worker), `NoOp` (Linear issue terminal, nothing on disk).
+    - Apply assignee admission before resuming or queueing recovered work.
+    - Decision matrix expanded: `ResumeActive` (issue active in Linear, assigned to the configured user, session+worktree(s) on disk), `OrphanedSession` (session tempdir but no active assigned Linear state and no worktree), `OrphanedWorktree` (worktree but no active assigned Linear state or no session), `FreshQueued` (Linear issue active and assigned, nothing on disk → fresh worker), `NoOp` (Linear issue terminal and nothing on disk).
   - **Doc updates (same change set per §16)**:
     - `SPEC.md` §2.2 — drop the workspace-root + per-repo workflow_path bullets; add `[linear]` and `[workflow]` block descriptions; describe `[[repos]]` as the agent allowlist.
     - `SPEC.md` §2.3 — replace the deterministic-precedence-rule section with "agent-driven repo selection via `roki_open_worktree`."
@@ -387,10 +599,10 @@ _Task 7.1 was split into 7.1a–7.1f after the first implementer dispatch BLOCKE
     - `SPEC.md` §7 — add `roki_open_worktree` to the registry table with input/output/error shape.
     - `SPEC.md` §10 — rewrite the recovery section to walk both session tempdirs and worktrees per the new four/five-cell matrix.
     - `.kiro/specs/roki-mvp/design.md` — fold the agent-driven model into the architecture-prose; show the new component breakdown (`SessionManager`, `WorktreeRegistry`, `RokiOpenWorktreeTool`).
-  - **Refusal modes**: `[linear].webhook_secret_env` not set → hard refusal; `[workflow].path` missing or unreadable → hard refusal; no `[[repos]]` entries → WARN log, daemon starts but every `roki_open_worktree` call returns `RepoNotInAllowlist`; `wt`/`ghq`/`claude` absent → hard refusal (existing); duplicate `repo` in `[[repos]]` → hard refusal at config load; agent specifies a `repo` not in the allowlist → tool error to agent (worker continues).
+  - **Refusal modes**: `[linear].webhook_secret_env` not set → hard refusal; `[linear].assignee` missing, empty, or unresolvable to exactly one Linear user → hard refusal; `[workflow].path` missing or unreadable → hard refusal; no `[[repos]]` entries → WARN log, daemon starts but every `roki_open_worktree` call returns `RepoNotInAllowlist`; `wt`/`ghq`/`claude` absent → hard refusal (existing); duplicate `repo` in `[[repos]]` → hard refusal at config load; agent specifies a `repo` not in the allowlist → tool error to agent (worker continues).
   - Observable completion: (a) all tests across `cargo test --workspace`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all -- --check` clean; (b) every refactored e2e test passes deterministically across 3 sequential reps; (c) new cross-repo test where one worker opens worktrees in two configured repos passes; (d) new allowlist-rejection test where the agent specifies a non-allowlisted repo asserts the typed error and that no worktree was created; (e) `crates/roki-daemon/src/routing.rs` is gone from the file tree; (f) `RepoConfig` shrinks to a single field; (g) SPEC.md §2.2/§2.3/§6/§7/§10 reflect the new model; (h) restart recovery test exercises all five matrix cells with both session tempdirs and worktrees pre-seeded.
   - _Depends: 6.1, 5.1_
-  - _Requirements: 2.1, 2.2, 2.3, 2.4, 2.6, 2.7, 3.1, 3.2, 4.1, 4.2, 4.4, 4.5, 4.6, 6.1, 7.1, 7.4, 7.5, 7.6, 7.7, 8.2, 10.1, 10.2, 10.3, 10.4_
+  - _Requirements: 2.1, 2.2, 2.3, 2.4, 2.6, 2.7, 2.8, 2.9, 3.1, 3.2, 3.7, 3.8, 3.9, 3.10, 4.1, 4.2, 4.4, 4.5, 4.6, 6.1, 7.1, 7.4, 7.5, 7.6, 7.7, 8.2, 10.1, 10.2, 10.3, 10.4_
   - _Design: `.kiro/specs/roki-mvp/design-agent-driven-repo-selection.md`_
 
 - [x] 6. Workspace model migration: switch from sandbox dirs to git worktrees
@@ -471,6 +683,7 @@ _Task 7.1 was split into 7.1a–7.1f after the first implementer dispatch BLOCKE
 
 ## Implementation Notes
 
+- 8: APPROVED and implemented. `[linear].assignee` is required; `me` resolves through Linear viewer lookup and explicit selectors must resolve to exactly one Linear user. The resolved assignee now gates polling, webhook observations, tracker bridge admission, restart recovery, and orchestrator assignment-loss cleanup. Assignment loss from `Active`, `Backoff`, or `AwaitingReview` routes to `Cleaning` without retry or `TerminalFailure`; recovery treats active issues assigned elsewhere as not resumable/fresh-queued. SPEC.md, requirements, design, and runtime examples were updated with `assignee = "me"`. Validation: `cargo fmt --all -- --check`, `cargo check --workspace`, `cargo clippy --workspace --all-targets -- -D warnings`, `git diff --check`, and `cargo test --workspace -- --test-threads=1` are clean.
 - 2.1: `legal_transition` includes `Queued -> TerminalFailure` (failure path before a worker runs, e.g. unrouteable issue) — additive supplement to design.md's lifecycle diagram; consider folding into design.md when next revised.
 - 2.1: `legal_transition` doc-comment claims compile-time exhaustiveness but the body has a `_ => false` catch-all; the `legal_transition_rejects_undocumented_pairs` matrix test enforces exhaustiveness at test time. Either remove the wildcard or correct the doc-comment in a follow-up.
 - 2.1: `TransitionEvent` carries an additional derived `vetoable: bool` field beyond the design.md sketch; it is purely derived from `(previous, next)` via `is_vetoable`. Fold into design.md's `TransitionEvent` shape when next revised.

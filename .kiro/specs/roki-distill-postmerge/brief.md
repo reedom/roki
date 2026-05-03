@@ -1,3 +1,11 @@
+---
+refs:
+  id: brief:roki-distill-postmerge
+  kind: brief
+  title: "roki-distill-postmerge Brief"
+  spec: roki-distill-postmerge
+---
+
 # Brief: roki-distill-postmerge
 
 ## Problem

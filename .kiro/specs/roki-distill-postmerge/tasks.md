@@ -1,3 +1,13 @@
+---
+refs:
+  id: tasks:roki-distill-postmerge
+  kind: tasks
+  title: "roki-distill-postmerge Tasks"
+  spec: roki-distill-postmerge
+  depends_on:
+    - design:roki-distill-postmerge
+---
+
 # Implementation Plan
 
 - [ ] 1. Foundation: WORKFLOW.md extension keys and manifest schema

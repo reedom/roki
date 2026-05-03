@@ -1,3 +1,13 @@
+---
+refs:
+  id: design:roki-mvp:retry-policy
+  kind: design
+  title: "Retry Policy Design"
+  spec: roki-mvp
+  depends_on:
+    - design:roki-mvp
+---
+
 # Retry Policy Design — Task 3.7
 
 Status: PROPOSAL — needs user sign-off before task 3.7 is opened.

@@ -1,3 +1,13 @@
+---
+refs:
+  id: requirements:roki-review-gate
+  kind: requirements
+  title: "roki-review-gate Requirements"
+  spec: roki-review-gate
+  implements:
+    - roadmap
+---
+
 # Requirements Document
 
 ## Project Description (Input)

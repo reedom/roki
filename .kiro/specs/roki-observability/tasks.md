@@ -1,3 +1,13 @@
+---
+refs:
+  id: tasks:roki-observability
+  kind: tasks
+  title: "roki-observability Tasks"
+  spec: roki-observability
+  depends_on:
+    - design:roki-observability
+---
+
 # Implementation Plan
 
 - [ ] 1. Workspace and shared API types: prepare the multi-crate layout and the schema crate

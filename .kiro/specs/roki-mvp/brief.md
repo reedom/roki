@@ -1,3 +1,11 @@
+---
+refs:
+  id: brief:roki-mvp
+  kind: brief
+  title: "roki-mvp Brief"
+  spec: roki-mvp
+---
+
 # Brief: roki-mvp
 
 ## Problem

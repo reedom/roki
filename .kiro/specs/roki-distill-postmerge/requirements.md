@@ -1,3 +1,13 @@
+---
+refs:
+  id: requirements:roki-distill-postmerge
+  kind: requirements
+  title: "roki-distill-postmerge Requirements"
+  spec: roki-distill-postmerge
+  implements:
+    - roadmap
+---
+
 # Requirements Document
 
 ## Project Description (Input)

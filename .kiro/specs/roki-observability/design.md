@@ -1,3 +1,13 @@
+---
+refs:
+  id: design:roki-observability
+  kind: design
+  title: "roki-observability Design"
+  spec: roki-observability
+  implements:
+    - requirements:roki-observability
+---
+
 # Design Document
 
 ## Overview

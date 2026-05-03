@@ -1,3 +1,19 @@
+---
+refs:
+  id: design:roki-mvp:bootstrap
+  kind: design
+  title: "Daemon Bootstrap Design"
+  spec: roki-mvp
+  implements:
+    - req:roki-mvp:1
+    - req:roki-mvp:2
+  depends_on:
+    - design:roki-mvp
+  modules:
+    - crates/roki-daemon/src/runtime.rs
+    - crates/roki-daemon/src/config/mod.rs
+---
+
 # Daemon Bootstrap Design — Task 5.1
 
 Status: PROPOSAL — needs user sign-off before task 5.1 is opened.

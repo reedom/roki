@@ -1,3 +1,11 @@
+---
+refs:
+  id: brief:roki-review-gate
+  kind: brief
+  title: "roki-review-gate Brief"
+  spec: roki-review-gate
+---
+
 # Brief: roki-review-gate
 
 ## Problem

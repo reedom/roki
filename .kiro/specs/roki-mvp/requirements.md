@@ -1,3 +1,31 @@
+---
+refs:
+  id: requirements:roki-mvp
+  kind: requirements
+  title: "roki-mvp Requirements"
+  spec: roki-mvp
+  implements:
+    - roadmap
+  provides:
+    - req:roki-mvp:1
+    - req:roki-mvp:1.6
+    - req:roki-mvp:2
+    - req:roki-mvp:2.5
+    - req:roki-mvp:3
+    - req:roki-mvp:4
+    - req:roki-mvp:5
+    - req:roki-mvp:6
+    - req:roki-mvp:7
+    - req:roki-mvp:8
+    - req:roki-mvp:9
+    - req:roki-mvp:9.4
+    - req:roki-mvp:10
+    - req:roki-mvp:11
+    - req:roki-mvp:11.6
+    - req:roki-mvp:12
+    - req:roki-mvp:13
+---
+
 # Requirements Document
 
 ## Project Description (Input)

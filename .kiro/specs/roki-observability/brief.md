@@ -1,3 +1,11 @@
+---
+refs:
+  id: brief:roki-observability
+  kind: brief
+  title: "roki-observability Brief"
+  spec: roki-observability
+---
+
 # Brief: roki-observability
 
 ## Problem

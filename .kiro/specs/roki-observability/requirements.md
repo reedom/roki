@@ -1,3 +1,13 @@
+---
+refs:
+  id: requirements:roki-observability
+  kind: requirements
+  title: "roki-observability Requirements"
+  spec: roki-observability
+  implements:
+    - roadmap
+---
+
 # Requirements Document
 
 ## Project Description (Input)

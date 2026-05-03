@@ -1,3 +1,13 @@
+---
+refs:
+  id: design:roki-distill-postmerge
+  kind: design
+  title: "roki-distill-postmerge Design"
+  spec: roki-distill-postmerge
+  implements:
+    - requirements:roki-distill-postmerge
+---
+
 # Design Document
 
 ## Overview

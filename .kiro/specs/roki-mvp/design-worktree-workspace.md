@@ -1,3 +1,13 @@
+---
+refs:
+  id: design:roki-mvp:worktree-workspace
+  kind: design
+  title: "Workspace Model — Worktree-Based"
+  spec: roki-mvp
+  depends_on:
+    - design:roki-mvp
+---
+
 # Workspace Model: switch from sandbox dirs to git worktrees — Task 6.1
 
 Status: PROPOSAL — needs user sign-off before task 6.1 is opened.

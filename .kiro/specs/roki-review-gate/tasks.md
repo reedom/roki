@@ -1,3 +1,13 @@
+---
+refs:
+  id: tasks:roki-review-gate
+  kind: tasks
+  title: "roki-review-gate Tasks"
+  spec: roki-review-gate
+  depends_on:
+    - design:roki-review-gate
+---
+
 # Implementation Plan
 
 - [ ] 1. Foundation: schema, configuration, and engine-adapter integration seam

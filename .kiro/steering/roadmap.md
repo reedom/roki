@@ -1,3 +1,10 @@
+---
+refs:
+  id: roadmap
+  kind: roadmap
+  title: "roki Roadmap"
+---
+
 # Roadmap
 
 ## Overview
