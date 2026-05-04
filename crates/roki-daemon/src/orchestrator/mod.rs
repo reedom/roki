@@ -9,5 +9,10 @@
 //! - design.md "Per-issue ticket lifecycle" (lines 332-362)
 //! - requirements.md Req 2.6, 8.1, 8.2, 13.2
 
+pub mod core;
+pub mod escalation;
+pub mod events;
+pub mod hooks;
+pub mod read;
 pub mod state;
 pub mod tracker_bridge;

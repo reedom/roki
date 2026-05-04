@@ -357,7 +357,7 @@ refs:
 
 - [ ] 8. Orchestrator core (state machine, event bus, escalation, routing)
 
-- [ ] 8.1 Implement per-issue Orchestrator actor with state ownership and outcome mapping
+- [x] 8.1 Implement per-issue Orchestrator actor with state ownership and outcome mapping
   - Spawn one tokio task per `IssueId`. mpsc inboxes: tracker events, action outcomes (from `OrchestratorSessionAdapter`), phase events (from `PhaseSubprocessAdapter`), daemon-directive feedback. Broadcast bus out for transition events.
   - Drive transitions only from declared sources: tracker events, `OrchestratorAction` outputs, phase lifecycle events, daemon-directive deliveries, recovery scan, operator shutdown. No silent transitions.
   - On entry to `Pending` from a pre-admission-judge pass or re-admission, request `OrchestratorSessionAdapter::launch` with the per-issue render vars including `mode`. Mode is set on entry and immutable for the orchestrator-session lifetime.
@@ -377,7 +377,7 @@ refs:
   - _Requirements: 4.1, 4.10, 4.11, 5.6, 5.11, 8.1, 8.2_
   - _Boundary: orchestrator/core_
 
-- [ ] 8.2 Implement EventBus + SubscriberHooks (read-only, error-isolated)
+- [x] 8.2 Implement EventBus + SubscriberHooks (read-only, error-isolated)
   - Single tokio broadcast channel for `TransitionEvent`. Bounded channel with drop-newest-on-full and a logged drop counter per subscriber.
   - `SubscriberHooks` registry: `subscribe(subscriber: Arc<dyn TransitionSubscriber>) -> SubscriptionHandle`. There are NO vetoable transitions — subscribers observe read-only.
   - Subscriber failure on a transition is logged with the subscriber identifier and isolated; remaining subscribers still receive the event.
@@ -385,7 +385,7 @@ refs:
   - _Requirements: 8.2, 8.3, 8.4, 13.2_
   - _Boundary: orchestrator/events, orchestrator/hooks_
 
-- [ ] 8.3 Implement EscalationQueue (latest entry per issue)
+- [x] 8.3 Implement EscalationQueue (latest entry per issue)
   - In-memory queue keyed by `IssueId`. Each entry: `EscalationEntry { issue, repo?, kind: EscalationKind, correlation_id, timestamp, structured_fields }` where `EscalationKind ∈ { PhaseStall, RetryExhausted, FsPoison, Orphan, OrchestratorCrash, OrchestratorUnparseable, OrchestratorBudgetExhausted }`.
   - Daemon-detected failures with the orchestrator alive: enqueue and forward as `daemon_directive` to the orchestrator's stdin (Task 8.5).
   - Daemon-detected failures with the orchestrator dead (the three orchestrator-dead reasons + `Stall` and `Orphan` when no orchestrator exists at detection time): enqueue without Linear-write attempt; structured log + TUI escalation queue snapshot only.
@@ -393,7 +393,7 @@ refs:
   - _Requirements: 12.1, 12.3_
   - _Boundary: orchestrator/escalation_
 
-- [ ] 8.4 Implement OrchestratorRead trait and snapshot projection
+- [x] 8.4 Implement OrchestratorRead trait and snapshot projection
   - Define `OrchestratorRead { snapshot() -> SnapshotResponse, issue(&IssueId) -> Option<IssueState>, escalation_queue() -> Vec<EscalationEntry> }`.
   - `IssueState` snapshot exposes the current `WorkerState` (with `Inactive.reason` discriminator), the per-issue `mode` (when in any non-terminal state), the most recently observed Linear state snapshot.
   - Grants no state-mutation rights through this trait.
@@ -402,7 +402,7 @@ refs:
   - _Requirements: 12.1, 13.1_
   - _Boundary: orchestrator/read_
 
-- [ ] 8.5 Implement daemon_directive routing (live-orchestrator + three-orchestrator-dead)
+- [x] 8.5 Implement daemon_directive routing (live-orchestrator + three-orchestrator-dead)
   - For daemon-detected failures with the orchestrator alive (phase stall after stall detection, retry-budget exhaustion, fs poison, recovery orphan), build a `daemon_directive` event with `kind` + structured fields (no Linear text) and write it to the orchestrator's stdin via `OrchestratorSessionAdapter`. The orchestrator returns `action=linear_update_done`; on partial Linear writes (a subset of expected `linear_writes` returned), log the partial-write entry, retain the escalation entry, and do not retry on the orchestrator's behalf.
   - Do NOT send `daemon_directive` for events the orchestrator self-reports through Linear (normal phase completions, agent-recoverable errors, operator-facing pre-phase stops `outcome ∈ {needs_split, allowlist_rejected, spec_incomplete, needs_operator}`).
   - For the three orchestrator-dead `Inactive.reason` values (`orchestrator_crash`, `orchestrator_unparseable`, `orchestrator_budget_exhausted`), do NOT attempt a Linear write. Enqueue an escalation entry, log structurally, surface via TUI escalation queue snapshot only. These are not auto-cleanup eligible — preserve worktree + session tempdir until operator closes the ticket.
@@ -413,7 +413,7 @@ refs:
   - _Requirements: 4.12, 12.2, 12.3, 12.4, 12.5, 12.6, 12.7_
   - _Boundary: orchestrator/escalation, orchestrator/core_
 
-- [ ] 8.6 Implement tracker_terminal preemption + Cleaning entry
+- [x] 8.6 Implement tracker_terminal preemption + Cleaning entry
   - Treat assignment loss / `roki:ready` removal / Linear terminal state as daemon-side stop conditions: SIGTERM the orchestrator session and any in-flight phase subprocess, await their exit, **discard the resulting phase-exit translation** without translating it into `phase_complete` / `phase_nonclean`, and deliver `tracker_terminal` solo to the orchestrator's stdin so its next turn returns `action=stop outcome=cancelled`.
   - Enter `Cleaning` from `Pending` / `Active` / `Backoff` / `Inactive` (from `Inactive` only when the Linear state is observed terminal for non-`AwaitingLinear` reasons). A phase subprocess exit alone shall never trigger entry to `Cleaning`.
   - In `Cleaning`: invoke `WorktreeManager` cleanup via allowlist iteration filtered by branch == issue id verbatim; remove the per-issue session tempdir after worktree cleanup completes; do not delete branches; no retry budget consumed.
@@ -422,7 +422,7 @@ refs:
   - _Requirements: 4.9, 8.1_
   - _Boundary: orchestrator/core, worktree_manager, session_
 
-- [ ] 8.7 Implement fs_poison routing
+- [x] 8.7 Implement fs_poison routing
   - On any session tempdir / worktree creation, removal, rename, or sanitization failure, mark the issue as `Inactive(fs_poison)`, log with the offending path, deliver `daemon_directive(fs_poison)` to the orchestrator session if alive, and refuse further work for the issue until operator intervention. If the orchestrator is dead at detection, surface via structured log + TUI escalation queue snapshot only.
   - Observable completion: integration test forces a worktree-creation failure (read-only fs simulation), asserts (a) the issue lands in `Inactive(fs_poison)`, (b) `daemon_directive(fs_poison)` is delivered to the live orchestrator stub, (c) subsequent work for the issue is refused, (d) the failure is structurally logged with the offending path.
   - _Depends: 5.4, 5.1, 8.5_
