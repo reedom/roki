@@ -5,3 +5,4 @@
 //! `engine/phase_subprocess/`.
 
 pub mod catalog;
+pub mod override_resolver;

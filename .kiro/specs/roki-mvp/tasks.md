@@ -241,14 +241,14 @@ refs:
 
 - [ ] 6. Engine: orchestrator session and phase subprocess adapters
 
-- [ ] 6.1 Implement claude binary discovery + tokio::process primitive
+- [x] 6.1 Implement claude binary discovery + tokio::process primitive
   - Resolve the `claude` binary: config override (`claude_binary`) → `$PATH` discovery → hard refusal at startup with actionable remediation.
   - Build a shared `tokio::process::Command` primitive that spawns a `claude` subprocess with stdin / stdout pipes wired and signal-based termination support; consumed by both the orchestrator-session adapter and the phase-subprocess adapter.
   - Observable completion: unit test substitutes a `fake_claude` test binary and asserts (a) discovery succeeds via `--config` override, (b) discovery fails with actionable error when neither override nor `$PATH` resolves the binary, (c) the spawn primitive returns an open stdin and a line-by-line stdout reader.
   - _Requirements: 1.3_
   - _Boundary: engine/claude_
 
-- [ ] 6.2 (P) Implement StreamJsonParser
+- [x] 6.2 (P) Implement StreamJsonParser
   - Convert newline-delimited stream-json from a phase subprocess into typed lifecycle events (start, tool-use, terminal `result`).
   - Preserve the raw `result.subtype` value verbatim when it does not match the daemon's compiled mapping (forwarded to the orchestrator via `phase_nonclean(unknown_subtype, raw_subtype=...)`).
   - Observable completion: unit test parses a curated stream-json transcript and asserts (a) terminal `result.subtype = success` produces a `phase_complete`-shaped lifecycle event, (b) every documented non-`success` `subtype` (`error_max_turns`, `error_during_execution`, etc.) maps to its classification, (c) an unrecognized `subtype` value is preserved verbatim under `raw_subtype`.
@@ -256,7 +256,7 @@ refs:
   - _Requirements: 5.2, 5.9_
   - _Boundary: engine/stream_
 
-- [ ] 6.3 (P) Implement ActionParser (last-JSON-object-per-turn extractor + schema validator)
+- [x] 6.3 (P) Implement ActionParser (last-JSON-object-per-turn extractor + schema validator)
   - For each orchestrator turn (one logical batch of stdout output), extract the **last** complete JSON object after any extended-thinking block; earlier emissions are advisory progress and are written to the structured log at trace severity, not to the state machine.
   - Validate the extracted object against the published `OrchestratorAction` JSON-Schema. On schema drift: emit a `Drift` outcome that the adapter consumes to issue exactly one daemon-side reprompt with a schema reminder; on a second consecutive drift, emit a terminal `Drift` outcome that the orchestrator core routes to `Inactive(orchestrator_unparseable)`.
   - Observable completion: unit test parses a multi-emission turn (advisory progress + final action) and asserts only the final `OrchestratorAction` is returned; a second test injects an extended-thinking block before the final object and asserts the parser ignores it; a third test feeds two consecutive schema-drift turns and asserts the second produces the terminal `Drift` outcome.
@@ -285,7 +285,7 @@ refs:
   - _Requirements: 4.7, 5.3, 5.4, 5.5_
   - _Boundary: engine/orchestrator_session/budget_
 
-- [ ] 6.6 Implement OverrideResolver (per-phase override lookup with mutual exclusivity)
+- [x] 6.6 Implement OverrideResolver (per-phase override lookup with mutual exclusivity)
   - For each phase nomination, resolve from `WORKFLOW.md`: `extension.phase.<name>.command` (slash-command swap; daemon launches `claude -p '<command>'`) vs `prompt_template_<phase>` named template block (daemon-internal Liquid template; daemon launches `claude --input-format stream-json` and writes the rendered prompt to stdin). The two forms are mutually exclusive per phase (refused at startup or retained-as-previous at hot reload).
   - Independent additive scalars: `extension.phase.<name>.max_turns`, `extension.phase.<name>.stall_seconds`, `extension.phase.<name>.max_attempts`. May coexist with either prompt-override form.
   - Absent either prompt-override form, return the catalog default per `(phase, mode)`.

@@ -4,5 +4,7 @@
 //! Interfaces" sections OrchestratorSessionAdapter and
 //! PhaseSubprocessAdapter.
 
+pub mod claude;
 pub mod orchestrator_session;
 pub mod phase_subprocess;
+pub mod stream;

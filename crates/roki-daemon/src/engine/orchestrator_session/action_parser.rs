@@ -1,6 +1,10 @@
-//! Orchestrator response schema types. The actual stdout extractor lives in
-//! task 6.3; this file declares the schema surface so other modules can
-//! depend on the types now.
+//! Orchestrator response schema types AND the per-turn stdout extractor.
+//!
+//! The schema surface (types + JSON-Schema) is exposed unchanged for
+//! cross-module consumers; the [`ActionParser`] state machine drains a
+//! turn's stdout lines and emits exactly one [`ParseTurnOutcome`] per turn,
+//! tracking consecutive schema-drift turns so the adapter can issue the
+//! documented one-shot reprompt before terminal drift.
 //!
 //! Schema reference: design.md "Orchestrator response schema" (lines
 //! ~899-919). Field rules:
@@ -234,6 +238,133 @@ pub fn orchestrator_action_json_schema() -> String {
 pub static ORCHESTRATOR_ACTION_JSON_SCHEMA: std::sync::LazyLock<String> =
     std::sync::LazyLock::new(orchestrator_action_json_schema);
 
+/// Per-turn extraction outcome.
+///
+/// On schema drift the adapter issues exactly one reprompt with a schema
+/// reminder body; a second consecutive drift terminates the orchestrator
+/// session via `Inactive(orchestrator_unparseable)`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ParseTurnOutcome {
+    /// Final parseable JSON object validated as a typed action.
+    Action(OrchestratorAction),
+    /// First-time drift; caller issues a one-shot reprompt with the schema
+    /// reminder body.
+    Drift { reprompt_payload: String },
+    /// Second consecutive drift; caller routes to
+    /// `Inactive(orchestrator_unparseable)` and surfaces the raw last line
+    /// for operator diagnosis.
+    TerminalDrift { last_raw_stdout: String },
+}
+
+/// Stateful per-session parser. The state is just the consecutive-drift
+/// counter; a successful action parse resets it.
+#[derive(Debug, Default)]
+pub struct ActionParser {
+    drift_count: u32,
+}
+
+impl ActionParser {
+    pub fn new() -> Self {
+        Self { drift_count: 0 }
+    }
+
+    /// Current consecutive drift count (0 after each successful parse).
+    pub fn drift_count(&self) -> u32 {
+        self.drift_count
+    }
+
+    /// Drain a complete turn's stdout (already line-split). Earlier
+    /// emissions are advisory-only; the LAST parseable JSON object is the
+    /// authoritative action. Extended-thinking lines (`{"type":"thinking"`
+    /// envelope or a `<thinking>...</thinking>` literal) are skipped before
+    /// the last-object scan.
+    pub fn parse_turn(&mut self, lines: &[String]) -> ParseTurnOutcome {
+        let candidate_lines: Vec<&String> = lines
+            .iter()
+            .filter(|line| !is_thinking_line(line))
+            .collect();
+
+        let last_json_object = candidate_lines
+            .iter()
+            .rev()
+            .find_map(|line| try_parse_json_object(line));
+
+        let Some(value) = last_json_object else {
+            return self.record_drift(last_raw(lines));
+        };
+
+        match serde_json::from_value::<OrchestratorAction>(value) {
+            Ok(action) => match validate_action(&action) {
+                Ok(()) => {
+                    self.drift_count = 0;
+                    ParseTurnOutcome::Action(action)
+                }
+                Err(_) => self.record_drift(last_raw(lines)),
+            },
+            Err(_) => self.record_drift(last_raw(lines)),
+        }
+    }
+
+    fn record_drift(&mut self, last_raw_stdout: String) -> ParseTurnOutcome {
+        self.drift_count += 1;
+        if self.drift_count >= 2 {
+            // Reset so a recovery does not start at 1; orchestrator will be
+            // torn down before this parser is reused, but keep the invariant
+            // sane for any caller that holds the handle past terminal drift.
+            ParseTurnOutcome::TerminalDrift { last_raw_stdout }
+        } else {
+            ParseTurnOutcome::Drift {
+                reprompt_payload: schema_reminder_payload(),
+            }
+        }
+    }
+}
+
+/// Body of the one-shot drift reprompt: a stable schema reminder. The
+/// orchestrator-session adapter writes it on the orchestrator's stdin.
+fn schema_reminder_payload() -> String {
+    let schema = &*ORCHESTRATOR_ACTION_JSON_SCHEMA;
+    format!(
+        "Your previous turn did not produce a parseable orchestrator \
+         action. Reply with EXACTLY one JSON object on its own line that \
+         conforms to the following schema and nothing else.\n\n{schema}"
+    )
+}
+
+fn last_raw(lines: &[String]) -> String {
+    lines
+        .iter()
+        .rev()
+        .find(|line| !line.trim().is_empty())
+        .cloned()
+        .unwrap_or_default()
+}
+
+fn is_thinking_line(line: &str) -> bool {
+    let trimmed = line.trim_start();
+    if trimmed.starts_with("<thinking>") || trimmed.starts_with("</thinking>") {
+        return true;
+    }
+    // `{"type":"thinking"...` envelope (allow optional whitespace inside).
+    if let Some(rest) = trimmed.strip_prefix('{') {
+        let mut compact = rest.replace([' ', '\t'], "");
+        compact.insert(0, '{');
+        if compact.starts_with("{\"type\":\"thinking\"") {
+            return true;
+        }
+    }
+    false
+}
+
+fn try_parse_json_object(line: &str) -> Option<serde_json::Value> {
+    let trimmed = line.trim();
+    if trimmed.is_empty() || !trimmed.starts_with('{') {
+        return None;
+    }
+    let value: serde_json::Value = serde_json::from_str(trimmed).ok()?;
+    if value.is_object() { Some(value) } else { None }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -382,5 +513,112 @@ mod tests {
         let json = serde_json::to_string(&action).unwrap();
         assert!(json.contains("\"action\":\"stop\""));
         assert!(json.contains("\"outcome\":\"success\""));
+    }
+
+    fn line(s: &str) -> String {
+        s.to_owned()
+    }
+
+    fn run_phase_action_json(phase: &str) -> String {
+        format!(
+            r#"{{"action":"run_phase","phase":"{phase}","reason":"go {phase}"}}"#
+        )
+    }
+
+    #[test]
+    fn parse_turn_extracts_only_the_final_json_object() {
+        let mut parser = ActionParser::new();
+        // Advisory progress emissions before the final action.
+        let lines = vec![
+            line(r#"{"type":"system","subtype":"progress","note":"thinking"}"#),
+            line("plain prose advisory line"),
+            line(&run_phase_action_json("implement")),
+        ];
+        match parser.parse_turn(&lines) {
+            ParseTurnOutcome::Action(action) => {
+                assert_eq!(action.action, ActionKind::RunPhase);
+                assert_eq!(action.phase, Some(PhaseName::Implement));
+                assert_eq!(action.reason.as_str(), "go implement");
+            }
+            other => panic!("expected Action, got {other:?}"),
+        }
+        assert_eq!(parser.drift_count(), 0);
+    }
+
+    #[test]
+    fn parse_turn_skips_extended_thinking_lines() {
+        let mut parser = ActionParser::new();
+        let lines = vec![
+            line(r#"{"type":"thinking","content":"weighing options"}"#),
+            line("<thinking>scratch</thinking>"),
+            line(&run_phase_action_json("review")),
+        ];
+        match parser.parse_turn(&lines) {
+            ParseTurnOutcome::Action(action) => {
+                assert_eq!(action.phase, Some(PhaseName::Review));
+            }
+            other => panic!("expected Action, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn first_drift_emits_reprompt_second_emits_terminal_drift() {
+        let mut parser = ActionParser::new();
+        let drift_lines = vec![line("oops, no JSON here")];
+
+        match parser.parse_turn(&drift_lines) {
+            ParseTurnOutcome::Drift { reprompt_payload } => {
+                assert!(reprompt_payload.contains("OrchestratorAction"));
+            }
+            other => panic!("expected Drift, got {other:?}"),
+        }
+        assert_eq!(parser.drift_count(), 1);
+
+        let second_drift = vec![
+            line("still no parseable object"),
+            line("just prose"),
+        ];
+        match parser.parse_turn(&second_drift) {
+            ParseTurnOutcome::TerminalDrift { last_raw_stdout } => {
+                assert_eq!(last_raw_stdout, "just prose");
+            }
+            other => panic!("expected TerminalDrift, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn successful_parse_after_one_drift_resets_counter() {
+        let mut parser = ActionParser::new();
+        let _ = parser.parse_turn(&[line("garbage")]);
+        assert_eq!(parser.drift_count(), 1);
+
+        let recovery = vec![line(&run_phase_action_json("classify"))];
+        match parser.parse_turn(&recovery) {
+            ParseTurnOutcome::Action(action) => {
+                assert_eq!(action.phase, Some(PhaseName::Classify));
+            }
+            other => panic!("expected Action, got {other:?}"),
+        }
+        assert_eq!(parser.drift_count(), 0);
+
+        // A subsequent fresh drift must be treated as a first drift, not as
+        // a terminal one — the counter reset above is what guarantees this.
+        match parser.parse_turn(&[line("garbage again")]) {
+            ParseTurnOutcome::Drift { .. } => {}
+            other => panic!("expected fresh Drift, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn cross_field_validation_failure_treated_as_drift() {
+        let mut parser = ActionParser::new();
+        // run_phase requires phase; the wire shape parses but
+        // validate_action rejects it.
+        let invalid =
+            line(r#"{"action":"run_phase","reason":"missing phase"}"#);
+        match parser.parse_turn(&[invalid]) {
+            ParseTurnOutcome::Drift { .. } => {}
+            other => panic!("expected Drift on cross-field invalid, got {other:?}"),
+        }
     }
 }
