@@ -55,14 +55,14 @@ All docs across kinds. For per-kind indexes see the per-kind INDEX files; for AI
 | `fr:07-worker-execution` | Worker Execution | roki-mvp | [docs/fr/07-worker-execution.md](fr/07-worker-execution.md) |
 | `fr:08-pre-implementation-gate` | Pre-Implementation Gate | roki-spec-gate | [docs/fr/08-pre-implementation-gate.md](fr/08-pre-implementation-gate.md) |
 | `fr:09-pre-pr-gate` | Pre-PR Gate | roki-review-gate | [docs/fr/09-pre-pr-gate.md](fr/09-pre-pr-gate.md) |
-| `fr:10-post-merge-distill` | Post-Merge Distill | roki-distill-postmerge | [docs/fr/10-post-merge-distill.md](fr/10-post-merge-distill.md) |
 | `fr:11-agent-tool-boundary` | Agent Tool Boundary | roki-mvp | [docs/fr/11-agent-tool-boundary.md](fr/11-agent-tool-boundary.md) |
 | `fr:12-extension-surface` | Extension Surface | roki-mvp | [docs/fr/12-extension-surface.md](fr/12-extension-surface.md) |
 | `fr:13-observability-logs` | Observability Logs | roki-mvp | [docs/fr/13-observability-logs.md](fr/13-observability-logs.md) |
-| `fr:14-operator-notifications` | Operator Notifications | roki-mvp | [docs/fr/14-operator-notifications.md](fr/14-operator-notifications.md) |
+| `fr:14-operator-notifications` | Daemon-Only Failure Surfacing | roki-mvp | [docs/fr/14-operator-notifications.md](fr/14-operator-notifications.md) |
 | `fr:15-http-api` | HTTP API | roki-observability | [docs/fr/15-http-api.md](fr/15-http-api.md) |
 | `fr:16-roki-tui` | roki-tui | roki-observability | [docs/fr/16-roki-tui.md](fr/16-roki-tui.md) |
 | `fr:17-doc-cross-references` | Doc Cross-References |  | [docs/fr/17-doc-cross-references.md](fr/17-doc-cross-references.md) |
+| `fr:18-worker-skill-workflow` | Worker Skill Workflow |  | [docs/fr/18-worker-skill-workflow.md](fr/18-worker-skill-workflow.md) |
 
 ## reference (6)
 

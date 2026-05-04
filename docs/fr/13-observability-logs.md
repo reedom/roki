@@ -39,10 +39,9 @@ Even in stages without a dedicated UI, an operator must be able to diagnose the 
 The **exact list** of events emitted by each spec lives in [`docs/reference/log-events.md`](../reference/log-events.md).
 Here we only outline the conceptual categories:
 
-- **roki-mvp**: worker lifecycle changes, session/worktree operations, Linear poll/webhook, backoff/stall decisions, retry attempts, state-machine transitions, setup-judge completion, subprocess stderr lines.
+- **roki-mvp**: worker lifecycle changes (including `Inactive(reason=...)` transitions), session/worktree operations, Linear poll/webhook, backoff/stall decisions, retry attempts, state-machine transitions, setup-judge completion, linear-updater dispatch / outcome / escalation queue updates, subprocess stderr lines.
 - **Pre-implementation gate** ([08](08-pre-implementation-gate.md)): gate-evaluation start, spec-materialization turn start/end, per-attempt timeout, validation outcome, veto decision, escalation.
-- **Pre-PR gate** ([09](09-pre-pr-gate.md)): gate decision (with review-turn correlation), veto/escalation.
-- **Distill phase** ([10](10-post-merge-distill.md)): sweep activation, sweep turn start/completion, manifest validation start/outcome, terminal cleanup gating decision.
+- **Pre-PR gate** ([09](09-pre-pr-gate.md)): gate decision (Allow / Deny+RetryWithContext / Deny exhausted), validation failure code, fix-finding context payload size, escalation.
 - **HTTP API** ([15](15-http-api.md)): per-request event (method/path/status/duration/correlation), refresh request.
 
 ### Surfacing subprocess stderr

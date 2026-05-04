@@ -42,7 +42,7 @@ Today an operator's only way to see "the daemon's current state" is to `tail | g
 
 #### `GET /api/v1/state`
 
-- **Response**: HTTP 200 + a JSON body. A daemon snapshot (version, uptime, configured repositories, set of active workers, escalation queue, aggregate token usage, aggregate rate-limit window) and per-issue entries (`(repo, issue)` key, current `WorkerState`, summary of the latest lifecycle event, latest timestamp, current correlation identifier).
+- **Response**: HTTP 200 + a JSON body. A daemon snapshot (version, uptime, configured repositories, set of active workers, escalation queue, aggregate token usage, aggregate rate-limit window) and per-issue entries (issue identifier key, current `WorkerState`, latest `Inactive(reason=...)` discriminator when applicable, summary of the latest lifecycle event, latest timestamp, current correlation identifier).
 - **Coherent snapshot**: assembled from a single coherent read; entries do not drift from each other beyond the documented bound.
 - **Headers**: `Content-Type: application/json; charset=utf-8`, `Cache-Control: no-store`.
 - **Unhealthy state**: HTTP 503 + a JSON error body (the names of unhealthy subsystems).
@@ -50,8 +50,7 @@ Today an operator's only way to see "the daemon's current state" is to `tail | g
 
 #### `GET /api/v1/<issue>`
 
-- **Response**: HTTP 200 + a JSON body. Per-issue detail (key, current state, recent lifecycle event log within the documented retention window, latest error, configured permission strategy, workspace path).
-- **Multi-repo disambiguation**: when the configuration routes the same issue identifier to multiple repos, disambiguate via the `repo` query parameter; if missing, return HTTP 400.
+- **Response**: HTTP 200 + a JSON body. Per-issue detail (issue identifier key, current state, latest `Inactive(reason=...)` discriminator when applicable, recent lifecycle event log within the documented retention window, latest error, configured permission strategy, workspace path).
 - **Not found**: HTTP 404 + a JSON error body.
 - **Truncation**: a recent event log that exceeds the documented max is truncated and a `truncated: true` field is added.
 
@@ -73,7 +72,7 @@ Today an operator's only way to see "the daemon's current state" is to `tail | g
 ### Symphony schema compatibility
 
 - All three endpoints are compatible with symphony's documented `/api/v1/...` contract in field names / structure.
-- **roki-specific fields** (e.g. multi-repo `(repo, issue)` keying): added under names that do not collide with symphony fields, and documented in `SPEC.md`.
+- **roki-specific fields** (e.g. `Inactive.reason` discriminator, escalation queue entry): added under names that do not collide with symphony fields, and documented in the consuming spec's design.
 - **Versioning**: currently `/api/v1/`. Breaking changes introduce `/api/v2/` without breaking existing consumers.
 
 ### Logging (no body leakage)

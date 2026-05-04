@@ -57,16 +57,13 @@ Fields automatically attached to every event via spans.
 | Gate decision | `(repo, issue)` + correlation identifier (review turn) + attempt counter + decision | [09-pre-pr-gate](../fr/09-pre-pr-gate.md) | roki-review-gate Req 8.5 |
 | Veto / escalation | Failing reason + on escalation (cap exhausted / `fail-missing-spec`) | [09-pre-pr-gate](../fr/09-pre-pr-gate.md) | roki-review-gate Req 8.2, Req 8.5 |
 
-## Events emitted by roki-distill-postmerge
+## Events emitted by the roki-mvp linear-updater subagent
 
 | Event | Summary | Used by | Requirements |
 |---|---|---|---|
-| Distill sweep activation | Sweep enqueue / cancellation | [10-post-merge-distill](../fr/10-post-merge-distill.md) | roki-distill-postmerge Req 1.5, Req 13.1 |
-| Sweep turn start | At turn dispatch | [10-post-merge-distill](../fr/10-post-merge-distill.md) | roki-distill-postmerge Req 3.5, Req 13.1 |
-| Sweep turn completion | At turn completion | [10-post-merge-distill](../fr/10-post-merge-distill.md) | roki-distill-postmerge Req 3.5, Req 13.1 |
-| Manifest validation start | Daemon validation begins | [10-post-merge-distill](../fr/10-post-merge-distill.md) | roki-distill-postmerge Req 13.1 |
-| Manifest validation outcome | `schema_version` + entry count per disposition + path-safety failure details | [10-post-merge-distill](../fr/10-post-merge-distill.md) | roki-distill-postmerge Req 13.1, Req 13.4 |
-| Terminal cleanup gating decision | Hold / release | [10-post-merge-distill](../fr/10-post-merge-distill.md) | roki-distill-postmerge Req 13.1 |
+| linear-updater dispatch | issue id + directive `kind` + structured fields + correlation id | [14-operator-notifications](../fr/14-operator-notifications.md) | roki-mvp Req 5.10, Req 11.1 |
+| linear-updater outcome | success / non-clean exit / Linear API error / MCP unavailable + retry decision | [14-operator-notifications](../fr/14-operator-notifications.md) | roki-mvp Req 5.10, Req 11.8 |
+| Escalation queue update | issue id + failure category + structured fields + (set / cleared) | [14-operator-notifications](../fr/14-operator-notifications.md) | roki-mvp Req 12.1 |
 
 ## Events emitted by the roki-observability HTTP server
 
@@ -88,8 +85,8 @@ Enabled by the `--debug` CLI flag or a config block ([cli.md](cli.md)).
 ## What is not logged
 
 - **Request / response bodies** (HTTP API) — only metadata fields, so agent strings do not leak into logs
-- **Artifact contents** (distill phase) — only the artifact path and the manifest's structured fields
-- **Secret strings** — Linear API token / webhook secret / Slack credentials and similar values are redacted before emit
+- **Linear-updater directive prose** — the directive carries the issue id + `kind` + structured fields; comment text composed by the linear-updater agent is not reflected back into the daemon log
+- **Secret strings** — Linear API token / webhook secret and similar values are redacted before emit
 
 ## When adding a new event
 

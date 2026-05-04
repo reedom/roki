@@ -18,7 +18,7 @@ refs:
 
 # FR 08: Pre-Implementation Gate
 
-> Gate `Queued -> Active` with a vetoable hook. Do not let the worker enter `Active` unless `.kiro/specs/<issue>/requirements.md` (in EARS form) exists.
+> Gate `Judging -> Active` with a vetoable hook. Do not let the worker enter `Active` unless `.kiro/specs/<issue>/requirements.md` (in EARS form) exists.
 
 ## Purpose
 
@@ -28,8 +28,8 @@ When an agent jumps straight from a ticket to code without a spec phase, the acc
 
 ### Gating flow
 
-1. **Subscription**: at daemon startup, a subscriber is registered for `Queued -> Active` (vetoable) (the hook from [04-state-machine-and-recovery](04-state-machine-and-recovery.md)).
-2. **Trigger**: the orchestrator publishes a `Queued -> Active` event.
+1. **Subscription**: at daemon startup, a subscriber is registered for `Judging -> Active` (vetoable) (the hook from [04-state-machine-and-recovery](04-state-machine-and-recovery.md)).
+2. **Trigger**: the orchestrator publishes a `Judging -> Active` event.
 3. **Materialization turn**: the gate invokes one constrained turn against the agent session for `(repo, issue)`.
    - The sole purpose of the turn: produce `.kiro/specs/<issue>/requirements.md` by merging the Linear ticket and the project's existing EARS docs under `.kiro/specs/`.
    - On the agent side, the kiro-discovery skill auto-invokes (description match) to perform the merge.
@@ -60,7 +60,7 @@ Pass conditions (all must hold):
 ### Concurrency and idempotency
 
 - Concurrent evaluations of the same `(repo, issue)` are serialized.
-- If a `Queued -> Active` event is duplicated by webhook redelivery, etc., it is treated as the same logical attempt and does not double-consume `max_attempts`.
+- If a `Judging -> Active` event is duplicated by webhook redelivery, etc., it is treated as the same logical attempt and does not double-consume `max_attempts`.
 - Per-`(repo, issue)` independence (one slow / failing evaluation does not affect others).
 - If the daemon crashes during evaluation, in-flight attempts are treated as failed at the next start, and a fresh attempt is restarted with the remaining budget restored by reconciliation.
 
@@ -86,7 +86,7 @@ The `kiro_spec_status` agent tool (described in detail in [11-agent-tool-boundar
 - **Deep semantic EARS validation** is out of scope (only regex shape).
 - **Quality judgment of agent output** is the responsibility of the agent / kiro-discovery skill.
 - **Cross-spec consistency checks** (e.g. whether this ticket's requirements contradict project-level EARS) are out of scope (a future `roki-spec-sync` will own this).
-- **Transitions other than `Queued -> Active`** are not touched.
+- **Transitions other than `Judging -> Active`** are not touched.
 - **Persistent attempt history** is not maintained (in-memory + log only).
 - **No mutating action is exposed to the agent** (`kiro_spec_status` is read-only).
 

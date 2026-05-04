@@ -22,23 +22,24 @@ Developers manually shepherd Linear tickets through implementation: read ticket,
 - A `SPEC.md` at the repo root captures the contract language-agnostically so future ports / forks remain consistent.
 
 ## Approach
-Symphony-parity for the daemon shape; Claude Code for the agent. Rust 2024 + tokio. In-memory orchestrator (no SQLite), tracker-driven recovery via Linear + filesystem on restart. Per-issue workspace dir (sanitized identifier under workspace root), multi-repo from day one keyed `(repo, issue)`. `WORKFLOW.md` (Liquid + Markdown, hot reload) is the user-facing policy artifact. Engine-adapter contract: long-lived `claude --print --output-format stream-json` subprocess; events drive a state machine; `max_turns` per worker, exponential backoff between worker sessions, continuation retry on clean exit.
+Symphony-parity for the daemon shape; Claude Code for the agent. Rust 2024 + tokio. In-memory orchestrator (no SQLite), tracker-driven recovery via Linear + filesystem on restart. Per-issue workspace dir (sanitized identifier under workspace root), keyed by Linear issue id alone. One ticket = one repo: the setup judge classifies an admitted issue into `act` (with exactly one allowlisted repo) or `noop`; multi-repo tickets are rejected back to the operator (`needs-split` Linear label + comment) via the linear-updater subagent. `WORKFLOW.md` (Liquid + Markdown, hot reload) is the user-facing policy artifact, with three named template blocks: `prompt_template_setup`, `prompt_template_worker`, `prompt_template_linear_updater`. Engine-adapter contract: a long-lived `claude --print --output-format stream-json` subprocess for the main worker plus two short-lived bounded one-shot invocations of the same engine for the setup judge and the linear-updater; events drive a state machine; `max_turns` per worker; clean exit is terminal (no daemon-side retry on clean exit) — the review gate may Deny the clean exit and trigger an intentional re-launch with `additional_context`; non-clean exits use a configurable retry budget with exponential backoff between attempts.
 
 ## Scope
 - **In**:
   - `SPEC.md` at repo root (language-agnostic)
   - Rust binary (clap CLI, tokio runtime, tracing logs)
-  - `WORKFLOW.md` loader: Liquid + Markdown front matter, hot reload, schema validation
-  - In-memory orchestrator state machine (per-issue worker lifecycle)
+  - `WORKFLOW.md` loader: Liquid + Markdown front matter, hot reload, schema validation; three named template blocks (`prompt_template_setup`, `prompt_template_worker`, `prompt_template_linear_updater`)
+  - In-memory orchestrator state machine (per-issue worker lifecycle, keyed by issue id alone, six states with an `Inactive` reason discriminator)
   - Linear GraphQL client (read-only for daemon; webhook receiver + polling fallback)
   - Tracker normalization (issue model, state extraction, label extraction)
-  - Per-issue workspace directory lifecycle (create on active, delete on terminal, sanitize identifier, path-safety invariants)
-  - Long-lived `claude` subprocess adapter: launch, stream JSON event parser, state machine, max_turns, stall detection by event-inactivity
-  - `linear_graphql` proxy tool exposed to the agent (single GraphQL operation per call; daemon owns auth)
-  - Bounded loops: max_turns per worker (default 20), exponential backoff between worker invocations (10s -> 5min), 1s continuation retry on clean exit
-  - Multi-repo: workspace keyed `(repo, issue)`; one daemon serves multiple repos
+  - Per-issue workspace directory lifecycle (create on active, delete on terminal, sanitize identifier, path-safety invariants); single repo per issue
+  - Long-lived `claude` subprocess adapter for the main worker plus two short-lived bounded one-shot invocations of the same engine for the setup judge and the linear-updater: launch, stream JSON event parser, lifecycle event mapping, max_turns, stall detection by event-inactivity
+  - linear-updater subagent: a setup-judge-shaped one-shot `claude` invocation that translates daemon-only failure events (stall, retry exhaustion, multi-repo rejection, judge unparseable, fs poison, orphan recovery) into Linear label additions and comments via the operator's installed Linear MCP. The daemon never issues a Linear write itself
+  - Bounded loops: max_turns per worker (default 20), exponential backoff between worker re-launches on non-clean exit (10s -> 5min), retry budget on non-clean exit; clean exit is terminal except for review-gate-driven intentional re-launches
+  - Single repo per ticket: setup judge yields exactly one allowlisted repo (`act`) or no repo (`noop`); judge findings naming more than one repo are rejected back to the operator via linear-updater
   - Configurable permissions: prefer `--settings` allowlist, fallback to `--dangerously-skip-permissions`
-  - Default sandbox = `workspace-write` + reject elicitations (override via `WORKFLOW.md`)
+  - Default sandbox = `workspace-write` + reject elicitations for the main worker (overridable via `WORKFLOW.md`); the setup judge and linear-updater always run with a read-only filesystem sandbox regardless of operator overrides
+  - Daemon-only failure surfacing through linear-updater (Linear label + comment) plus the optional TUI escalation queue. No Slack or other push channel
 
 - **Out** (scoped to follow-up specs):
   - kiro-spec gate enforcement (roki-spec-gate)
@@ -58,15 +59,17 @@ Symphony-parity for the daemon shape; Claude Code for the agent. Rust 2024 + tok
 
 ## Out of Boundary
 - Persistent state (SQLite, etc.) -- deliberately rejected per symphony precedent.
-- Any logic that writes Linear state, creates PRs, or commits code -- that is the agent's job, full stop.
+- Any logic that writes Linear state, creates PRs, or commits code -- that is the agent's job, full stop. The linear-updater subagent is an agent invocation, not a daemon-side write path.
 - Any kiro-specific phase logic -- gates are separate specs.
 - TUI / HTTP server -- separate observability spec.
-- Distillation -- separate spec.
+- Multi-repo tickets -- one ticket = one repo; the setup judge rejects multi-repo classification back to the operator via linear-updater.
+- Post-merge flow-document distill / archive sweep -- handled in CI, not by the daemon.
+- Slack and other push-style operator notification channels -- daemon-only failures surface through linear-updater (Linear) and the TUI escalation queue.
 - Multi-host (SSH) workers -- deferred.
 
 ## Upstream / Downstream
 - **Upstream**: Linear API; Claude Code CLI (`claude --print --output-format stream-json`); user-installed kiro skills under `~/.claude/skills/kiro-*`; `gh` CLI (in-agent, not daemon).
-- **Downstream**: roki-spec-gate, roki-review-gate, roki-observability, roki-distill-postmerge all depend on this MVP's state-machine extension points and tool registry.
+- **Downstream**: roki-spec-gate, roki-review-gate, roki-observability all depend on this MVP's state-machine extension points and the engine adapter's bounded-invocation taxonomy. (roki-distill-postmerge is no longer active; flow-document distill is handled in CI.)
 
 ## Existing Spec Touchpoints
 - **Extends**: none (greenfield).

@@ -33,7 +33,6 @@ Per workspace, specified with `--config <path>` ([cli.md](cli.md)).
 | `[server].port` | no | Bind port of the webhook receiver (overridable via CLI `--port`) | Refuses startup on bind failure | [01-daemon-lifecycle](../fr/01-daemon-lifecycle.md) | roki-mvp Req 2.5 |
 | `[[repos]].ghq` | 0+ | `ghq` identifier of an allowlisted repo (`owner/repo` or `host/owner/repo`) | Refuses startup on duplicates; an empty allowlist still boots (judge results route to `Skipped`) | [05-setup-judge](../fr/05-setup-judge.md), [06-worktree-and-session](../fr/06-worktree-and-session.md) | roki-mvp Req 2.1, Req 2.2, Req 2.7 |
 | `[judge].model` | no | Claude model used by the setup judge | The documented default applies when omitted | [05-setup-judge](../fr/05-setup-judge.md) | roki-mvp Req 2.10 |
-| `[notifications.slack]` | no | Webhook URL or bot token + target channel | Refuses startup if the block is present and the destination cannot be resolved; absence yields a warning + skip | [14-operator-notifications](../fr/14-operator-notifications.md) | roki-mvp Req 2.12 |
 | `[permissions].strategy` | yes | `--settings` allowlist or `--dangerously-skip-permissions` (also overridable via CLI flag) | Refuses startup if not set | [07-worker-execution](../fr/07-worker-execution.md) | roki-mvp Req 9.3, Req 9.4, Req 9.5 |
 
 `roki.toml` itself is **not hot-reloaded** (a restart is required).
@@ -48,6 +47,7 @@ Per workspace, Liquid + Markdown, hot-reload supported. Composed of front matter
 |---|---|---|---|---|
 | `prompt_template_setup` (named template block) | yes | Prompt block for the setup judge subprocess | [05-setup-judge](../fr/05-setup-judge.md) | roki-mvp Req 6.1, Req 6.6 |
 | `prompt_template_worker` (named template block) | yes | Prompt block for the main worker subprocess | [07-worker-execution](../fr/07-worker-execution.md) | roki-mvp Req 6.1, Req 6.6 |
+| `prompt_template_linear_updater` (named template block) | yes | Prompt block for the linear-updater subagent (translates daemon-only failure directives into Linear label/comment writes via the operator's MCP) | [14-operator-notifications](../fr/14-operator-notifications.md) | roki-mvp Req 6.1, Req 6.6 |
 
 ### Reserved extension namespaces
 
@@ -59,14 +59,14 @@ Each downstream spec consumes only its own namespace. The loader **round-trips u
 | `extension.gates.spec.timeout_ms` | roki-spec-gate | no | Per-attempt timeout. Non-positive causes the gate evaluation for that repo to be refused | [08-pre-implementation-gate](../fr/08-pre-implementation-gate.md) | roki-spec-gate Req 4.1, Req 7.5 |
 | `extension.gates.spec.max_attempts` | roki-spec-gate | no | Attempt cap. Same as above for non-positive | [08-pre-implementation-gate](../fr/08-pre-implementation-gate.md) | roki-spec-gate Req 4.3, Req 7.5 |
 | `extension.gates.review.required_status` | roki-review-gate | no | The artifact status considered a pass (default `pass`) | [09-pre-pr-gate](../fr/09-pre-pr-gate.md) | roki-review-gate Req 6.2 |
-| `extension.gates.review.timeout_ms` | roki-review-gate | no | Upper bound on the review turn's duration | [09-pre-pr-gate](../fr/09-pre-pr-gate.md) | roki-review-gate Req 6.3, Req 8.1 |
-| `extension.gates.review.max_attempts` | roki-review-gate | no | Review attempt cap (default 3) | [09-pre-pr-gate](../fr/09-pre-pr-gate.md) | roki-review-gate Req 5.1, Req 6.4 |
+| `extension.gates.review.max_attempts` | roki-review-gate | no | Review attempt cap (default 3); each Deny+RetryWithContext re-launches the worker once with the failing-criterion payload as `additional_context` | [09-pre-pr-gate](../fr/09-pre-pr-gate.md) | roki-review-gate Req 5.1, Req 6.3 |
 | `extension.server.port` | roki-observability | no | HTTP API port (omitting disables the API) | [15-http-api](../fr/15-http-api.md) | roki-observability Req 1.1, Req 1.2, Req 15.2 |
 | `extension.server.bind` | roki-observability | no | HTTP API bind host (default `127.0.0.1`) | [15-http-api](../fr/15-http-api.md) | roki-observability Req 7.1, Req 15.2 |
 | `extension.server.min_refresh_interval_seconds` | roki-observability | no | Minimum coalescing interval for `POST /refresh` | [15-http-api](../fr/15-http-api.md) | roki-observability Req 4.4, Req 15.2 |
 | `extension.server.max_event_log_per_issue` | roki-observability | no | Maximum length of the event log returned by the per-issue endpoint | [15-http-api](../fr/15-http-api.md) | roki-observability Req 3.6, Req 15.2 |
-| `extension.distill.paths` | roki-distill-postmerge | no | List of path patterns to sweep | [10-post-merge-distill](../fr/10-post-merge-distill.md) | roki-distill-postmerge Req 4.1, Req 4.3 |
-| `extension.distill.routes` | roki-distill-postmerge | no | Classification rules (path/filename pattern → `delete`/`archive`/`distill`) | [10-post-merge-distill](../fr/10-post-merge-distill.md) | roki-distill-postmerge Req 4.2 |
+| `extension.linear_updater.timeout_ms` | roki-mvp (linear-updater) | no | Per-invocation timeout for the linear-updater subagent | [14-operator-notifications](../fr/14-operator-notifications.md), [07-worker-execution](../fr/07-worker-execution.md) | roki-mvp Req 2.12, Req 5.10 |
+| `extension.linear_updater.model` | roki-mvp (linear-updater) | no | Claude model identifier (defaults to the same small model used by the setup judge) | [14-operator-notifications](../fr/14-operator-notifications.md) | roki-mvp Req 2.12, Req 5.10 |
+| `extension.linear_updater.allowed_tools` | roki-mvp (linear-updater) | no | Optional restriction on the MCP tool names linear-updater may invoke | [14-operator-notifications](../fr/14-operator-notifications.md) | roki-mvp Req 2.12, Req 5.10 |
 
 ### Hot reload and validation
 
