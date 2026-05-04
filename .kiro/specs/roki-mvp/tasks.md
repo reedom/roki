@@ -159,7 +159,7 @@ refs:
 
 - [ ] 4. WORKFLOW.md loader, schema, hot reload, rendering
 
-- [ ] 4.1 Implement WORKFLOW.md parser (front matter + Liquid + Markdown body)
+- [x] 4.1 Implement WORKFLOW.md parser (front matter + Liquid + Markdown body)
   - Parse YAML (default) or TOML front matter; render Liquid + Markdown body; identify required and optional named template blocks within the rendered body.
   - Required blocks: `prompt_template_orchestrator`, `prompt_template_implement_direct`, `prompt_template_validate_direct`, `prompt_template_open_pr`. Refuse to start when any is missing.
   - Optional blocks: `prompt_template_<phase>` (per-phase override surface; phase ∈ {classify, implement, review, validate, open_pr, ci_fix, finalize_review}).
@@ -167,7 +167,7 @@ refs:
   - _Requirements: 2.15, 6.1_
   - _Boundary: workflow/parse_
 
-- [ ] 4.2 Implement WORKFLOW.md JSON-Schema validator with reserved namespaces
+- [x] 4.2 Implement WORKFLOW.md JSON-Schema validator with reserved namespaces
   - Validate the parsed policy shape against the published JSON-Schema. Reserved namespaces: `extension.orchestrator.*` (typed slice with `model`, `effort`, `max_phases`, `allowed_tools`, `stall_seconds`), `extension.phase.<name>.*` (typed slice with `command` xor `prompt_template_<phase>`, plus optional `max_turns`, `stall_seconds`, `max_attempts`), `extension.server.*` (round-tripped opaquely).
   - Apply canonical defaults from [fr:19-orchestrator-session](../../../docs/fr/19-orchestrator-session.md) when keys are omitted: `model = "claude-opus-4-7"`, `effort = "middle"`, `max_phases = 15`, `stall_seconds = 600`, `allowed_tools` permitting Linear MCP write + `Read` + `Bash`.
   - Refuse to start at startup or retain previous policy at hot reload when any reserved key fails type / enum / range validation; log the offending key path.
@@ -178,7 +178,7 @@ refs:
   - _Requirements: 2.11, 2.12, 6.2, 6.4, 6.5, 6.7_
   - _Boundary: workflow/schema_
 
-- [ ] 4.3 Implement hot reload with last-known-good fallback
+- [x] 4.3 Implement hot reload with last-known-good fallback
   - Watch the configured workspace-level WORKFLOW.md via `notify` (debounced).
   - On file change: re-parse + re-validate before applying. On validation failure, retain the previously valid policy and log the validation error with offending key path. On success, apply the new policy from the next ticket admission; an in-flight orchestrator keeps its rendered prompt and an in-flight phase keeps its rendered prompt.
   - Observable completion: integration test starts the loader with a valid file, mutates the file to an invalid state, asserts the previous policy stays in effect and the validation error is logged; a second mutation back to valid form asserts the new policy takes effect on the next admission.
@@ -186,7 +186,7 @@ refs:
   - _Requirements: 6.3, 6.4_
   - _Boundary: workflow_
 
-- [ ] 4.4 Implement render contexts for orchestrator and per-phase templates
+- [x] 4.4 Implement render contexts for orchestrator and per-phase templates
   - Render `prompt_template_orchestrator` against per-ticket render context: issue id, title, body, label list, `mode` flag (substituted in), bucketed lifecycle state. The rendered output becomes the orchestrator session's system prompt.
   - On render failure: log with offending block name; provide a deterministic fallback prompt that includes issue id, title, body, and `mode` flag so the orchestrator always receives non-empty context.
   - Render per-phase templates with phase-specific variables: issue id, target spec name (when SPEC_DRIVEN), worktree path (when applicable), mode, plus the orchestrator's `additional_context` verbatim through a stable, machine-extractable section of the prompt envelope (kept distinct from the skill body).

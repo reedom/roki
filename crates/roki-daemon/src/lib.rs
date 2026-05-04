@@ -11,3 +11,4 @@ pub mod logging;
 pub mod orchestrator;
 pub mod shutdown;
 pub mod tracker;
+pub mod workflow;

@@ -9,11 +9,13 @@
 //! Interfaces" PhaseSubprocessAdapter table (lines ~782-792).
 
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::orchestrator::state::{IssueId, Mode};
+use crate::workflow::schema::WorkflowPolicy;
 
 /// Canonical seven-phase enum. Serializes as kebab-case (`open_pr`,
 /// `ci_fix`, `finalize_review`).
@@ -29,10 +31,11 @@ pub enum PhaseName {
     FinalizeReview,
 }
 
-/// Stub for the parsed `WORKFLOW.md` policy. Real type lands in tasks 4.x /
-/// 6.x; this placeholder lets engine call sites compile.
-#[derive(Debug, Clone, Default)]
-pub struct WorkflowPolicyHandle;
+/// Cheap-clone shared handle to the parsed `WORKFLOW.md` policy. Backed by
+/// [`Arc`] so the watcher can hot-swap the underlying policy without
+/// invalidating in-flight phase launch contexts (a phase keeps the policy
+/// it spawned with for its lifetime per Req 6.3).
+pub type WorkflowPolicyHandle = Arc<WorkflowPolicy>;
 
 /// Stub for the resolved permission strategy (`--settings` vs
 /// `--dangerously-skip-permissions`). Real type lands in tasks 7.x.
