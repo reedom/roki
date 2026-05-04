@@ -17,13 +17,13 @@ refs:
 
 # FR 09: Pre-PR Gate
 
-> Vetoable hook on `Active → Inactive` (the worker's clean-exit transition) that structurally validates `review.md` produced inside the worker session by the kiro-review skill. On failure, drive a fix-finding loop that re-launches the worker with findings injected via `additional_context`. The daemon does not launch a separate constrained review turn.
+> Vetoable hook on `Active → Inactive` (the worker's clean-exit transition) that structurally validates `review.md` produced inside the worker session by the kiro skill set ([18-worker-skill-workflow](18-worker-skill-workflow.md)). On failure, drive a fix-finding loop that re-launches the worker with findings injected via `additional_context`. The daemon does not launch a separate constrained review turn.
 
 ## Purpose
 
 Trusting only the agent's self-assessment of "done" lets a ticket reach a PR-ready state without satisfying the EARS acceptance criteria. This gate provides a checkpoint that structurally guarantees "a structurally-validated review exists after implementation". Validation is structural only (file presence / schema / per-criterion status / code-reference reachability) — no LLM is used by the daemon.
 
-The review artifact itself is produced **by the worker session**, not by a separate daemon-launched constrained turn: the worker's kiro-review skill is responsible for writing `review.md` before the worker clean-exits. The gate simply validates the artifact at the moment of `Active → Inactive` transition. On failure, the gate Denies the transition and drives a fix-finding loop by re-launching the worker with findings injected via the engine adapter's `additional_context` channel ([12-extension-surface](12-extension-surface.md), Req 13.4).
+The review artifact itself is produced **by the worker session**, not by a separate daemon-launched constrained turn: the worker is responsible for writing `review.md` before clean-exit, synthesized from the verdicts the kiro skill set accumulated during implementation (`kiro-impl` per-task `kiro-review` approvals + `kiro-validate-impl` GO + `kiro-verify-completion` evidence; see [18-worker-skill-workflow](18-worker-skill-workflow.md)). The gate simply validates the artifact at the moment of `Active → Inactive` transition. On failure, the gate Denies the transition and drives a fix-finding loop by re-launching the worker with findings injected via the engine adapter's `additional_context` channel ([12-extension-surface](12-extension-surface.md), Req 13.4).
 
 This keeps the "single bounded `claude` invocation per ticket" principle (the daemon never launches a side review subprocess) while still enforcing review structurally on the daemon side.
 
@@ -46,12 +46,12 @@ Highlights:
 
 - **Path**: `<workspace_root>/<repo>/<issue>/.kiro/specs/<issue>/review.md` (stable; never changed across versions).
 - **Schema (required)**: an overall status (`pass`/`fail`) + per-criterion entries (each numeric requirement ID gets a status) + at least one on-disk reachable code reference for each `pass` entry.
-- **Producer**: the worker's kiro-review skill ([18-worker-skill-workflow](18-worker-skill-workflow.md)). The daemon does not launch a separate review turn.
+- **Producer**: the worker session synthesizes it from the kiro skill set's accumulated verdicts ([18-worker-skill-workflow](18-worker-skill-workflow.md), Phase 6). The daemon does not launch a separate review turn.
 
 ### Validation rules (no LLM)
 
 The full list of failure codes lives in the "Required elements of review.md" section of [`docs/reference/artifacts.md`](../reference/artifacts.md) (`fail-missing` / `fail-schema` / `fail-evidence` / `fail-missing-spec`).
-Substantive judgment of "does the code actually satisfy the criterion" is the responsibility of the kiro-review skill that ran inside the worker. The daemon performs only structural checks.
+Substantive judgment of "does the code actually satisfy the criterion" is the responsibility of the kiro skill set that ran inside the worker (per-task `kiro-review` plus `kiro-validate-impl`). The daemon performs only structural checks.
 
 ### Fix-finding loop
 
@@ -60,7 +60,7 @@ Substantive judgment of "does the code actually satisfy the criterion" is the re
   - Return the gate decision as `Deny+RetryWithContext(payload)` to the orchestrator.
   - Orchestrator transitions the issue from `Active → Inactive` back to `Active`, re-launching a fresh worker subprocess with `payload` forwarded via the engine adapter's `additional_context` channel.
   - Increment the attempt counter for the issue.
-  - The payload is the **failing per-criterion entries** (criterion id, fail reason, diagnostic text) — kept distinct from the worker template body, so the kiro-review skill on the next turn can read it.
+  - The payload is the **failing per-criterion entries** (criterion id, fail reason, diagnostic text) — kept distinct from the worker template body, so the worker on the next turn can read it.
 - **Worker turn budget**: the fix loop honors the per-worker `max_turns` budget owned by roki-mvp (the gate does not consume a separate budget).
 - **Counter reset**: when an entry to `Active` happens via a non-veto path (e.g. operator-driven retry), the attempt counter is reset.
 
@@ -74,7 +74,7 @@ The `kiro_review_status` agent tool (described in detail in [11-agent-tool-bound
 
 - artifact presence flag, latest gate result, current attempt counter, configured `max_attempts`, latest failure reason
 
-This is a **read-only self-diagnostic** for the agent (e.g. so the kiro-review skill can re-read the previous failure reason from the same place the daemon reads it). It is not a gate-bypass mechanism.
+This is a **read-only self-diagnostic** for the agent (e.g. so the worker can re-read the previous failure reason from the same place the daemon reads it on a fix-finding retry). It is not a gate-bypass mechanism.
 
 ## Capabilities
 
@@ -88,7 +88,7 @@ This is a **read-only self-diagnostic** for the agent (e.g. so the kiro-review s
 
 ## Boundaries
 
-- **Substantive judgment** (does the code satisfy the criterion) is the agent's responsibility (kiro-review skill, [18-worker-skill-workflow](18-worker-skill-workflow.md)).
+- **Substantive judgment** (does the code satisfy the criterion) is the agent's responsibility (kiro skill set, [18-worker-skill-workflow](18-worker-skill-workflow.md)).
 - **PR operations / merge orchestration / Linear writes** are out of scope (the gate only vetoes; the worker handles PRs / Linear via its own MCP path).
 - **Multi-turn review sessions launched by the daemon** are out of scope (the worker is the only producer; the daemon does not launch a side review turn).
 - **Persistent review history** is not maintained (logs only; the artifact is the latest one).

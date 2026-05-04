@@ -22,26 +22,25 @@ A finished implementation may still violate acceptance criteria. Without a deter
 - Failure routes the worker back to a "fix-finding" turn rather than letting the transition through.
 
 ## Approach
-Mirror roki-spec-gate's pattern: a daemon-side gate hooked into the pre-`In Review` state-machine seam. The gate triggers a constrained "review turn" that invokes the kiro-review skill with the spec criteria and the implementation diff as inputs. Daemon then verifies the review artifact's structure + pass status. Pass = transition allowed; fail = re-run implementation phase with findings as input, up to `max_attempts`.
+Mirror roki-spec-gate's pattern: a daemon-side gate hooked into the worker's clean-exit `Active -> Inactive` seam. The worker session produces `review.md` inside the bounded `claude` invocation via the kiro skill set (per-task `kiro-review`, feature-level `kiro-validate-impl`, fresh-evidence `kiro-verify-completion`) before clean exit. Daemon then verifies the review artifact's structure + pass status. Pass = transition allowed; fail = `Deny+RetryWithContext(payload)` re-launches the worker with findings injected via `additional_context`, up to `max_attempts`.
 
 ## Scope
 - **In**:
-  - State-machine hook into roki-mvp at the pre-`In Review` seam
-  - Review-turn invocation (constrained turn purpose: produce `.kiro/specs/<issue>/review.md`)
-  - Structured artifact validation (per-criterion pass / fail + code references)
+  - State-machine hook into roki-mvp at the worker's clean-exit `Active -> Inactive` seam
+  - Structured artifact validation of `review.md` produced by the worker session (per-criterion pass / fail + code references)
   - `kiro_review_status` agent-side read-only tool
-  - `WORKFLOW.md` keys: `gates.review.required_status`, `gates.review.timeout_ms`, `gates.review.max_attempts`
-  - "Fix-finding" feedback loop: failed review re-enters implementation phase with findings as additional context, up to `max_attempts` (default 3)
-  - Escalation event when gate fails after `max_attempts`
+  - `WORKFLOW.md` keys: `gates.review.required_status`, `gates.review.max_attempts`
+  - "Fix-finding" feedback loop: failed review re-launches the worker with findings injected via `additional_context`, up to `max_attempts` (default 3)
+  - Escalation through linear-updater + the TUI escalation queue when gate fails after `max_attempts`
 
 - **Out**:
-  - Deciding what counts as "code evidence" beyond presence of file references in the artifact (LLM judgment lives in the review turn)
+  - Deciding what counts as "code evidence" beyond presence of file references in the artifact (substantive judgment lives in the kiro skill set running inside the worker session)
   - Auto-merge or auto-PR-open (the agent still drives Linear / `gh`; the daemon only gates the transition)
+  - Any daemon-launched `claude` subprocess for review (the worker session produces `review.md` before clean exit)
 
 ## Boundary Candidates
-- **Gate orchestration vs review turn**: gate is supervisor; turn is the work.
-- **Validation vs scoring**: presence / structure check daemon-side; substantive judgment agent-side.
-- **Re-implementation feedback loop vs gate**: the loop is part of the gate's lifecycle, but its prompt-injection mechanics belong to the engine adapter (roki-mvp).
+- **Gate validation vs substantive judgment**: presence / structure check daemon-side; substantive judgment kiro skill set inside the worker.
+- **Fix-finding loop vs gate**: the loop is part of the gate's lifecycle, but the re-launch + `additional_context` forwarding belong to the engine adapter (roki-mvp).
 
 ## Out of Boundary
 - Implementation phase (roki-mvp).
@@ -49,14 +48,14 @@ Mirror roki-spec-gate's pattern: a daemon-side gate hooked into the pre-`In Revi
 - Auto-merge logic.
 
 ## Upstream / Downstream
-- **Upstream**: roki-mvp (state machine, claude session, tool registry); roki-spec-gate (review reads spec criteria from `.kiro/specs/<issue>/requirements.md`).
-- **Downstream**: roki-distill-postmerge (uses `review.md` as one input for archive / distill decisions).
+- **Upstream**: roki-mvp (state machine, claude session, tool registry, engine adapter `additional_context` channel, linear-updater dispatch); roki-spec-gate (review reads spec criteria from `.kiro/specs/<issue>/requirements.md`).
+- **Downstream**: none in MVP (post-merge distill is handled in CI, not by the daemon).
 
 ## Existing Spec Touchpoints
 - **Extends**: roki-mvp.
 - **Adjacent**: roki-spec-gate.
 
 ## Constraints
-- Review artifact path / schema must be stable so distill-postmerge can rely on it.
-- Re-implementation loop must respect roki-mvp's overall worker `max_turns` budget; gate cannot exceed that.
-- Gate must be time-bounded: never block indefinitely; escalate on `timeout_ms`.
+- Review artifact path / schema must be stable so consumers can rely on it across spec versions.
+- Re-launch loop must respect roki-mvp's overall worker `max_turns` budget; gate cannot exceed that.
+- No per-attempt `timeout_ms`: time-boundedness is roki-mvp's `max_turns` and stall detection on the same worker subprocess that produces `review.md`.

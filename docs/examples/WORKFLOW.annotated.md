@@ -32,8 +32,10 @@ extension:
     # ----- pre-PR gate (roki-review-gate) -----
     review:
       required_status: "pass"   # artifact status considered a pass (default: "pass")
-      timeout_ms: 300000         # upper bound on the review turn's duration
-      max_attempts: 3            # review attempt cap (default: 3)
+      max_attempts: 3            # review attempt cap (default: 3); each Deny+RetryWithContext
+                                 # re-launches the worker with the failing-criterion payload
+                                 # in additional_context. No per-attempt timeout: the worker
+                                 # produces review.md inside its own max_turns budget.
 
   # ----- HTTP API server (roki-observability) -----
   # Without a port specified the API does not start (default off)
@@ -43,22 +45,14 @@ extension:
     min_refresh_interval_seconds: 30
     max_event_log_per_issue: 100
 
-  # ----- post-merge distill (roki-distill-postmerge) -----
-  distill:
-    # path patterns to sweep (workspace-relative)
-    paths:
-      - ".kiro/specs/{{ issue.id }}/"
-      - ".superpowers/specs/"
-      - "plans/"
-      - "notes/"
-    # classification rules
-    # - pattern: glob
-    # - disposition: "delete" | "archive" | "distill"
-    # - target: only for distill (the canonical extraction destination)
-    routes:
-      - { id: "scratch-delete",   pattern: "**/scratch.md",        disposition: "delete" }
-      - { id: "design-archive",   pattern: "**/design.md",         disposition: "archive" }
-      - { id: "decisions-distill", pattern: "**/decisions/*.md",   disposition: "distill", target: ".kiro/decisions/" }
+  # ----- linear-updater subagent (roki-mvp) -----
+  # Used to send daemon-only failure events (stall, retry exhaustion,
+  # multi-repo rejection, fs poison, etc.) to Linear via the operator's
+  # installed Linear MCP. The daemon never writes Linear directly.
+  linear_updater:
+    timeout_ms: 60000              # per-invocation timeout
+    # model: "claude-haiku-..."    # defaults to the same small model as the setup judge
+    # allowed_tools: [...]         # optional restriction on Linear MCP tool names
 ---
 
 ## prompt_template_setup
@@ -89,10 +83,13 @@ Output a single-line JSON object matching exactly one of:
     {"action": "noop"}
 
 Rules:
-- If "act", every listed repo MUST appear in the allowlist above
-  (else the daemon will reject the findings and route the ticket to Skipped).
-- If "noop", the daemon will skip worker dispatch entirely; choose this for
-  tickets that are not implementation work (e.g. discussion-only, duplicates).
+- "act" MUST list exactly one repo from the allowlist above. If two or more,
+  the daemon routes the ticket to Inactive(reason=needs_split) and the
+  linear-updater posts a Linear comment asking the operator to split it.
+  If the listed repo is not in the allowlist, the daemon routes to
+  Inactive(reason=allowlist_rejected).
+- "noop" skips worker dispatch entirely; choose this for tickets that are
+  not implementation work (e.g. discussion-only, duplicates).
 - Do not output any text before or after the JSON object.
 {% endraw %}
 
@@ -125,26 +122,33 @@ Labels: {{ issue.labels | join: ", " }}
 Session tempdir: {{ session.tempdir }}
 
 # Workflow
-Use the kiro skill (auto-invoked by description) to drive this ticket end-to-end:
+Use the kiro skill set (auto-invoked by description) to drive this ticket
+end-to-end. By the time this prompt runs, roki-spec-gate has already validated
+that `.kiro/specs/{{ issue.id }}/requirements.md` exists with EARS-shaped
+acceptance criteria — your first task is implementation, not spec creation.
 
-1. **Spec phase**: the kiro-discovery skill merges the Linear ticket and the
-   project EARS docs and produces `.kiro/specs/{{ issue.id }}/requirements.md`.
-   You cannot enter implementation until roki-spec-gate validates this artifact.
+1. **Implementation**: invoke the `kiro-impl` skill against
+   `.kiro/specs/{{ issue.id }}/`. It dispatches an implementer subagent per
+   task with a per-task `kiro-review` reviewer. Commit / branch operations go
+   through git via Bash.
 
-2. **Implementation**: implement against the EARS criteria in requirements.md.
-   Commit / branch operations go through git via Bash; progress updates to
-   Linear go through the operator's Linear MCP.
+2. **Feature-level validation**: invoke `kiro-validate-impl` to catch
+   cross-task issues that per-task review cannot see. Use
+   `kiro-verify-completion` (claim type `TEST_OR_BUILD`) before claiming any
+   build / test passes.
 
-3. **Review phase**: the kiro-review skill produces
-   `.kiro/specs/{{ issue.id }}/review.md` with per-criterion pass + code
-   references. roki-review-gate validates it. If failing findings come back,
-   re-implement via the fix loop.
+3. **Open PR**: open the PR via the gh CLI. Linear comments / labels go
+   through the operator's Linear MCP.
 
-4. **PR open**: open the PR via the gh CLI.
+4. **CI fix loop**: poll GitHub Actions; on red, use `kiro-debug` to
+   root-cause + propose a fix, push, and re-poll, up to a small budget.
 
-5. **Post-merge**: once you observe that Linear became Done, the
-   roki-distill-postmerge sweep turn fires and classifies the artifacts under
-   .kiro/specs/{{ issue.id }}/ as delete / archive / distill.
+5. **Review artifact**: synthesize `.kiro/specs/{{ issue.id }}/review.md`
+   from the verdicts accumulated above (per-task `kiro-review` approvals,
+   `kiro-validate-impl` GO, verify-cmd outcome). Each EARS criterion gets one
+   entry with `code_evidence` + `test_evidence`. roki-review-gate validates
+   this artifact structurally on clean exit. If failing findings come back,
+   the worker re-launches with `additional_context` carrying the failures.
 
 # Boundary
 - The daemon does not proxy agent-side tools. Your tool surface is exactly
@@ -153,4 +157,35 @@ Use the kiro skill (auto-invoked by description) to drive this ticket end-to-end
 - Linear writes go only through the operator's Linear MCP integration.
 - The daemon does not write Linear / GitHub / code. Everything is your
   responsibility.
+{% endraw %}
+
+## prompt_template_linear_updater
+
+Prompt block for the linear-updater subagent.
+- Launched as a one-shot bounded `claude` subprocess on daemon-only failures
+  (stall, retry exhaustion, multi-repo rejection, fs poison, etc.)
+- Its only job is to translate a structured directive into Linear label
+  additions and comments via the operator's installed Linear MCP
+- The subprocess runs read-only on the workspace filesystem regardless of
+  operator overrides; it must not edit code
+
+{% raw %}
+You are the roki linear-updater for Linear ticket {{ directive.issue_id }}.
+
+Directive: {{ directive.kind }}
+Fields:
+{% for k, v in directive.fields %}
+- {{ k }}: {{ v }}
+{% endfor %}
+
+Apply the appropriate Linear label addition(s) and post a structured comment
+via the operator's installed Linear MCP that explains the directive in terms
+useful to the operator.
+
+Rules:
+- Do not edit any code or workspace files.
+- Do not invoke `gh` or push to git.
+- Exit cleanly once the Linear writes have been applied.
+- On Linear API error, log the failure and exit with a non-zero status; the
+  daemon will retry once and otherwise log without crashing.
 {% endraw %}
