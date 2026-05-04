@@ -85,6 +85,15 @@ pub struct LoggingGuard {
     _file: Option<File>,
 }
 
+impl LoggingGuard {
+    /// Construct a no-op guard. Used by the runtime when the global
+    /// subscriber was already installed (e.g., test harness re-entry) so
+    /// the bootstrap does not have to expose its own sentinel.
+    pub fn sentinel() -> Self {
+        Self { _file: None }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Field context helpers
 // ---------------------------------------------------------------------------

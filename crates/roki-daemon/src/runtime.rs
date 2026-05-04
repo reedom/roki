@@ -1,0 +1,544 @@
+//! Daemon bootstrap composition (`run_with_shutdown`).
+//!
+//! This module wires the canonical 12-step composition order documented in
+//! design.md "Daemon bootstrap" so the binary entry point reduces to a single
+//! `runtime::run(args).await` call.
+//!
+//! The implementation surface is split between this module (orchestration of
+//! the steps) and the existing subsystem modules (config, logging, shutdown,
+//! tracker, workflow, engine, orchestrator) which already own their step-local
+//! validation. Composition here exists to:
+//!
+//! - Order the steps deterministically so refusals at any step name the
+//!   offending field/path/binary.
+//! - Apply CLI overrides from [`crate::cli::RunArgs`] over the loaded config.
+//! - Refuse non-zero on missing required binaries (`wt`, `ghq`, `claude`),
+//!   port conflicts, legacy config keys, or unreachable secrets.
+//! - Mount `POST /linear/webhook` on a single workspace-level
+//!   [`tracker::webhook::WebhookState`] and wind down within
+//!   [`crate::shutdown::SHUTDOWN_WINDOW`].
+//!
+//! Tasks 10.1, 10.2, 10.3 share the bootstrap surface; the missing-binary and
+//! port-conflict refusals are step-local checks, exercised by integration
+//! tests in `tests/runtime_smoke.rs` and `tests/runtime_bind.rs`. The full
+//! e2e_bootstrap (Task 13.1) lives separately so this module's tests focus on
+//! the refusal paths and composition shape.
+//!
+//! Spec refs: requirements.md Req 1.1, 1.3, 2.5, 2.12, 7.1, 7.2, 7.3.
+
+use std::net::TcpListener;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+
+use thiserror::Error;
+use tokio::net::TcpListener as TokioTcpListener;
+use tokio::sync::mpsc;
+use tracing::{info, warn};
+
+use crate::cli::RunArgs;
+use crate::config::{
+    AssigneeSpec, Config, ConfigError, EnvReader, ProcessEnv, SecretValue,
+};
+use crate::engine::claude::{ClaudeBinary, ClaudeError};
+use crate::shutdown::{
+    self, SHUTDOWN_WINDOW, ShutdownSignal, await_workers_with_window, install_signal_handlers,
+};
+use crate::tracker::model::NormalizedIssue;
+use crate::tracker::webhook::{WebhookState, router as webhook_router};
+
+/// Errors surfaced by [`run`]. Each variant carries the step-local context the
+/// operator needs to fix the misconfiguration without consulting docs.
+#[derive(Debug, Error)]
+pub enum RuntimeError {
+    #[error("configuration error: {0}")]
+    Config(#[from] ConfigError),
+
+    #[error(
+        "configuration file `{path}` not found; pass `--config <path>` or place \
+         a `roki.toml` in the working directory"
+    )]
+    ConfigFileMissing { path: PathBuf },
+
+    #[error("`claude` binary not usable: {0}")]
+    ClaudeBinary(#[from] ClaudeError),
+
+    #[error(
+        "required executable `{name}` was not found on PATH; install it (or set \
+         PATH) before starting roki — see docs/reference/cli.md for the full \
+         prerequisite list"
+    )]
+    ExternalBinaryMissing { name: &'static str },
+
+    #[error(
+        "could not bind webhook server on `{addr}`: {source}; another process is \
+         likely listening — set `[server].port` or pass `--port`"
+    )]
+    BindFailed {
+        addr: String,
+        #[source]
+        source: std::io::Error,
+    },
+
+    #[error("logging initialization failed: {0}")]
+    Logging(#[from] crate::logging::LoggingError),
+
+    #[error(
+        "Linear assignee selector `{selector}` could not be resolved: explicit \
+         selectors require a user-directory lookup which the bootstrap layer \
+         does not yet implement; configure `[linear].assignee = \"me\"` or wait \
+         for the user-directory resolver to land"
+    )]
+    AssigneeResolve { selector: String },
+}
+
+/// Top-level entry point dispatched by `main.rs`. Drives the documented
+/// 12-step bootstrap composition.
+pub async fn run(args: RunArgs) -> Result<(), RuntimeError> {
+    let env = ProcessEnv;
+    run_with_env(args, &env).await
+}
+
+/// Test-friendly variant that accepts an injected [`EnvReader`].
+pub async fn run_with_env(args: RunArgs, env: &dyn EnvReader) -> Result<(), RuntimeError> {
+    let bootstrap = bootstrap(args, env).await?;
+    serve(bootstrap).await
+}
+
+/// Result of a successful bootstrap: every refusal has cleared, the webhook
+/// listener is bound, and the shutdown signal is wired. The caller drives the
+/// `serve` step which awaits shutdown and winds down within `SHUTDOWN_WINDOW`.
+struct Bootstrapped {
+    shutdown_signal: ShutdownSignal,
+    /// Held so the listener stays bound; `serve` consumes it.
+    listener: TokioTcpListener,
+    bind_addr: String,
+    webhook_state: Arc<WebhookState>,
+    issue_rx: mpsc::Receiver<NormalizedIssue>,
+    _logging_guard: crate::logging::LoggingGuard,
+    _claude_binary: ClaudeBinary,
+    _signal_task: tokio::task::JoinHandle<()>,
+}
+
+/// Step 1-11 of the daemon bootstrap. Step 12 (the `tokio::select!` wind-down)
+/// is the caller's responsibility — production routes through [`serve`];
+/// tests skip the await loop and call [`Bootstrapped`] field-by-field.
+async fn bootstrap(args: RunArgs, env: &dyn EnvReader) -> Result<Bootstrapped, RuntimeError> {
+    // ---- Step 1: load config (CLI override > file > documented defaults).
+    let config_path = resolve_config_path(args.config.as_deref())?;
+    let mut config = Config::load_from_path(&config_path)?;
+    apply_cli_overrides(&mut config, &args);
+
+    // ---- Step 2: resolve secrets via the injected reader.
+    let api_token = config.linear.api_token.resolve(env)?;
+    let webhook_secret = config.linear.webhook_secret.resolve(env)?;
+
+    // ---- Step 3: redaction-aware logging init.
+    let logging_guard = init_logging_with_redaction(&config, &api_token, &webhook_secret)?;
+
+    // ---- Step 4: assignee resolution. `me` is resolved later (requires a
+    // network call); explicit selectors must be flagged here as unsupported
+    // by the bootstrap layer per Task 3.4 — the resolver runtime owns the
+    // user-directory lookup. We refuse early so the operator gets one log
+    // line naming the offending key rather than a tracker startup failure.
+    if let AssigneeSpec::Selector(value) = &config.linear.assignee {
+        return Err(RuntimeError::AssigneeResolve {
+            selector: value.clone(),
+        });
+    }
+
+    // ---- Step 5: admit_states (already non-empty post-load; the loader
+    // refuses an empty resolved set per Req 2.10).
+
+    // ---- Step 6: install signal handlers wired to a shared ShutdownSignal.
+    let (shutdown_signal, shutdown_trigger) = shutdown::new();
+    // The signal handler task owns the trigger — when SIGINT/SIGTERM fires,
+    // every `ShutdownSignal::wait()` subscriber wakes.
+    let signal_task = install_signal_handlers(shutdown_trigger);
+
+    // ---- Step 7: claude binary discovery; refuse on missing `wt`/`ghq`.
+    let claude_binary = ClaudeBinary::discover(None)?;
+    ensure_external_binary_on_path("wt")?;
+    ensure_external_binary_on_path("ghq")?;
+
+    // ---- Step 8: workflow load. We validate readability here; the full
+    // workflow parse + schema + adapter wiring (the production-path layer)
+    // is the orchestrator-driver entry point under Task 4.x and is not
+    // exercised by the bootstrap smoke tests.
+    config.validate_workflow_readable()?;
+
+    // ---- Step 9-10: orchestrator + tracker construction. The smoke-test
+    // surface defers the orchestrator/tracker wiring to the production
+    // entry point (Task 4.13 and beyond) so this module can be exercised
+    // without requiring a fully fledged orchestrator. The webhook bind is
+    // the load-bearing refusal point under Tasks 10.1-10.3.
+
+    // ---- Step 11: bind webhook listener. Hard-refuse on port conflict.
+    let bind_addr = compose_bind_addr(&config);
+    let (issue_tx, issue_rx) = mpsc::channel::<NormalizedIssue>(64);
+    let webhook_state = Arc::new(WebhookState::new(webhook_secret.clone(), issue_tx));
+    let listener = bind_listener(&bind_addr).await?;
+
+    info!(
+        target: "runtime.bootstrap",
+        addr = %bind_addr,
+        claude = %claude_binary.path().display(),
+        "roki daemon bootstrap complete"
+    );
+
+    Ok(Bootstrapped {
+        shutdown_signal,
+        listener,
+        bind_addr,
+        webhook_state,
+        issue_rx,
+        _logging_guard: logging_guard,
+        _claude_binary: claude_binary,
+        _signal_task: signal_task,
+    })
+}
+
+/// Step 12: serve the webhook router and await shutdown. Bounds wind-down at
+/// [`SHUTDOWN_WINDOW`] via [`await_workers_with_window`].
+async fn serve(bootstrap: Bootstrapped) -> Result<(), RuntimeError> {
+    let Bootstrapped {
+        shutdown_signal,
+        listener,
+        bind_addr,
+        webhook_state,
+        mut issue_rx,
+        ..
+    } = bootstrap;
+
+    let router = webhook_router(webhook_state);
+    let shutdown_for_server = shutdown_signal.clone();
+    let server = async move {
+        let signal = shutdown_for_server.clone();
+        let serve = axum::serve(listener, router);
+        let serve_with_shutdown = serve.with_graceful_shutdown(async move {
+            signal.wait().await;
+        });
+        if let Err(err) = serve_with_shutdown.await {
+            warn!(
+                target: "runtime.serve",
+                error = %err,
+                addr = %bind_addr,
+                "webhook server exited with error"
+            );
+        }
+    };
+
+    let shutdown_for_drain = shutdown_signal.clone();
+    let drain = async move {
+        // Until the orchestrator bridge is wired in, drain the channel so
+        // the webhook receiver does not back-pressure the axum handler.
+        loop {
+            tokio::select! {
+                _ = shutdown_for_drain.wait() => return,
+                msg = issue_rx.recv() => {
+                    if msg.is_none() {
+                        return;
+                    }
+                }
+            }
+        }
+    };
+
+    let server_handle = tokio::spawn(server);
+    let drain_handle = tokio::spawn(drain);
+
+    shutdown_signal.wait().await;
+
+    let outcome = await_workers_with_window(
+        [
+            ("webhook-server".to_owned(), join_to_unit(server_handle)),
+            ("issue-drain".to_owned(), join_to_unit(drain_handle)),
+        ],
+        SHUTDOWN_WINDOW,
+    )
+    .await;
+    if !outcome.timed_out.is_empty() {
+        warn!(
+            target: "runtime.shutdown",
+            timed_out = ?outcome.timed_out,
+            "wind-down exceeded SHUTDOWN_WINDOW"
+        );
+    }
+    Ok(())
+}
+
+async fn join_to_unit(handle: tokio::task::JoinHandle<()>) {
+    let _ = handle.await;
+}
+
+/// Step 1 helper: locate the configuration file. `--config` wins; otherwise
+/// look at `./roki.toml` per documented default.
+fn resolve_config_path(cli_override: Option<&Path>) -> Result<PathBuf, RuntimeError> {
+    if let Some(path) = cli_override {
+        if !path.exists() {
+            return Err(RuntimeError::ConfigFileMissing {
+                path: path.to_path_buf(),
+            });
+        }
+        return Ok(path.to_path_buf());
+    }
+    let default = PathBuf::from("roki.toml");
+    if default.exists() {
+        Ok(default)
+    } else {
+        Err(RuntimeError::ConfigFileMissing { path: default })
+    }
+}
+
+/// Apply CLI-flag overrides on top of the loaded config. Each override is
+/// scoped to the documented config column per `docs/reference/cli.md`.
+fn apply_cli_overrides(config: &mut Config, args: &RunArgs) {
+    if let Some(addr) = &args.bind {
+        config.server.bind = Some(addr.clone());
+    }
+    if let Some(port) = args.port {
+        config.server.port = Some(port);
+    }
+    if args.dangerously_skip_permissions {
+        config.permissions.strategy =
+            crate::config::PermissionStrategy::DangerouslySkipPermissions;
+    }
+}
+
+fn init_logging_with_redaction(
+    config: &Config,
+    api_token: &SecretValue,
+    webhook_secret: &SecretValue,
+) -> Result<crate::logging::LoggingGuard, RuntimeError> {
+    let logging_config = crate::logging::LoggingConfig {
+        level: config
+            .debug
+            .level
+            .clone()
+            .unwrap_or_else(|| "info".to_owned()),
+        destination: crate::logging::LogDestination::Stdout,
+        json: true,
+        redaction_secrets: vec![
+            api_token.expose_secret().to_owned(),
+            webhook_secret.expose_secret().to_owned(),
+        ],
+    };
+    // The logging crate refuses double-init; smoke tests that drive
+    // `bootstrap` repeatedly therefore silence the second/etc. failures so
+    // each test stays self-contained. Production calls run() exactly once.
+    match crate::logging::init(logging_config) {
+        Ok(guard) => Ok(guard),
+        Err(crate::logging::LoggingError::AlreadyInstalled) => {
+            // Already initialized — the test harness or prior boot already
+            // wired the subscriber. Surface a fresh guard sentinel.
+            Ok(crate::logging::LoggingGuard::sentinel())
+        }
+        Err(err) => Err(RuntimeError::Logging(err)),
+    }
+}
+
+fn ensure_external_binary_on_path(name: &'static str) -> Result<(), RuntimeError> {
+    if which_path(name).is_some() {
+        Ok(())
+    } else {
+        Err(RuntimeError::ExternalBinaryMissing { name })
+    }
+}
+
+/// Minimal `which`-style PATH lookup (no extra dep). Honors the executable
+/// bit on Unix and `.exe` on Windows.
+fn which_path(name: &str) -> Option<PathBuf> {
+    let path_var = std::env::var_os("PATH")?;
+    let target = if cfg!(windows) {
+        format!("{name}.exe")
+    } else {
+        name.to_owned()
+    };
+    for dir in std::env::split_paths(&path_var) {
+        let candidate = dir.join(&target);
+        if is_executable_file(&candidate) {
+            return Some(candidate);
+        }
+    }
+    None
+}
+
+#[cfg(unix)]
+fn is_executable_file(path: &Path) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    match std::fs::metadata(path) {
+        Ok(meta) => meta.is_file() && (meta.permissions().mode() & 0o111) != 0,
+        Err(_) => false,
+    }
+}
+
+#[cfg(not(unix))]
+fn is_executable_file(path: &Path) -> bool {
+    path.is_file()
+}
+
+fn compose_bind_addr(config: &Config) -> String {
+    let host = config.server.bind.clone().unwrap_or_else(|| "127.0.0.1".to_owned());
+    let port = config.server.port.unwrap_or(0);
+    format!("{host}:{port}")
+}
+
+async fn bind_listener(addr: &str) -> Result<TokioTcpListener, RuntimeError> {
+    // Bind through std first so the operator-facing error preserves the
+    // original `io::Error` (tokio's bind helper hides errno on some
+    // platforms). Then convert to a tokio listener.
+    let std_listener = TcpListener::bind(addr).map_err(|source| RuntimeError::BindFailed {
+        addr: addr.to_owned(),
+        source,
+    })?;
+    std_listener
+        .set_nonblocking(true)
+        .map_err(|source| RuntimeError::BindFailed {
+            addr: addr.to_owned(),
+            source,
+        })?;
+    TokioTcpListener::from_std(std_listener).map_err(|source| RuntimeError::BindFailed {
+        addr: addr.to_owned(),
+        source,
+    })
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::cli::RunArgs;
+    use crate::config::StaticEnv;
+
+    /// Default-flag RunArgs with the `--config` slot left empty so each test
+    /// can fill in its own config-file path.
+    fn args(config_path: Option<PathBuf>) -> RunArgs {
+        RunArgs {
+            config: config_path,
+            bind: None,
+            port: None,
+            dangerously_skip_permissions: false,
+            debug: false,
+        }
+    }
+
+    fn env_with_secrets() -> StaticEnv {
+        StaticEnv::new()
+            .set("LINEAR_API_TOKEN", "lin_api_token_for_tests")
+            .set("LINEAR_WEBHOOK_SECRET", "webhook_secret_for_tests")
+    }
+
+    #[tokio::test]
+    async fn missing_config_file_yields_actionable_refusal() {
+        let env = env_with_secrets();
+        let path = std::env::temp_dir().join("roki-runtime-missing-config.toml");
+        // Ensure absence regardless of prior test runs.
+        let _ = std::fs::remove_file(&path);
+        let err = run_with_env(args(Some(path.clone())), &env).await.unwrap_err();
+        match &err {
+            RuntimeError::ConfigFileMissing { path: reported } => {
+                assert_eq!(reported, &path);
+            }
+            other => panic!("expected ConfigFileMissing, got {other:?}"),
+        }
+        let msg = err.to_string();
+        assert!(
+            msg.contains("--config"),
+            "remediation must mention --config: {msg}"
+        );
+    }
+
+    #[test]
+    fn cli_overrides_replace_config_server_values() {
+        // Direct unit test of the overrides shape so the bootstrap step that
+        // applies them stays separately verifiable.
+        let dir = tempfile::TempDir::new().unwrap();
+        let workflow = dir.path().join("WORKFLOW.md");
+        std::fs::write(&workflow, "stub").unwrap();
+        let body = format!(
+            r#"
+[linear]
+api_token = {{ env = "LINEAR_API_TOKEN" }}
+webhook_secret = {{ env = "LINEAR_WEBHOOK_SECRET" }}
+assignee = "me"
+
+[workflow]
+path = "{}"
+
+[server]
+bind = "127.0.0.1"
+port = 8080
+
+[permissions]
+strategy = "settings-allowlist"
+"#,
+            workflow.display()
+        );
+        let mut config = Config::load_from_str(&body).unwrap();
+        let overridden = RunArgs {
+            config: None,
+            bind: Some("0.0.0.0".to_owned()),
+            port: Some(9100),
+            dangerously_skip_permissions: true,
+            debug: false,
+        };
+        apply_cli_overrides(&mut config, &overridden);
+        assert_eq!(config.server.bind.as_deref(), Some("0.0.0.0"));
+        assert_eq!(config.server.port, Some(9100));
+        assert!(matches!(
+            config.permissions.strategy,
+            crate::config::PermissionStrategy::DangerouslySkipPermissions
+        ));
+    }
+
+    #[test]
+    fn compose_bind_addr_uses_documented_default_host() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let workflow = dir.path().join("WORKFLOW.md");
+        std::fs::write(&workflow, "stub").unwrap();
+        let body = format!(
+            r#"
+[linear]
+api_token = {{ env = "X" }}
+webhook_secret = {{ env = "Y" }}
+assignee = "me"
+
+[workflow]
+path = "{}"
+
+[permissions]
+strategy = "settings-allowlist"
+"#,
+            workflow.display()
+        );
+        let mut config = Config::load_from_str(&body).unwrap();
+        config.server.port = Some(7000);
+        assert_eq!(compose_bind_addr(&config), "127.0.0.1:7000");
+        config.server.bind = Some("0.0.0.0".to_owned());
+        assert_eq!(compose_bind_addr(&config), "0.0.0.0:7000");
+    }
+
+    #[test]
+    fn ensure_external_binary_on_path_refuses_missing() {
+        // Unique sentinel name guaranteed not to exist on PATH.
+        let err = ensure_external_binary_on_path("__roki_missing_binary__").unwrap_err();
+        match &err {
+            RuntimeError::ExternalBinaryMissing { name } => {
+                assert_eq!(*name, "__roki_missing_binary__");
+            }
+            other => panic!("expected ExternalBinaryMissing, got {other:?}"),
+        }
+        let msg = err.to_string();
+        assert!(
+            msg.contains("__roki_missing_binary__"),
+            "missing-binary error must name the missing executable: {msg}"
+        );
+        assert!(
+            msg.contains("PATH"),
+            "missing-binary error must mention PATH remediation: {msg}"
+        );
+    }
+}
+

@@ -7,11 +7,12 @@
 use std::process::ExitCode;
 
 use roki_daemon::cli::{Cli, Command};
+use roki_daemon::runtime;
 
 fn main() -> ExitCode {
     let cli = Cli::parse_from_env();
 
-    let runtime = match tokio::runtime::Builder::new_multi_thread()
+    let async_runtime = match tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
     {
@@ -22,16 +23,17 @@ fn main() -> ExitCode {
         }
     };
 
-    runtime.block_on(async {
+    let result = async_runtime.block_on(async move {
         match cli.command {
-            Command::Run(_args) => {
-                // Task 1.5+ wires the actual runtime composition. For task 1.2
-                // the binary exits cleanly so `cargo run -- run --help` (which
-                // exits before reaching this point) and CLI-only smoke tests
-                // do not need a fully-wired daemon.
-            }
+            Command::Run(args) => runtime::run(args).await,
         }
     });
 
-    ExitCode::SUCCESS
+    match result {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(err) => {
+            eprintln!("roki: {err}");
+            ExitCode::from(1)
+        }
+    }
 }

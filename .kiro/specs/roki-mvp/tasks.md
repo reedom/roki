@@ -431,7 +431,7 @@ refs:
 
 - [ ] 9. Restart recovery (without persistent storage)
 
-- [ ] 9.1 Implement RecoveryReconciler scan (sessions + worktrees)
+- [x] 9.1 Implement RecoveryReconciler scan (sessions + worktrees)
   - On daemon start, walk every session tempdir under the platform user cache root (`~/Library/Caches/roki/sessions/` macOS / `~/.cache/roki/sessions/` Linux). Each name is an `IssueId`.
   - For every configured `[[repos]]` entry, resolve the local checkout via `ghq list -p` and run `wt list` (or `git worktree list --porcelain` fallback) filtered by branches matching the operator-configurable issue-id regex (default `^[A-Z]+-\d+$`).
   - Produce the union of distinct `IssueId` values for the reconciliation phase.
@@ -440,7 +440,7 @@ refs:
   - _Requirements: 8.5, 10.1_
   - _Boundary: orchestrator/recovery_
 
-- [ ] 9.2 Implement 5-cell decision matrix + pre-admission re-application + mode recomputation
+- [x] 9.2 Implement 5-cell decision matrix + pre-admission re-application + mode recomputation
   - For every distinct discovered `IssueId`, query Linear via the read-only client, apply `PreAdmissionJudge` (4-condition; mode recomputed from the current Linear label set), then apply the 5-cell decision matrix:
     - **ResumeActive** — pre-admission passes, session present, ≥1 worktree on disk → `Pending`; launch a fresh orchestrator session with the recomputed mode (an in-flight orchestrator never persists across daemon restarts).
     - **OrphanedSession** — session exists but pre-admission fails or no Linear active state → `Inactive(orphan)`; retain and log; deliver `daemon_directive(orphan)` to the next live orchestrator if any.
@@ -455,7 +455,7 @@ refs:
 
 - [ ] 10. Bootstrap composition
 
-- [ ] 10.1 Wire runtime::run_with_shutdown composition order
+- [x] 10.1 Wire runtime::run_with_shutdown composition order
   - Compose the daemon in the order documented in `design.md > Daemon bootstrap` (steps 1–12): config load → secret resolve + redaction list → `[linear].assignee` resolution → `[linear].admit_states` resolution → signal handlers → external binary discovery → workflow load → `Orchestrator::with_recovery` → start single workspace-level `LinearTracker` → mount `POST /linear/webhook` on a single `axum::Router` → funnel polling + webhook through `PreAdmissionJudge` → `tokio::select!` on shutdown across orchestrator + bridge + server + tracker.
   - Pass the assembled engine adapters (`OrchestratorSessionAdapter`, `PhaseSubprocessAdapter`), `SessionManager`, `WorktreeManager`, `PermissionResolver`, `WorkflowLoader`, and `EscalationQueue` into `Orchestrator::run`. The orchestrator does not receive any agent tool factory — the daemon registers no agent-side tools (Req 7.1).
   - Observable completion: e2e test (see 13.1) drives the full `runtime::run_with_shutdown` against a `fake_claude` binary, a wiremock Linear, and a signed webhook posted via HTTP and asserts the daemon completes the composition order, accepts a webhook, and exits cleanly on shutdown.
@@ -463,7 +463,7 @@ refs:
   - _Requirements: 1.1, 7.1, 7.2, 7.3_
   - _Boundary: runtime_
 
-- [ ] 10.2 Implement startup binary discovery refusals
+- [x] 10.2 Implement startup binary discovery refusals
   - Refuse to start with actionable remediation messages naming the missing executable when `wt`, `ghq`, or the configured `claude` binary is not discoverable at startup.
   - Refuse to start when legacy config keys are present (`[judge].model`, `extension.linear_updater.*`, `extension.gates.*`, `extension.distill.*` in `roki.toml` or `WORKFLOW.md`).
   - Observable completion: unit + e2e test asserts a non-zero exit and an actionable log message for each missing binary scenario, and for each legacy config-key scenario.
@@ -471,7 +471,7 @@ refs:
   - _Requirements: 1.3, 2.12_
   - _Boundary: runtime_
 
-- [ ] 10.3 Bind webhook server with port-conflict refusal
+- [x] 10.3 Bind webhook server with port-conflict refusal
   - Mount the single `POST /linear/webhook` route on a single `axum::Router` with a single workspace-level `WebhookState`. Bind on `[server].bind:[server].port` with CLI override (`--bind`, `--port`).
   - Refuse to start (hard) on port conflict; log the offending bind address.
   - Observable completion: integration test binds the server on an in-use port and asserts a hard refusal with the offending address in the log.

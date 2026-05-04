@@ -11,6 +11,7 @@ pub mod exec;
 pub mod logging;
 pub mod orchestrator;
 pub mod permissions;
+pub mod runtime;
 pub mod session;
 pub mod shutdown;
 pub mod tracker;
