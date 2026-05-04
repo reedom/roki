@@ -12,7 +12,7 @@ refs:
 
 - [ ] 1. Foundation: workspace, CLI, config, logging, shutdown
 
-- [ ] 1.1 Initialize Cargo workspace and roki-daemon crate
+- [x] 1.1 Initialize Cargo workspace and roki-daemon crate
   - Create root `Cargo.toml` as `[workspace]` with `members = ["crates/roki-daemon"]`; reserve layout for additive future members (`crates/roki-tui`, `crates/roki-api-types`).
   - Create `crates/roki-daemon/` with `edition = "2024"`, binary name `roki`, dependencies (tokio, clap, tracing, tracing-subscriber, serde, serde_json, thiserror, anyhow, reqwest, axum, liquid, jsonschema, notify, dirs, serde_yaml, toml).
   - Create `src/main.rs` that bootstraps a tokio multi-thread runtime and hands control to the CLI shell.

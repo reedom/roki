@@ -1,48 +1,42 @@
-//! Binary entry point for the `roki` daemon.
+//! `roki` binary entry point.
 //!
-//! Responsibilities for task 1.1:
-//! 1. Parse CLI arguments via clap.
-//! 2. Bootstrap a tokio multi-threaded runtime.
-//! 3. Dispatch to the selected subcommand handler.
-//!
-//! The runtime is built before tracing is initialized so that tracing setup
-//! itself can run inside async context in later tasks (e.g., reading a config
-//! file asynchronously). For task 1.1 the order is irrelevant; the layout is
-//! chosen for forward compatibility.
+//! Task 1.1 scope: bootstrap a tokio multi-thread runtime and hand control
+//! to the CLI shell. The CLI surface itself is fleshed out in task 1.2.
 
 use std::process::ExitCode;
 
-use roki_daemon::cli::{Cli, Command};
-use roki_daemon::runtime::{build_tokio_runtime, init_tracing, run};
+use clap::Parser;
+
+/// Top-level CLI parser. Subcommands are added by task 1.2.
+#[derive(Debug, Parser)]
+#[command(
+    name = "roki",
+    version,
+    about = "roki daemon: Linear-driven, per-issue agent orchestrator"
+)]
+struct Cli {
+    /// Reserved subcommand surface; populated by task 1.2.
+    #[command(subcommand)]
+    command: Option<Command>,
+}
+
+#[derive(Debug, clap::Subcommand)]
+enum Command {}
 
 fn main() -> ExitCode {
-    let cli = Cli::parse_from_env();
+    let _cli = Cli::parse();
 
-    let runtime = match build_tokio_runtime() {
-        Ok(runtime) => runtime,
+    let runtime = match tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+    {
+        Ok(rt) => rt,
         Err(error) => {
-            eprintln!("roki: {error:#}");
+            eprintln!("roki: failed to build tokio runtime: {error}");
             return ExitCode::from(1);
         }
     };
 
-    // Hold the guard for the duration of the run so any log file flushes on
-    // shutdown. Task 1.3 introduced the redaction-aware pipeline that returns
-    // this guard; previous tasks discarded the return value of the placeholder
-    // initializer.
-    let _logging_guard = init_tracing();
-
-    let result = runtime.block_on(async {
-        match cli.command {
-            Command::Run(args) => run(args).await,
-        }
-    });
-
-    match result {
-        Ok(()) => ExitCode::SUCCESS,
-        Err(error) => {
-            eprintln!("roki: {error:#}");
-            ExitCode::from(1)
-        }
-    }
+    runtime.block_on(async {});
+    ExitCode::SUCCESS
 }
