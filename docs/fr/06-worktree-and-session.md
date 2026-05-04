@@ -20,11 +20,13 @@ Let phase subprocesses walk into a "prepared workspace". Concentrating worktree 
 
 ## User-visible Behavior
 
-- **Right after the orchestrator session returns `judge=act` in its `admission_decision`** (with a single allowlisted `repo` populated):
-  - The daemon resolves the repo's local clone with `ghq list -p`.
-  - Creates a worktree with `wt` (branch name = the Linear issue identifier verbatim).
-  - Creates a per-issue session tempdir under the platform's standard user cache root (directory name = the Linear issue identifier).
-  - The resulting worktree path + session tempdir are passed to each phase subprocess via the daemon-controlled context envelope (per [07-worker-execution](07-worker-execution.md), [12-extension-surface](12-extension-surface.md)). The orchestrator itself never receives worktree paths — the orchestrator is filesystem-read-only and never produces code changes.
+- **Session tempdir creation**: created on entry to `Pending` (orchestrator-session launch CWD), under the platform's standard user cache root (directory name = the Linear issue identifier). This is the orchestrator's own working directory; it exists before any phase subprocess is nominated.
+- **Worktree creation (idempotent, on any non-`classify` phase nomination)**: when the orchestrator nominates a phase **other than `classify`** for a validated single allowlisted repository, the daemon ensures a worktree exists for the issue before spawning the phase subprocess. The operation is **idempotent**:
+  - On the first such nomination: resolve the repo's local clone with `ghq list -p`, then create a worktree with `wt switch-create` (branch name = the Linear issue identifier verbatim).
+  - On every subsequent non-`classify` nomination: verify the worktree's continued presence with `wt list` (or equivalent) without invoking `wt switch-create` again. The verify step keeps the operation O(1) on the steady-state path while still tolerating operator-side `wt remove` between nominations.
+  - The worktree path is exposed to every phase subprocess that needs it (every phase except `classify`) via the daemon-controlled per-phase context envelope (per [07-worker-execution](07-worker-execution.md), [12-extension-surface](12-extension-surface.md)).
+  - The `classify` phase MUST NOT receive a worktree path: `classify` runs against ticket context and the project-level spec dir alone, before any allowlisted repo has been resolved (in NEEDS_CLASSIFY mode the repo is resolved from the `classify` phase's Path-B output; in SPEC_DRIVEN mode from the project-level spec dir, but `classify` does not run in SPEC_DRIVEN). Spawning a worktree before `classify` would presume a repo identity the orchestrator has not yet committed to.
+  - The orchestrator itself never receives worktree paths — the orchestrator is filesystem-read-only and never produces code changes.
 - **Cleanup triggers** (conditions to enter the `Cleaning` state):
   - The Linear issue transitioned to a terminal state (Done / Canceled / etc.), or
   - The Linear issue was reassigned to someone else.
