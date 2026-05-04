@@ -43,7 +43,7 @@ refs:
   - Observable completion: unit test asserts the configured token never appears in captured log output even when intentionally placed in a field value; second test captures debug-sink output and asserts timestamp + stream-tag + role-tag format; third test forces an open-failure and asserts the subprocess launch still succeeds.
   - _Requirements: 1.5, 7.4, 11.2, 11.3, 11.4, 11.6, 11.7_
 
-- [ ] 1.5 Implement bounded shutdown handling
+- [x] 1.5 Implement bounded shutdown handling
   - Wire SIGINT and SIGTERM to a single `ShutdownSignal` propagated through orchestrator, tracker, webhook server, and engine adapters.
   - On shutdown: stop accepting new tracker events, send the orchestrator session a final `stop`-acknowledgement signal and close its stdin, SIGTERM in-flight phase subprocesses, await each within the configured per-subprocess shutdown window, then exit zero.
   - Bound the overall wind-down at `SHUTDOWN_WINDOW = 30s` via `await_workers_with_window`.
