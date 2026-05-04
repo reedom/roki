@@ -71,7 +71,16 @@ Each downstream spec consumes only its own namespace. The loader **round-trips u
 | `extension.server.min_refresh_interval_seconds` | roki-observability | no | Minimum coalescing interval for `POST /refresh` | [15-http-api](../fr/15-http-api.md) | roki-observability Req 4.4, Req 15.2 |
 | `extension.server.max_event_log_per_issue` | roki-observability | no | Maximum length of the event log returned by the per-issue endpoint | [15-http-api](../fr/15-http-api.md) | roki-observability Req 3.6, Req 15.2 |
 
-The legacy `[judge].model` `roki.toml` block and the `extension.linear_updater.*` `WORKFLOW.md` namespace are removed alongside the setup-judge subprocess and the linear-updater subagent shapes; the loader rejects either with an actionable error per `roki-mvp Req 2.12`. Both functions are absorbed by orchestrator session — see [19-orchestrator-session](../fr/19-orchestrator-session.md).
+The following legacy keys are removed and **explicitly refused** by the loader with an actionable error naming the offending key path per `roki-mvp Req 2.12`:
+
+| Legacy key | Source | Replaced by |
+|---|---|---|
+| `[judge].model` | `roki.toml` | `extension.orchestrator.model` (orchestrator session absorbs the setup-judge) |
+| `extension.linear_updater.*` | `WORKFLOW.md` | Orchestrator session writes Linear directly via the operator's installed Linear MCP (linear-updater subagent removed) |
+| `extension.gates.spec.*` / `extension.gates.review.*` (and any other `extension.gates.*` key) | `WORKFLOW.md` | Orchestrator session performs structural validation of `requirements.md` and `review.md` (daemon-side mechanical gates removed) |
+| `extension.distill.*` | `WORKFLOW.md` | No replacement — the per-issue `materialize_spec` distill flow is removed; SPEC_DRIVEN tickets reuse a project-level spec, NEEDS_CLASSIFY tickets use the ticket body's EARS criteria |
+
+All four are rejected at startup. At hot reload the loader retains the previous policy and logs the failure. See [19-orchestrator-session](../fr/19-orchestrator-session.md) for how the orchestrator session absorbs these functions.
 
 ### Hot reload and validation
 

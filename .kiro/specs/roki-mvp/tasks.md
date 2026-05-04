@@ -481,40 +481,40 @@ refs:
 
 - [ ] 11. Reference docs of record (technical contracts consumed by code + tests)
 
-- [ ] 11.1 (P) Author docs/reference/cli.md
+- [x] 11.1 (P) Author docs/reference/cli.md
   - Document the canonical CLI surface: `roki run` subcommand and every flag (`--config`, `--bind`, `--port`, `--dangerously-skip-permissions`, `--debug`); `--help` output shape.
   - Surface the file path in `--help` and the startup banner (Task 10.1 step 7).
   - Observable completion: file exists at `docs/reference/cli.md` with the documented flag table; doc-graph validator (`roki-doctools validate`) passes; `cargo run --bin roki -- --help` references the doc path.
   - _Requirements: 1.6, 1.7_
   - _Boundary: docs/reference_
 
-- [ ] 11.2 (P) Author docs/reference/config.md
+- [x] 11.2 (P) Author docs/reference/config.md
   - Document the canonical config-key reference: `[linear]`, `[workflow]`, `[server]`, `[debug]`, `[[repos]]`, plus reserved `extension.orchestrator.*`, `extension.phase.<name>.*`, `extension.server.*` namespaces with type / range / default per key.
   - Document the legacy keys explicitly refused at startup: `[judge].model`, `extension.linear_updater.*`, `extension.gates.*`, `extension.distill.*`.
   - Observable completion: file exists with each documented key; the loader (Task 1.3 + 4.2) cross-references this doc on validation errors; doc-graph validator passes.
   - _Requirements: 2.13, 2.11, 2.12_
   - _Boundary: docs/reference_
 
-- [ ] 11.3 (P) Author docs/reference/log-events.md
+- [x] 11.3 (P) Author docs/reference/log-events.md
   - Document the canonical structured event catalog: every event the daemon emits (pre-admission evaluation, orchestrator lifecycle, phase lifecycle, session-tempdir, worktree, Linear poll / webhook, backoff / stall, retry attempt, `daemon_directive` deliveries, orchestrator response, state-machine transition).
   - Each event row: name, severity, fields (incl. `issue`, `repo?`, `correlation_id`, `mode?`, `inactive_reason?`).
   - Observable completion: file exists with each event the implementation emits cross-referenced; doc-graph validator passes.
   - _Requirements: 1.5, 11.1_
   - _Boundary: docs/reference_
 
-- [ ] 11.4 (P) Author docs/reference/artifacts.md
+- [x] 11.4 (P) Author docs/reference/artifacts.md
   - Document the canonical `review.md` schema (consumed by the orchestrator's structural validation flow) per [fr:18-worker-skill-workflow](../../../docs/fr/18-worker-skill-workflow.md): per-criterion entry shape, criterion id source per mode (SPEC_DRIVEN: `requirements.md` numeric IDs; NEEDS_CLASSIFY: ticket body EARS numbers), code-reference reachability requirements.
   - Observable completion: file exists with the schema documented; doc-graph validator passes; the orchestrator's `prompt_template_orchestrator` references the doc path for the validation contract.
   - _Requirements: 4.4_
   - _Boundary: docs/reference_
 
-- [ ] 11.5 (P) Author docs/reference/extension-surface.md
+- [x] 11.5 (P) Author docs/reference/extension-surface.md
   - Document the published extension contracts consumed by `roki-observability`: `OrchestratorRead` (per-issue snapshot + escalation-queue snapshot, read-only), `TrackerRefresh` (out-of-cycle nudge, throttle / backoff aware), `WorkflowPolicy.extension` reserved namespaces (`extension.orchestrator.*` / `extension.phase.<name>.*` / `extension.server.*`), engine-adapter `additional_context` channel, removal of legacy seams (`Registry::register`, `prompt_template_setup`, `prompt_template_worker`, pre-cleanup hook, `Skipped` / `Judging` states).
   - Observable completion: file exists with each contract documented; doc-graph validator passes; downstream `roki-observability` spec references the doc.
   - _Requirements: 13.1, 13.2, 13.3, 13.4_
   - _Boundary: docs/reference_
 
-- [ ] 11.6 (P) Author WORKFLOW.example.md (bundled default)
+- [x] 11.6 (P) Author WORKFLOW.example.md (bundled default)
   - Bundle a default `WORKFLOW.example.md` declaring the four required template blocks (`prompt_template_orchestrator`, `prompt_template_implement_direct`, `prompt_template_validate_direct`, `prompt_template_open_pr`).
   - Each template block contains a documented prompt body that exercises every render variable (`mode` for orchestrator; `additional_context` for direct-mode phases and `open_pr`).
   - Observable completion: file exists at the project root; the workflow loader test fixtures consume it; loading it with the canonical defaults (Task 4.2) produces a valid `WorkflowPolicy`.

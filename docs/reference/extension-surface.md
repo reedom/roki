@@ -76,6 +76,20 @@ Per-phase named template blocks (`prompt_template_<phase>`) live alongside the r
 
 The legacy `extension.linear_updater.*`, `extension.gates.spec.*`, and `extension.gates.review.*` namespaces are removed alongside the subprocess shapes / gates they served; their functions are absorbed by the orchestrator session. The loader merely round-trips unknown keys under the reserved namespaces; it does not interpret them.
 
+## Removed seams
+
+The following extension surfaces from prior architectures have been removed. They are **not** part of the current contract and must not be relied on:
+
+| Removed seam | Removed because | Replaced by |
+|---|---|---|
+| `Registry::register` (per-worker spawn registry trait) | Workers no longer self-register; the orchestrator session nominates phase subprocesses via `action=run_phase` directives | Engine adapter orchestrator session dispatch (above) + the phase catalog in [18-worker-skill-workflow](../fr/18-worker-skill-workflow.md) |
+| `prompt_template_setup` (named template block) | The setup-judge subprocess is removed; admission classification runs inside the orchestrator session (SPEC_DRIVEN) or a dedicated `classify` phase subprocess (NEEDS_CLASSIFY) | `prompt_template_orchestrator` named template block (required) |
+| `prompt_template_worker` (named template block) | A single per-worker prompt no longer fits the per-phase catalog; each phase has its own catalog default and override surface | Per-phase named template blocks (`prompt_template_<phase>`) and `extension.phase.<name>.command` (mutually exclusive per phase) |
+| Pre-cleanup hook (vetoable cleanup callback) | Cleanup is unconditional; the orchestrator never receives a pre-cleanup callback because it cannot veto worktree / session-tempdir removal | Unconditional cleanup on `Inactive` per [06-worktree-and-session](../fr/06-worktree-and-session.md) |
+| `Skipped` per-issue terminal state | Pre-admission rejections are silent (log only, no state entry) per [04-state-machine-and-recovery §Pre-admission judge](../fr/04-state-machine-and-recovery.md) | Pre-admission skipped log event (see [log-events.md](log-events.md)); no state machine entry |
+| `Judging` per-issue state | The setup-judge subprocess is removed; orchestrator launch and classification are part of `Pending` | Orchestrator session lifecycle inside `Pending` per [19-orchestrator-session](../fr/19-orchestrator-session.md) |
+| Daemon-side `roki-spec-gate` / `roki-review-gate` vetoable hooks | Daemon never decides whether an artifact passes; structural validation lives in the orchestrator session | Orchestrator session §Artifact validation per [19-orchestrator-session](../fr/19-orchestrator-session.md) |
+
 ## When adding a new surface
 
 Adding a new surface requires **agreement on the roki-mvp side** — downstream cannot extend on its own.
