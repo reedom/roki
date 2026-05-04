@@ -19,7 +19,7 @@ refs:
   - Observable completion: `cargo metadata` reports a single workspace member at `crates/roki-daemon`; `cargo build` succeeds; `cargo run --bin roki -- --help` prints placeholder usage and exits zero.
   - _Requirements: 1.1_
 
-- [ ] 1.2 Implement CLI shell with all required flags
+- [x] 1.2 Implement CLI shell with all required flags
   - Define `roki run` subcommand with flags `--config <path>`, `--bind <addr>`, `--port <num>`, `--dangerously-skip-permissions`, `--debug` per [docs/reference/cli.md](../../../docs/reference/cli.md).
   - Wire `--help` for the binary and every subcommand; document each flag.
   - CLI flag values override config file values when supplied.

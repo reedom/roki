@@ -1,30 +1,15 @@
 //! `roki` binary entry point.
 //!
-//! Task 1.1 scope: bootstrap a tokio multi-thread runtime and hand control
-//! to the CLI shell. The CLI surface itself is fleshed out in task 1.2.
+//! Tasks 1.1 + 1.2: bootstrap a tokio multi-thread runtime and dispatch on
+//! the parsed CLI subcommand. Subcommand bodies (config load, runtime
+//! composition) are filled in by tasks 1.3 onward.
 
 use std::process::ExitCode;
 
-use clap::Parser;
-
-/// Top-level CLI parser. Subcommands are added by task 1.2.
-#[derive(Debug, Parser)]
-#[command(
-    name = "roki",
-    version,
-    about = "roki daemon: Linear-driven, per-issue agent orchestrator"
-)]
-struct Cli {
-    /// Reserved subcommand surface; populated by task 1.2.
-    #[command(subcommand)]
-    command: Option<Command>,
-}
-
-#[derive(Debug, clap::Subcommand)]
-enum Command {}
+use roki_daemon::cli::{Cli, Command};
 
 fn main() -> ExitCode {
-    let _cli = Cli::parse();
+    let cli = Cli::parse_from_env();
 
     let runtime = match tokio::runtime::Builder::new_multi_thread()
         .enable_all()
@@ -37,6 +22,16 @@ fn main() -> ExitCode {
         }
     };
 
-    runtime.block_on(async {});
+    runtime.block_on(async {
+        match cli.command {
+            Command::Run(_args) => {
+                // Task 1.5+ wires the actual runtime composition. For task 1.2
+                // the binary exits cleanly so `cargo run -- run --help` (which
+                // exits before reaching this point) and CLI-only smoke tests
+                // do not need a fully-wired daemon.
+            }
+        }
+    });
+
     ExitCode::SUCCESS
 }
