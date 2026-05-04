@@ -39,6 +39,7 @@ Attached to every event via spans.
 | Worktree create / remove | Worktree operations | [06-worktree-and-session](../fr/06-worktree-and-session.md) | roki-mvp Req 11.1, Req 11.2 |
 | Linear poll | Tracker polling | [03-linear-integration](../fr/03-linear-integration.md) | roki-mvp Req 11.1 |
 | Webhook receipt | Tracker webhook received | [03-linear-integration](../fr/03-linear-integration.md) | roki-mvp Req 11.1 |
+| Pre-admission skipped | Issue rejected by the silent-skip judge before any state entry; carries `reason` ∈ `assignee_mismatch` / `state_not_admitted` / `missing_roki_ready` / `roki_impl_without_roki_ready` | [03-linear-integration](../fr/03-linear-integration.md) | roki-mvp Req 3.7, Req 3.8, Req 3.9, Req 11.1 |
 | Backoff decision | 429 backoff applied | [03-linear-integration](../fr/03-linear-integration.md) | roki-mvp Req 3.4, Req 11.1 |
 | Stall decision | Stall detected (per-phase or orchestrator) | [07-worker-execution](../fr/07-worker-execution.md), [19-orchestrator-session](../fr/19-orchestrator-session.md) | roki-mvp Req 5.3, Req 5.7, Req 11.1 |
 | Retry attempt | Retry with attempt counter (ticket-level, between `phase_nonclean → run_phase` cycles the orchestrator drives) | [07-worker-execution](../fr/07-worker-execution.md) | roki-mvp Req 5.10, Req 11.1 |

@@ -102,7 +102,7 @@ refs:
 
 - [ ] 3. Tracker layer: Linear adapter, webhook, polling, pre-admission
 
-- [ ] 3.1 Implement Linear GraphQL client (read-only) with 429 backoff
+- [x] 3.1 Implement Linear GraphQL client (read-only) with 429 backoff
   - Build a single workspace-level Linear GraphQL client over `reqwest`: `viewer` lookup (used at startup to resolve `[linear].assignee = "me"`), issue queries (id, title, body, state, labels, assignee).
   - Apply exponential backoff on HTTP 429 with documented window; log the backoff window. Generic 5xx and network failures use the same backoff curve.
   - Daemon-side adapter is read-only — never expose write operations on this surface.
@@ -110,7 +110,7 @@ refs:
   - _Requirements: 3.4, 3.5, 3.6, 7.2_
   - _Boundary: tracker/linear_
 
-- [ ] 3.2 (P) Implement webhook receiver with HMAC verify
+- [x] 3.2 (P) Implement webhook receiver with HMAC verify
   - Mount `POST /linear/webhook` on a single `axum::Router` with single workspace-level `WebhookState` carrying the resolved HMAC secret.
   - Verify HMAC against the workspace-level webhook secret before any normalization; reject mis-signed or missing-signature requests with the documented unauthorized status code without normalizing the payload.
   - On successful verification, normalize into `NormalizedIssue` and forward to the pre-admission-judge entry point.
@@ -119,7 +119,7 @@ refs:
   - _Requirements: 3.1, 3.2_
   - _Boundary: tracker/webhook_
 
-- [ ] 3.3 (P) Implement polling fallback with cadence cap
+- [x] 3.3 (P) Implement polling fallback with cadence cap
   - Build a single workspace-level poller that queries Linear for issues whose Linear state is in `[linear].admit_states` and whose assignee matches `[linear].assignee`, on a cadence of at most once every five minutes (configurable; cap enforced).
   - Each poll observation runs the pre-admission-judge identically to webhook-delivered payloads.
   - Respect 429 backoff state from the Linear client; nudges via `TrackerRefresh` honor the cadence cap and 429 backoff.
@@ -128,7 +128,7 @@ refs:
   - _Requirements: 3.3, 3.4_
   - _Boundary: tracker/linear_
 
-- [ ] 3.4 (P) Implement PreAdmissionJudge (4-condition + mode selection)
+- [x] 3.4 (P) Implement PreAdmissionJudge (4-condition + mode selection)
   - Resolve `[linear].assignee` once at startup (`me` → token-owner viewer id; explicit selectors must resolve to exactly one user id; missing / empty / ambiguous → configuration error).
   - Resolve `[linear].admit_states` once at startup (default `["Todo"]`; refuse on empty resolved set).
   - For every webhook + poll observation evaluate four ordered conditions: (a) `assignee == [linear].assignee`, (b) `linear_state ∈ admit_states`, (c) `roki:ready ∈ labels`, (d) presence of `roki:impl` selects `mode`: `SPEC_DRIVEN` if also present alongside `roki:ready`, `NEEDS_CLASSIFY` if only `roki:ready`, `RokiImplWithoutRokiReady` skip otherwise.
@@ -139,14 +139,14 @@ refs:
   - _Requirements: 2.14, 3.1, 3.3, 3.7, 3.8, 3.9, 3.10_
   - _Boundary: tracker/pre_admission_
 
-- [ ] 3.5 Publish TrackerRefresh nudge trait
+- [x] 3.5 Publish TrackerRefresh nudge trait
   - Define `TrackerRefresh { fn nudge(&self) -> NudgeResult }` with `NudgeResult { Accepted, Throttled, BackoffActive }`.
   - Wire the nudge through the existing poller without bypassing the cadence cap or the 429 backoff state.
   - Observable completion: unit test issues two consecutive nudges within 5 min and asserts the second returns `Throttled`; a third issued during 429 backoff asserts `BackoffActive`.
   - _Requirements: 13.3_
   - _Boundary: tracker/refresh_
 
-- [ ] 3.6 Implement deduplication index and re-admission handling
+- [x] 3.6 Implement deduplication index and re-admission handling
   - Maintain an in-memory dedup index keyed by `IssueId` recording: current daemon state, per-issue `mode` (when non-terminal), most recently observed Linear state snapshot, in-flight orchestrator + phase handles.
   - On a webhook / poll observation of an issue already in a non-terminal state (`Pending`, `Active`, `Backoff`, `Cleaning`), update the snapshot in place; do not launch additional orchestrator or phase subprocess.
   - On startup-recovery + runtime webhook racing the same issue, serialize their effects so at most one orchestrator session and one phase subprocess are in flight per issue id at any instant.
