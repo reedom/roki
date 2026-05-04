@@ -7,7 +7,7 @@ refs:
   implements:
     - req:roki-mvp:4
   related:
-    - design:roki-mvp:worktree-workspace
+    - design:roki-mvp
 ---
 
 # FR 06: Worktree and Session Lifecycle

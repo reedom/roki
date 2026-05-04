@@ -11,7 +11,7 @@ refs:
     - fr:13-observability-logs
   related:
     - ref:cli
-    - design:roki-mvp:bootstrap
+    - design:roki-mvp
     - fr:19-orchestrator-session
     - fr:04-state-machine-and-recovery
   modules:

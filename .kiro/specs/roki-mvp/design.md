@@ -6,12 +6,7 @@ refs:
   spec: roki-mvp
   implements:
     - requirements:roki-mvp
-  depends_on:
-    - design:roki-mvp:bootstrap
-    - design:roki-mvp:worktree-workspace
-    - design:roki-mvp:retry-policy
   related:
-    - design:roki-mvp:agent-driven-repo-selection
     - research:roki-mvp
     - fr:18-worker-skill-workflow
     - fr:19-orchestrator-session
@@ -24,14 +19,6 @@ refs:
 ---
 
 # Design Document
-
-> **Sidecar designs**: detailed locked decisions for major scope shifts live alongside this file:
-> - [`design-bootstrap.md`](design-bootstrap.md) — startup composition, signal handling, secrets pipeline. Authoritative for bootstrap composition; references to `SetupJudge` / `prompt_template_setup` / `prompt_template_worker` are superseded by this document (replaced by the orchestrator session and the four required `WORKFLOW.md` template blocks).
-> - [`design-worktree-workspace.md`](design-worktree-workspace.md) — `wt` + `ghq` external CLI dependencies, branch sanitization, worktree path layout. Authoritative.
-> - [`design-retry-policy.md`](design-retry-policy.md) — ticket-level `max_attempts` retry budget on phase non-clean exits; stalls and turn-budget exhaustion bypass the retry loop. Authoritative for the per-ticket retry primitive; the per-phase budget is `--max-turns` and the orchestrator-level budget is `max_phases` per [fr:19-orchestrator-session](../../../docs/fr/19-orchestrator-session.md).
-> - [`design-agent-driven-repo-selection.md`](design-agent-driven-repo-selection.md) — historical: agent-driven `roki_open_worktree` repo selection. Superseded by orchestrator-driven repo resolution (SPEC_DRIVEN: from project-level spec dir; NEEDS_CLASSIFY: from `classify` phase Path B output).
->
-> When the sidecars conflict with this document, this document wins for everything in the post-FR-18/FR-19 orchestrator-session / phase-subprocess scope (Requirements 1.x–13.x). For earlier scope (bootstrap composition order, retry budget primitive, branch sanitization, assignee admission) the sidecars remain authoritative.
 
 ## Overview
 
@@ -66,7 +53,7 @@ refs:
 
 ### This Spec Owns
 
-- The `roki` binary entry point, CLI parsing (clap, including `--config` / `--bind` / `--port` / `--dangerously-skip-permissions` / `--debug`), tokio runtime, tracing pipeline with redaction layer, and the bootstrap composition order documented in `design-bootstrap.md`.
+- The `roki` binary entry point, CLI parsing (clap, including `--config` / `--bind` / `--port` / `--dangerously-skip-permissions` / `--debug`), tokio runtime, tracing pipeline with redaction layer, and the bootstrap composition order in [Daemon bootstrap](#daemon-bootstrap) below.
 - The Linear adapter and pre-admission-judge boundary: a single workspace-level webhook receiver, a single workspace-level polling fallback (≤ 5 min cadence), startup resolution of `[linear].assignee` (`me` → token owner), tracker normalization (`NormalizedIssue` carrying assignee user id and label set), the **four-condition pre-admission-judge in Rust** (assignee match + Linear state in `admit_states` + `roki:ready` present + optional `roki:impl` selecting `mode`), 429 backoff, read-only on the daemon side.
 - The in-memory orchestrator state machine: five states (`Pending`, `Active`, `Backoff`, `Inactive`, `Cleaning`) keyed by Linear issue id alone, transition event bus with read-only subscriber registry (no vetoable transitions), the per-issue `mode` flag (`SPEC_DRIVEN` | `NEEDS_CLASSIFY`) attached on entry to `Pending` and immutable for the orchestrator-session lifetime, and the 12-value `Inactive.reason` discriminator (`awaiting_linear`, `needs_operator`, `spec_incomplete`, `needs_split`, `allowlist_rejected`, `orchestrator_crash`, `orchestrator_unparseable`, `orchestrator_budget_exhausted`, `stall`, `retry_exhausted`, `fs_poison`, `orphan`).
 - The orchestrator-session adapter: launch a `claude --input-format stream-json --output-format stream-json` process per admitted ticket on entry to `Pending`, render `prompt_template_orchestrator` with the `mode` flag substituted in, pin a read-only filesystem sandbox + rejected elicitations regardless of operator overrides, write JSON events to its stdin (`phase_complete`, `phase_nonclean`, `daemon_directive`, `tracker_terminal`), parse the **last** JSON object per turn from its stdout (after any extended-thinking block), validate against the orchestrator response schema, enforce the `extension.orchestrator.max_phases` budget, detect orchestrator-stall via the `extension.orchestrator.stall_seconds` window (default `600`), route schema drift / crash / `max_phases` exhaustion to the three orchestrator-dead `Inactive.reason` values.
@@ -240,7 +227,7 @@ crates/
     ├── src/
     │   ├── main.rs                  # Binary entry, tokio runtime bootstrap
     │   ├── cli.rs                   # clap definitions (--config / --bind / --port / --dangerously-skip-permissions / --debug)
-    │   ├── runtime.rs               # Bootstrap composition (see design-bootstrap.md)
+    │   ├── runtime.rs               # Bootstrap composition (see "Daemon bootstrap" section)
     │   ├── shutdown.rs              # Signal handling, bounded shutdown windows
     │   ├── config/
     │   │   ├── mod.rs               # Config struct; [linear] / [workflow] / [server] / [debug] blocks
@@ -327,7 +314,7 @@ crates/
 
 ### Daemon bootstrap
 
-`runtime::run` composes the architecture in a fixed order so secrets land in the redaction list before any structured event is emitted, refusal modes land before any resource is held, and the HTTP surface comes up regardless of Linear's reachability. The full sequence is documented in `design-bootstrap.md`; the reference implementation lives in `crates/roki-daemon/src/runtime.rs::run_with_shutdown`. Composition order:
+`runtime::run` composes the architecture in a fixed order so secrets land in the redaction list before any structured event is emitted, refusal modes land before any resource is held, and the HTTP surface comes up regardless of Linear's reachability. The reference implementation lives in `crates/roki-daemon/src/runtime.rs::run_with_shutdown`. Composition order:
 
 1. Load config (`--config <path>` overrides `./roki.toml`; CLI flags `--bind` / `--port` / `--dangerously-skip-permissions` / `--debug` override the file).
 2. Resolve secrets (Linear token + the single workspace-level webhook HMAC secret) and reinitialise the redaction-aware tracing pipeline with the secret list.
@@ -446,7 +433,7 @@ Key decisions surfaced in the diagram:
 | Component | Domain/Layer | Intent | Req Coverage | Key Dependencies (P0/P1) | Contracts |
 |-----------|--------------|--------|--------------|--------------------------|-----------|
 | CliShell | CLI | Parse arguments, bootstrap config, hand control to Runtime | 1.1, 1.2, 1.6, 1.7 | Config (P0), Runtime (P0) | Service |
-| Runtime | CLI | Compose the daemon (signals, secrets, loaders, server) per `design-bootstrap.md` | 1.1, 1.3, 1.4, 1.5 | Config (P0), Logging (P0), Orchestrator (P0), TrackerAdapter (P0), OrchestratorSessionAdapter (P0), PhaseSubprocessAdapter (P0), WorktreeManager (P0), `which` (P0) | Service |
+| Runtime | CLI | Compose the daemon (signals, secrets, loaders, server) per [Daemon bootstrap](#daemon-bootstrap) | 1.1, 1.3, 1.4, 1.5 | Config (P0), Logging (P0), Orchestrator (P0), TrackerAdapter (P0), OrchestratorSessionAdapter (P0), PhaseSubprocessAdapter (P0), WorktreeManager (P0), `which` (P0) | Service |
 | Config | Config | Load and validate layered configuration; refuse legacy `[judge].model` and `extension.linear_updater.*` keys with actionable error | 1.2, 2.1–2.15, 9.5 | filesystem (P0), env (P0), Linear API (`me` resolution, P0) | State |
 | PreAdmissionJudge | Tracker | Mechanical 4-condition Rust filter (assignee + state + `roki:ready` + optional `roki:impl` → mode); silent skip on failure; mode selection on pass | 2.14, 3.1, 3.3, 3.7, 3.8, 3.9, 3.10, 3.14, 8.1 | Config (P0), TrackerAdapter (P0), Logging (P1) | Service, State |
 | TrackerAdapter | Tracker | Read-only single workspace-level Linear adapter: webhook + assigned polling (≤ 5 min) + 429 backoff; publishes `TrackerRefresh` nudge | 3.1, 3.2, 3.3, 3.4, 3.5, 3.6, 13.3 | reqwest (P0), axum (P0), Config (P0) | Service, Event |
@@ -492,7 +479,7 @@ Key decisions surfaced in the diagram:
 - On entry to `Pending` from a pre-admission-judge pass or re-admission, launch the orchestrator session with the `mode` flag rendered into `prompt_template_orchestrator`. The orchestrator does not pre-materialize a worktree.
 - On `OrchestratorAction { action=run_phase }`: if the nominated phase is `classify`, spawn the phase subprocess directly (no worktree). For any other phase, call `WorktreeManager::ensure(issue, repo_id)` (idempotent — creates on first call, verifies presence on subsequent calls) against the orchestrator-supplied repo id (validated against `[[repos]]`) before spawning the phase subprocess. The orchestrator does not enforce phase ordering; the daemon's `ensure` semantics let the orchestrator pick any code-touching phase first without burning retry budget on a missing worktree.
 - On `phase_nonclean`, drive `Active → Backoff → Active` until the ticket-level `max_attempts` budget is exhausted. On exhaustion, deliver `daemon_directive(retry_exhausted)` to the orchestrator session if alive (it returns `action=stop outcome=failure`); if the orchestrator is dead, route to `Inactive(retry_exhausted)` directly.
-- On `Stalled` and `TurnBudgetExhausted` from a phase subprocess: deliver `phase_nonclean` with the failure classification; the orchestrator may re-nominate or stop. (Per `design-retry-policy.md`, these failure classes also bypass the retry budget; the orchestrator gets the choice rather than the daemon making it unilaterally.)
+- On `Stalled` and `TurnBudgetExhausted` from a phase subprocess: deliver `phase_nonclean` with the failure classification; the orchestrator may re-nominate or stop. These failure classes bypass the daemon-internal replay budget — the orchestrator gets the choice rather than the daemon making it unilaterally.
 - On orchestrator-session exit without an `action=stop` (crash / SIGSEGV / non-zero) or stall (no event in N seconds, configurable), route to `Inactive(orchestrator_crash)`. On schema drift twice, route to `Inactive(orchestrator_unparseable)`. On `max_phases` exhaustion, route to `Inactive(orchestrator_budget_exhausted)`. None of the three triggers a Linear write — escalation queue + structured log only.
 - Treat assignment loss / `roki:ready` removal / Linear terminal state as daemon-side stop conditions: terminate orchestrator and any in-flight phase, route to `Cleaning` without consuming retry budget.
 - Isolate subscriber failures so one failing subscriber cannot stall others.
@@ -983,7 +970,7 @@ Every error path is observable via structured logs (`docs/reference/log-events.m
 
 Structured log events per `docs/reference/log-events.md` cover: pre-admission evaluations (incl. silent skips), orchestrator lifecycle (launch / drift / crash / stall / budget-exhausted / clean exit), phase lifecycle (launch / start / per-event / stall / non-clean / clean), session-tempdir + worktree side effects, Linear poll / webhook, backoff / stall timers, retry attempts with attempt counter, `daemon_directive` deliveries, orchestrator-action receipts (action + phase + outcome, redacted of long `reason`), state-machine transitions (incl. `mode` and `inactive_reason`). Per-issue debug capture appends every stdout / stderr line from every subprocess for the issue when `--debug` is enabled.
 
-The daemon never logs the Linear API token, the webhook HMAC secret, or any other operator-declared secret; the redaction layer is initialized before any structured event is emitted (`design-bootstrap.md` step 2).
+The daemon never logs the Linear API token, the webhook HMAC secret, or any other operator-declared secret; the redaction layer is initialized before any structured event is emitted ([Daemon bootstrap](#daemon-bootstrap) step 2).
 
 ## Testing Strategy
 
