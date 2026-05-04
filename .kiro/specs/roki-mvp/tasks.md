@@ -523,7 +523,7 @@ refs:
 
 - [ ] 12. Unit and integration tests
 
-- [ ] 12.1 (P) Write unit_pre_admission test
+- [x] 12.1 (P) Write unit_pre_admission test
   - Cover the 4-condition truth-table (16 rows) over `assignee × linear_state × roki:ready × roki:impl`; assert silent skip with the failed condition logged on every failing row; assert `mode = SPEC_DRIVEN` only when both `roki:ready` and `roki:impl` are present, `mode = NEEDS_CLASSIFY` only when `roki:ready` alone is present.
   - Cover `me` resolution success / ambiguity (multiple users) / failure (no users); assignment-loss + `roki:ready`-removal mid-flight signal emission.
   - Observable completion: `cargo test unit_pre_admission` passes with all 16 + ancillary scenarios green; running test with a tampered `me` resolution asserts the documented configuration error.
@@ -531,63 +531,63 @@ refs:
   - _Requirements: 2.14, 3.1, 3.7, 3.8, 3.9, 3.10_
   - _Boundary: tracker/pre_admission_
 
-- [ ] 12.2 (P) Write unit_action_parser test
+- [x] 12.2 (P) Write unit_action_parser test
   - Cover last-JSON-object-per-turn extraction across multi-emission turns (advisory progress + final action); ignored extended-thinking blocks; schema validation of `OrchestratorAction` (every `action / phase / outcome` enum value; bounded `reason` length); reprompt-once on first drift; second drift produces terminal `Drift` outcome.
   - Observable completion: `cargo test unit_action_parser` passes; a canonical multi-turn transcript fixture exercises every documented action variant.
   - _Depends: 6.3_
   - _Requirements: 4.7, 5.2, 5.4_
   - _Boundary: engine/orchestrator_session/action_parser_
 
-- [ ] 12.3 (P) Write unit_phase_catalog test
+- [x] 12.3 (P) Write unit_phase_catalog test
   - Cover every `(phase, mode)` pair returns the documented default invocation and `--max-turns`; mode-illegal pairs (`classify` outside `NEEDS_CLASSIFY` first turn) rejected with a typed error.
   - Observable completion: `cargo test unit_phase_catalog` passes with every documented pair asserted.
   - _Depends: 2.5_
   - _Requirements: 5.6, 5.12_
   - _Boundary: engine/phase_subprocess/catalog_
 
-- [ ] 12.4 (P) Write unit_override_resolution test
+- [x] 12.4 (P) Write unit_override_resolution test
   - Cover `extension.phase.<name>.command` only → command override applied; `prompt_template_<phase>` only → template override applied; both declared → startup refusal / hot-reload retain-previous; neither → catalog default; scalar overrides (`max_turns`, `stall_seconds`, `max_attempts`) compose with both prompt-override forms.
   - Observable completion: `cargo test unit_override_resolution` passes with every combination asserted.
   - _Depends: 6.6_
   - _Requirements: 6.7_
   - _Boundary: engine/phase_subprocess/override_
 
-- [ ] 12.5 (P) Write integration_orchestrator_session test
+- [x] 12.5 (P) Write integration_orchestrator_session test
   - Drive the full long-lived session lifecycle against a `fake_claude` orchestrator stub: launch with `mode=SPEC_DRIVEN` and `mode=NEEDS_CLASSIFY` (two scenarios) and assert the substituted `mode` flag in the rendered prompt; deliver `phase_complete(classify)` and assert `additional_context` propagation on the next `run_phase=implement` directive; enforce `max_phases` budget exhaustion; simulate schema drift twice → `Inactive(orchestrator_unparseable)`; simulate stall → `Inactive(orchestrator_crash)`; simulate non-zero orchestrator exit without `action=stop` → `Inactive(orchestrator_crash)`.
   - Observable completion: `cargo test integration_orchestrator_session` passes; raw stdout is captured in the structured log on the unparseable case; budget-exhausted case asserts the additional phase is NOT spawned.
   - _Depends: 6.4, 6.5_
   - _Requirements: 4.1, 4.2, 4.7, 5.1, 5.2, 5.3, 5.4, 5.5_
   - _Boundary: engine/orchestrator_session_
 
-- [ ] 12.6 (P) Write integration_phase_subprocess test
+- [x] 12.6 (P) Write integration_phase_subprocess test
   - Spawn each `(phase, mode)` pair against a `fake_claude` phase stub and assert the resolved invocation + `--max-turns` matches the catalog or the override; translate clean exit / non-`success` `subtype` / unknown `subtype` / stall / `--max-turns` exhausted / non-zero exit / signal into the documented `phase_complete` / `phase_nonclean` classifications; tracker-terminal-induced SIGTERM does NOT translate; ticket-level `max_attempts` retry-budget loop with exponential backoff bounded between 10 s and 5 min.
   - Observable completion: `cargo test integration_phase_subprocess` passes; the retry-budget scenario asserts each replay re-spawns the same `PhaseLaunchContext` and consumes zero `max_phases`; stall classification SIGTERMs the phase and emits `phase_nonclean(stall)`.
   - _Depends: 6.7, 6.8, 6.9_
   - _Requirements: 5.6, 5.7, 5.8, 5.9, 5.10, 5.12, 13.4_
   - _Boundary: engine/phase_subprocess_
 
-- [ ] 12.7 (P) Write integration_tracker test
+- [x] 12.7 (P) Write integration_tracker test
   - Cover webhook HMAC verify (valid / tampered / missing-signature); polling cadence cap (5-min minimum between polls); 429 backoff suspends polling; `[linear].assignee` filter (admit / silent-skip); `[linear].admit_states` filter; label-set normalization for `roki:ready` / `roki:impl`; deduplication index correctness across concurrent webhook + poll observations of the same issue (single in-flight orchestrator + phase per issue id).
   - Observable completion: `cargo test integration_tracker` passes against a wiremock Linear; concurrent webhook + poll for the same issue asserts a single orchestrator launch.
   - _Depends: 3.1, 3.2, 3.3, 3.4, 3.6_
   - _Requirements: 3.1, 3.2, 3.3, 3.4, 3.5, 3.11, 3.12, 3.13_
   - _Boundary: tracker_
 
-- [ ] 12.8 (P) Write integration_workflow_loader test
+- [x] 12.8 (P) Write integration_workflow_loader test
   - Cover four required template blocks present (success); one required missing (startup refusal naming the block); optional `prompt_template_<phase>` blocks parsed; reserved-namespace round-trip for `extension.server.*` opaque keys; legacy-key refusal (`[judge].model`, `extension.linear_updater.*`, `extension.gates.*`); hot-reload last-known-good on validation failure; mode-flag substitution into `prompt_template_orchestrator`; deterministic fallback prompt on render failure; both override forms declared → refusal / retain-previous.
   - Observable completion: `cargo test integration_workflow_loader` passes; canonical defaults apply when keys are omitted; deterministic fallback contains issue id + title + body + mode.
   - _Depends: 4.1, 4.2, 4.3, 4.4_
   - _Requirements: 2.15, 6.1, 6.2, 6.3, 6.4, 6.5, 6.6, 6.7_
   - _Boundary: workflow_
 
-- [ ] 12.9 (P) Write integration_worktree_lifecycle test
+- [x] 12.9 (P) Write integration_worktree_lifecycle test
   - Cover idempotent ensure on every non-`classify` phase nomination — first call performs `ghq list -p` + `wt switch-create <issue>`, subsequent calls verify presence via `wt list` only; `classify` phase nomination MUST NOT trigger ensure; cleanup via `[[repos]]` allowlist iteration + `wt list` filtered by branch == issue id verbatim + `wt remove`; no branch deletion; tolerate worktrees the agent created via Bash with the same convention; out-of-allowlist repo id returns the documented typed error mapped to `outcome=allowlist_rejected`.
   - Observable completion: `cargo test integration_worktree_lifecycle` passes; assertions on shellout invocations confirm the idempotent path (no second `wt switch-create`).
   - _Depends: 5.4_
   - _Requirements: 4.5, 4.6, 4.9_
   - _Boundary: worktree_manager_
 
-- [ ] 12.10 (P) Write integration_recovery test
+- [x] 12.10 (P) Write integration_recovery test
   - Cover the 5-cell decision matrix (resume-active / orphaned-session / orphaned-worktree / fresh-queued / no-op) against a wiremock Linear; pre-admission re-application during reconciliation (mode recomputed from current label set); orphan retention on disk; `daemon_directive(orphan)` delivery to the next live orchestrator stub.
   - Observable completion: `cargo test integration_recovery` passes; each cell maps to the documented daemon state; on `ResumeActive`, a fresh orchestrator is launched (no in-flight orchestrator persists across restarts).
   - _Depends: 9.1, 9.2_
