@@ -31,9 +31,8 @@ Per workspace, specified with `--config <path>` ([cli.md](cli.md)).
 | `[workflow].path` | yes | Path to `WORKFLOW.md` | Refuses startup if missing / unreadable | [02-configuration](../fr/02-configuration.md) | roki-mvp Req 2.4, Req 6.1 |
 | `[server].bind` | no | Bind host of the webhook receiver (overridable via CLI `--bind`) | Refuses startup on bind failure | [01-daemon-lifecycle](../fr/01-daemon-lifecycle.md) | roki-mvp Req 2.5 |
 | `[server].port` | no | Bind port of the webhook receiver (overridable via CLI `--port`) | Refuses startup on bind failure | [01-daemon-lifecycle](../fr/01-daemon-lifecycle.md) | roki-mvp Req 2.5 |
-| `[[repos]].ghq` | 0+ | `ghq` identifier of an allowlisted repo (`owner/repo` or `host/owner/repo`) | Refuses startup on duplicates; an empty allowlist still boots (judge results route to `Skipped`) | [05-setup-judge](../fr/05-setup-judge.md), [06-worktree-and-session](../fr/06-worktree-and-session.md) | roki-mvp Req 2.1, Req 2.2, Req 2.7 |
-| `[judge].model` | no | Claude model used by the setup judge | The documented default applies when omitted | [05-setup-judge](../fr/05-setup-judge.md) | roki-mvp Req 2.10 |
-| `[permissions].strategy` | yes | `--settings` allowlist or `--dangerously-skip-permissions` (also overridable via CLI flag) | Refuses startup if not set | [07-worker-execution](../fr/07-worker-execution.md) | roki-mvp Req 9.3, Req 9.4, Req 9.5 |
+| `[[repos]].ghq` | 0+ | `ghq` identifier of an allowlisted repo (`owner/repo` or `host/owner/repo`) | Refuses startup on duplicates; an empty allowlist still boots (A's `act` admission decisions then fail allowlist validation) | [06-worktree-and-session](../fr/06-worktree-and-session.md), [19-orchestrator-session](../fr/19-orchestrator-session.md) | roki-mvp Req 2.1, Req 2.2, Req 2.7 |
+| `[permissions].strategy` | yes | `--settings` allowlist or `--dangerously-skip-permissions` (also overridable via CLI flag); applies to phase subprocesses only — orchestrator session A always runs with a read-only filesystem sandbox | Refuses startup if not set | [07-worker-execution](../fr/07-worker-execution.md), [19-orchestrator-session](../fr/19-orchestrator-session.md) | roki-mvp Req 9.3, Req 9.4, Req 9.5, Req 9.6 |
 
 `roki.toml` itself is **not hot-reloaded** (a restart is required).
 
@@ -43,11 +42,11 @@ Per workspace, Liquid + Markdown, hot-reload supported. Composed of front matter
 
 ### Front matter / structure
 
+`WORKFLOW.md` exposes exactly **one** named template block: the orchestrator-session system prompt. Phase subprocess prompts are **not** templated by `WORKFLOW.md` — each phase subprocess uses the operator-installed kiro skill's own prompt (`kiro-impl` for `implement`, `kiro-validate-impl` for `validate`, `kiro-debug` + `kiro-verify-completion` for `ci_fix`) or, for `open_pr` (no skill) and `finalize_review` (review.md synthesis), a small daemon-internal prompt fragment. See [18-worker-skill-workflow](../fr/18-worker-skill-workflow.md) for the per-phase invocation surface.
+
 | Key | Required | Meaning | Used by | Requirements |
 |---|---|---|---|---|
-| `prompt_template_setup` (named template block) | yes | Prompt block for the setup judge subprocess | [05-setup-judge](../fr/05-setup-judge.md) | roki-mvp Req 6.1, Req 6.6 |
-| `prompt_template_worker` (named template block) | yes | Prompt block for the main worker subprocess | [07-worker-execution](../fr/07-worker-execution.md) | roki-mvp Req 6.1, Req 6.6 |
-| `prompt_template_linear_updater` (named template block) | yes | Prompt block for the linear-updater subagent (translates daemon-only failure directives into Linear label/comment writes via the operator's MCP) | [14-operator-notifications](../fr/14-operator-notifications.md) | roki-mvp Req 6.1, Req 6.6 |
+| `prompt_template_orchestrator` (named template block) | yes | System prompt for orchestrator session A. Rendered against the issue context once per A launch; A consumes it as it processes `admission_request`, `phase_complete`, `phase_nonclean`, `daemon_directive`, `gate_deny`, and `tracker_terminal` events | [19-orchestrator-session](../fr/19-orchestrator-session.md) | roki-mvp Req 6.1, Req 6.6 |
 
 ### Reserved extension namespaces
 
@@ -55,18 +54,21 @@ Each downstream spec consumes only its own namespace. The loader **round-trips u
 
 | Namespace / Key | Consuming spec | Required | Meaning | Used by | Requirements |
 |---|---|---|---|---|---|
+| `extension.orchestrator.model` | roki-mvp (orchestrator session A) | no | Claude model identifier for A (default `"claude-opus-4-7"`) | [19-orchestrator-session](../fr/19-orchestrator-session.md) | roki-mvp Req 2.11 |
+| `extension.orchestrator.effort` | roki-mvp (orchestrator session A) | no | Extended-thinking budget for A; one of `low` / `middle` / `high` (default `"middle"`) | [19-orchestrator-session](../fr/19-orchestrator-session.md) | roki-mvp Req 2.11 |
+| `extension.orchestrator.max_phases` | roki-mvp (orchestrator session A) | no | Total phase subprocesses A may nominate before the budget routes the issue to `Inactive(reason=orchestrator_budget_exhausted)` (default `20`) | [19-orchestrator-session](../fr/19-orchestrator-session.md) | roki-mvp Req 2.11, Req 5.5 |
+| `extension.orchestrator.allowed_tools` | roki-mvp (orchestrator session A) | no | Allowlist passed to A via `--settings` (default permits Linear MCP write + `Read`) | [19-orchestrator-session](../fr/19-orchestrator-session.md), [11-agent-tool-boundary](../fr/11-agent-tool-boundary.md) | roki-mvp Req 2.11, Req 5.1 |
 | `extension.gates.spec.required_status` | roki-spec-gate | no | The Linear status the gate evaluates (logged when defaulted) | [08-pre-implementation-gate](../fr/08-pre-implementation-gate.md) | roki-spec-gate Req 7.1, Req 7.3 |
 | `extension.gates.spec.timeout_ms` | roki-spec-gate | no | Per-attempt timeout. Non-positive causes the gate evaluation for that repo to be refused | [08-pre-implementation-gate](../fr/08-pre-implementation-gate.md) | roki-spec-gate Req 4.1, Req 7.5 |
 | `extension.gates.spec.max_attempts` | roki-spec-gate | no | Attempt cap. Same as above for non-positive | [08-pre-implementation-gate](../fr/08-pre-implementation-gate.md) | roki-spec-gate Req 4.3, Req 7.5 |
 | `extension.gates.review.required_status` | roki-review-gate | no | The artifact status considered a pass (default `pass`) | [09-pre-pr-gate](../fr/09-pre-pr-gate.md) | roki-review-gate Req 6.2 |
-| `extension.gates.review.max_attempts` | roki-review-gate | no | Review attempt cap (default 3); each Deny+RetryWithContext re-launches the worker once with the failing-criterion payload as `additional_context` | [09-pre-pr-gate](../fr/09-pre-pr-gate.md) | roki-review-gate Req 5.1, Req 6.3 |
+| `extension.gates.review.max_attempts` | roki-review-gate | no | Review attempt cap (default 3); each Deny+RetryWithContext re-launches the `implement` phase once with the failing-criterion payload as `additional_context` (translated from `gate_deny` to A's `run_phase` directive per [19-orchestrator-session](../fr/19-orchestrator-session.md)) | [09-pre-pr-gate](../fr/09-pre-pr-gate.md) | roki-review-gate Req 5.1, Req 6.3 |
 | `extension.server.port` | roki-observability | no | HTTP API port (omitting disables the API) | [15-http-api](../fr/15-http-api.md) | roki-observability Req 1.1, Req 1.2, Req 15.2 |
 | `extension.server.bind` | roki-observability | no | HTTP API bind host (default `127.0.0.1`) | [15-http-api](../fr/15-http-api.md) | roki-observability Req 7.1, Req 15.2 |
 | `extension.server.min_refresh_interval_seconds` | roki-observability | no | Minimum coalescing interval for `POST /refresh` | [15-http-api](../fr/15-http-api.md) | roki-observability Req 4.4, Req 15.2 |
 | `extension.server.max_event_log_per_issue` | roki-observability | no | Maximum length of the event log returned by the per-issue endpoint | [15-http-api](../fr/15-http-api.md) | roki-observability Req 3.6, Req 15.2 |
-| `extension.linear_updater.timeout_ms` | roki-mvp (linear-updater) | no | Per-invocation timeout for the linear-updater subagent | [14-operator-notifications](../fr/14-operator-notifications.md), [07-worker-execution](../fr/07-worker-execution.md) | roki-mvp Req 2.12, Req 5.10 |
-| `extension.linear_updater.model` | roki-mvp (linear-updater) | no | Claude model identifier (defaults to the same small model used by the setup judge) | [14-operator-notifications](../fr/14-operator-notifications.md) | roki-mvp Req 2.12, Req 5.10 |
-| `extension.linear_updater.allowed_tools` | roki-mvp (linear-updater) | no | Optional restriction on the MCP tool names linear-updater may invoke | [14-operator-notifications](../fr/14-operator-notifications.md) | roki-mvp Req 2.12, Req 5.10 |
+
+The legacy `[judge].model` `roki.toml` block and the `extension.linear_updater.*` `WORKFLOW.md` namespace are removed alongside the setup-judge subprocess and the linear-updater subagent shapes; the loader rejects either with an actionable error per `roki-mvp Req 2.12`. Both functions are absorbed by orchestrator session A — see [19-orchestrator-session](../fr/19-orchestrator-session.md).
 
 ### Hot reload and validation
 
@@ -79,7 +81,7 @@ Each downstream spec consumes only its own namespace. The loader **round-trips u
 
 1. Add a row to the corresponding table above (Block/Key / Required / Meaning / Used by / Requirements).
 2. From the FR page that uses it, link to this table.
-3. Update `roki-mvp Req 2` (for `roki.toml`) or `roki-mvp Req 6.5` (for a `WORKFLOW.md` namespace) and the consuming spec's requirements.
+3. Update `roki-mvp Req 2` (for `roki.toml`) or `roki-mvp Req 13.5` (for a `WORKFLOW.md` namespace) and the consuming spec's requirements.
 
 ## Related
 

@@ -19,25 +19,32 @@ Fields automatically attached to every event via spans.
 | Field | Type | Attached when |
 |---|---|---|
 | issue identifier | string | per-issue scoped event |
-| repository identifier | string | repo-scoped event (e.g. worktree create / cleanup, setup-judge findings) |
-| worker invocation correlation identifier | string | per-worker event |
-| subprocess role | `judge` / `worker` / `sweep` | event from a subprocess |
+| repository identifier | string | repo-scoped event (e.g. worktree create / cleanup) |
+| subprocess invocation correlation identifier | string | per-subprocess event |
+| subprocess role | `orchestrator` / `phase` / `sweep` | event from a subprocess |
+| phase | `implement` / `validate` / `open_pr` / `ci_fix` / `finalize_review` | event from a phase subprocess (when role = `phase`) |
 
 ## Events emitted by roki-mvp
 
 | Event | Summary | Used by | Requirements |
 |---|---|---|---|
-| Worker lifecycle change | Each worker lifecycle change | [07-worker-execution](../fr/07-worker-execution.md) | roki-mvp Req 11.1 |
+| Orchestrator session start | Per ticket on `Discovered → Pending`; logs the rendered `extension.orchestrator.{model, effort, max_phases, allowed_tools}` snapshot used at launch | [19-orchestrator-session](../fr/19-orchestrator-session.md), [01-daemon-lifecycle](../fr/01-daemon-lifecycle.md) | roki-mvp Req 5.1, Req 11.1 |
+| Orchestrator session stop | Graceful exit on terminal `Inactive(reason=*)` (after any A-driven Linear writes for that terminal state have completed) | [19-orchestrator-session](../fr/19-orchestrator-session.md) | roki-mvp Req 5.11, Req 11.1, Req 11.8 |
+| Orchestrator turn | Per A response: `(issue, turn_index, action, phase or null, judge or null, outcome or null, reason)`; the `reason` field is bounded and redacted when long | [19-orchestrator-session](../fr/19-orchestrator-session.md) | roki-mvp Req 5.2, Req 11.1 |
+| Orchestrator schema drift | A's response failed JSON schema validation; counter-incremented; on a second drift after one daemon-side reprompt the issue lands `Inactive(reason=orchestrator_unparseable)` | [19-orchestrator-session](../fr/19-orchestrator-session.md) | roki-mvp Req 5.4, Req 12.3 |
+| Daemon directive sent | Every `daemon_directive` event the daemon writes on A's stdin (kind, structured fields, payload size) — the directive itself is never logged with secrets per `Req 12.5` | [14-operator-notifications](../fr/14-operator-notifications.md), [19-orchestrator-session](../fr/19-orchestrator-session.md) | roki-mvp Req 12.2, Req 12.5 |
+| Linear write applied | Per Linear write A reports back via the `linear_writes` field on its `admission_decision` (rejection variant) or `linear_update_done` response; partial writes are logged distinctly | [14-operator-notifications](../fr/14-operator-notifications.md) | roki-mvp Req 12.7, Req 11.1 |
+| Phase subprocess lifecycle change | Each phase subprocess lifecycle change (launch / clean exit / non-clean exit / signal / `--max-turns` exhaustion). The raw exit envelope is captured here; A's resulting decision is captured by the next `Orchestrator turn` event | [07-worker-execution](../fr/07-worker-execution.md), [18-worker-skill-workflow](../fr/18-worker-skill-workflow.md) | roki-mvp Req 5.6, Req 5.8, Req 11.1 |
+| Phase subprocess unknown subtype | The terminal `result.subtype` is not in the daemon's compiled mapping; raw subtype captured and forwarded to A in the matching `phase_nonclean` event (the daemon does not unilaterally route to `Inactive`) | [07-worker-execution](../fr/07-worker-execution.md) | roki-mvp Req 5.9, Req 11.1 |
 | Session tempdir create / delete | Session tempdir operations | [06-worktree-and-session](../fr/06-worktree-and-session.md) | roki-mvp Req 11.1 |
 | Worktree create / remove | Worktree operations | [06-worktree-and-session](../fr/06-worktree-and-session.md) | roki-mvp Req 11.1, Req 11.2 |
 | Linear poll | Tracker polling | [03-linear-integration](../fr/03-linear-integration.md) | roki-mvp Req 11.1 |
 | Webhook receipt | Tracker webhook received | [03-linear-integration](../fr/03-linear-integration.md) | roki-mvp Req 11.1 |
 | Backoff decision | 429 backoff applied | [03-linear-integration](../fr/03-linear-integration.md) | roki-mvp Req 3.4, Req 11.1 |
-| Stall decision | Stall detected | [07-worker-execution](../fr/07-worker-execution.md) | roki-mvp Req 5.3, Req 11.1 |
-| Retry attempt | Retry with attempt counter | [07-worker-execution](../fr/07-worker-execution.md) | roki-mvp Req 5.6, Req 11.1 |
-| State-machine transition | Per-issue state transition (prev / next / trigger source) | [04-state-machine-and-recovery](../fr/04-state-machine-and-recovery.md) | roki-mvp Req 8.2, Req 11.1 |
-| Setup judge completion | Success / retry / final failure (duration, parsed action, validated repos or rejection reason) | [05-setup-judge](../fr/05-setup-judge.md) | roki-mvp Req 11.8 |
-| Subprocess stderr line | One stderr line of judge / worker / sweep = one warn event | [13-observability-logs](../fr/13-observability-logs.md) | roki-mvp Req 11.5 |
+| Stall decision | Stall detected (per-phase or orchestrator) | [07-worker-execution](../fr/07-worker-execution.md), [19-orchestrator-session](../fr/19-orchestrator-session.md) | roki-mvp Req 5.3, Req 5.7, Req 11.1 |
+| Retry attempt | Retry with attempt counter (ticket-level, between `phase_nonclean → run_phase` cycles A drives) | [07-worker-execution](../fr/07-worker-execution.md) | roki-mvp Req 5.10, Req 11.1 |
+| State-machine transition | Per-issue state transition (prev / next / trigger source / `Inactive.reason` when transitioning to `Inactive`); `reason` may be any of the discriminator values including the three orchestrator-dead values `orchestrator_crash`, `orchestrator_unparseable`, `orchestrator_budget_exhausted` | [04-state-machine-and-recovery](../fr/04-state-machine-and-recovery.md) | roki-mvp Req 8.1, Req 8.2, Req 11.1, Req 12.3 |
+| Subprocess stderr line | One stderr line of orchestrator / phase / sweep subprocess = one warn event tagged with the subprocess role and (for phases) the phase name | [13-observability-logs](../fr/13-observability-logs.md) | roki-mvp Req 11.5 |
 
 ## Events emitted by roki-spec-gate
 
@@ -57,13 +64,13 @@ Fields automatically attached to every event via spans.
 | Gate decision | `(repo, issue)` + correlation identifier (review turn) + attempt counter + decision | [09-pre-pr-gate](../fr/09-pre-pr-gate.md) | roki-review-gate Req 8.5 |
 | Veto / escalation | Failing reason + on escalation (cap exhausted / `fail-missing-spec`) | [09-pre-pr-gate](../fr/09-pre-pr-gate.md) | roki-review-gate Req 8.2, Req 8.5 |
 
-## Events emitted by the roki-mvp linear-updater subagent
+## Events emitted by the roki-mvp escalation queue
+
+The prior linear-updater subagent's `dispatch` / `outcome` events are removed alongside the subagent itself. Linear-write side effects are now logged on the orchestrator-session side: the daemon emits `Daemon directive sent` when it writes a `daemon_directive` to A's stdin, and `Linear write applied` when A reports back via its `linear_writes` field (see "Events emitted by roki-mvp" above).
 
 | Event | Summary | Used by | Requirements |
 |---|---|---|---|
-| linear-updater dispatch | issue id + directive `kind` + structured fields + correlation id | [14-operator-notifications](../fr/14-operator-notifications.md) | roki-mvp Req 5.10, Req 11.1 |
-| linear-updater outcome | success / non-clean exit / Linear API error / MCP unavailable + retry decision | [14-operator-notifications](../fr/14-operator-notifications.md) | roki-mvp Req 5.10, Req 11.8 |
-| Escalation queue update | issue id + failure category + structured fields + (set / cleared) | [14-operator-notifications](../fr/14-operator-notifications.md) | roki-mvp Req 12.1 |
+| Escalation queue update | issue id + failure category + structured fields + (set / cleared); populated for both A-alive (`daemon_directive` sent) and A-dead (no Linear write) paths | [14-operator-notifications](../fr/14-operator-notifications.md) | roki-mvp Req 12.1, Req 12.3 |
 
 ## Events emitted by the roki-observability HTTP server
 
@@ -76,16 +83,17 @@ Fields automatically attached to every event via spans.
 
 Enabled by the `--debug` CLI flag or a config block ([cli.md](cli.md)).
 
-- Append **every line** of each worker subprocess's stdout/stderr to a per-issue file (under the debug-log directory).
+- Append **every line** of each subprocess's (orchestrator session A and every phase subprocess) stdout/stderr to a per-issue file (under the debug-log directory).
 - Tag each line with an **RFC 3339 nanosecond timestamp + stream tag** (stdout/stderr).
-- On write failure, log the offending path at warn severity and continue without stopping the worker.
+- On write failure, log the offending path at warn severity and continue without stopping the subprocess.
 - Used by: [13-observability-logs](../fr/13-observability-logs.md)
 - Requirements: roki-mvp Req 11.6, Req 11.7
 
 ## What is not logged
 
 - **Request / response bodies** (HTTP API) — only metadata fields, so agent strings do not leak into logs
-- **Linear-updater directive prose** — the directive carries the issue id + `kind` + structured fields; comment text composed by the linear-updater agent is not reflected back into the daemon log
+- **`daemon_directive` directive prose** — the directive carries the issue id + `kind` + structured fields; the Linear label name(s) and comment text A composes (driven by `prompt_template_orchestrator`) are not reflected back into the daemon log beyond the `linear_writes` summary A returns
+- **A's reasoning / extended-thinking text** — only the parsed JSON action (and bounded `reason` field) is logged per turn
 - **Secret strings** — Linear API token / webhook secret and similar values are redacted before emit
 
 ## When adding a new event

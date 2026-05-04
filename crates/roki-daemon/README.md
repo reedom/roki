@@ -14,7 +14,7 @@ refs:
 
 # roki-daemon
 
-The single-binary daemon for roki: observes Linear, runs the setup judge, supervises bounded `claude` worker subprocesses, and reconciles per-issue state on restart. Owns no Linear writes, no PR creation, no code edits — those belong to the agent inside the worker subprocess.
+The single-binary daemon for roki: observes Linear, supervises one long-lived orchestrator session (`claude --input-format stream-json --output-format stream-json`) plus zero-or-more short-lived phase subprocesses (`claude -p '/kiro-* <args>' --output-format stream-json`) per ticket, and reconciles per-issue state on restart. Owns no Linear writes, no PR creation, no code edits — Linear writes belong to the orchestrator session via the operator's installed Linear MCP; PR / git / code edits belong to phase subprocesses.
 
 For feature-level narrative, start at [`docs/fr/index.md`](../../docs/fr/index.md). For the vertical-slice spec, see [`.kiro/specs/roki-mvp/`](../../.kiro/specs/roki-mvp/).
 

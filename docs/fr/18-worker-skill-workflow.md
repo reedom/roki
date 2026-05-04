@@ -2,130 +2,108 @@
 refs:
   id: fr:18-worker-skill-workflow
   kind: fr
-  title: "Worker Skill Workflow"
+  title: "Phase Subprocess Catalog"
   related:
     - fr:07-worker-execution
     - fr:08-pre-implementation-gate
     - fr:09-pre-pr-gate
     - fr:11-agent-tool-boundary
+    - fr:14-operator-notifications
+    - fr:19-orchestrator-session
 ---
 
-# FR 18: Worker Skill Workflow
+# FR 18: Phase Subprocess Catalog
 
-> The internal workflow the agent-side kiro skill set runs inside one bounded `claude --print --output-format stream-json` worker invocation: phase plan, the kiro skills it composes, the `review.md` artifact produced before clean exit, and the structured terminal contract the daemon parses back.
+> The catalog of bounded `claude -p '/<kiro-skill> <args>' --output-format stream-json` phase subprocesses the orchestrator session A nominates per ticket: which kiro skill (or daemon-internal prompt fragment) drives each phase, the per-phase exit envelope A reads, and the `review.md` artifact produced by the `finalize_review` phase before A's clean exit.
 
 ## Purpose
 
-[FR 07: Worker Execution](07-worker-execution.md) deliberately keeps the daemon a thin observer that only reacts to subprocess exit, the artifacts left in the session tempdir, and Linear state. The actual code-changing work — implement, review, validate, open PR, fix CI, and finally synthesize a `review.md` artifact — happens **inside one Claude Code session**, driven by the kiro skill set the operator has installed under `~/.claude/skills/kiro-*` and `.claude/skills/kiro-*`. That session is structurally better at iterating with full context than a daemon dispatching N short-lived subprocesses with `format!`-built prompts ever could be.
+[FR 19: Orchestrator Session](19-orchestrator-session.md) describes the long-lived "thinking" component A that classifies admission, plans phases, processes daemon-only failure directives, and writes Linear via Linear MCP. A does not edit code; the actual code-changing work runs in **short-lived bounded phase subprocesses** that A nominates via `action=run_phase`. [FR 07: Worker Execution](07-worker-execution.md) describes the engine adapter's mechanical supervision of those subprocesses (launch flags, stall detection, stream-json parsing, exit translation into `phase_complete` / `phase_nonclean` events).
 
-This FR specifies the **expected shape of that internal workflow**: which kiro skills the worker composes, what budgets they honor, and what it must emit on stdout / leave on disk so the daemon can derive a terminal outcome and the review-gate can evaluate it without looking at agent message contents (per [FR 07: Worker Execution](07-worker-execution.md) §Boundaries).
-
-It is the agent-side counterpart to FR 07 — together they describe one worker invocation — and the inside-the-session counterpart to the daemon-enforced gates in [FR 08: Pre-Implementation Gate](08-pre-implementation-gate.md) and [FR 09: Pre-PR Gate](09-pre-pr-gate.md).
+This FR canonicalizes the **per-phase catalog**: which slash-command-driven kiro skill (or daemon-internal prompt fragment) drives each phase, what the daemon expects in the structured exit envelope, and what A reads from the resulting `phase_complete` / `phase_nonclean` event to decide its next action. The pre-implementation gate ([FR 08](08-pre-implementation-gate.md)) runs **before** any phase is admitted (on the `Judging → Active` transition); the pre-PR gate ([FR 09](09-pre-pr-gate.md)) runs **after** A's `action=stop`, parsing the `review.md` produced by the `finalize_review` phase.
 
 ## User-visible Behavior
 
-### Phase plan (single bounded invocation)
+### Phase catalog (one bounded subprocess per phase A nominates)
 
-The skill set executes the following phases sequentially within one worker subprocess. Phases are skill-internal; the daemon does not observe them granularly. The pre-implementation gate ([FR 08](08-pre-implementation-gate.md)) runs **before** this invocation starts (on the `Judging → Active` transition); the pre-PR gate ([FR 09](09-pre-pr-gate.md)) runs **after** this invocation exits cleanly (on the `Active → Inactive` transition). The worker does not self-check those gates — the daemon side owns the veto.
+A's `action=run_phase` directive carries a `phase` value drawn from the catalog below. For each phase the daemon spawns a single `claude -p '/<kiro-skill> <args>' --output-format stream-json` subprocess (or a small daemon-internal prompt fragment for `open_pr` and `finalize_review`) inside the issue's session tempdir, with its own `--max-turns` budget and the per-phase context envelope (including A's `additional_context` verbatim through the engine adapter's `additional_context` channel — see `req:roki-mvp:13`).
 
-1. **Context load** — read the ticket description (with `## Acceptance Criteria` per §Acceptance criteria convention), the relevant `.kiro/specs/{feature}/{spec.json,requirements.md,design.md,tasks.md}`, the project's `WORKFLOW.md`, and the relevant `.kiro/steering/` files. Discover validation commands (kiro-impl Step 1 Preflight handles this).
-2. **Implement** — invoke `kiro-impl <feature>` ([.claude/skills/kiro-impl](#existing-skill-set)) in autonomous mode (no task numbers): for each pending task, dispatch a fresh implementer subagent (TDD-first), then dispatch `kiro-review` as an independent reviewer subagent. The skill's internal loop handles reviewer rejections by remediation + re-review until APPROVED, marks the task `[x]`, and proceeds. Counters live inside `kiro-impl`.
-3. **Feature-level validation** — invoke `kiro-validate-impl <feature>`. Catches cross-task issues that per-task `kiro-review` cannot see (cross-task boundary spillover, integration seams, full-suite regressions). Output: `GO` / `NO_GO`. On `NO_GO` with remediation budget remaining (max 3), feed findings back into another `kiro-impl` pass scoped to the failing tasks; escalate on exhaustion.
-4. **Open PR** — `gh pr create` via Bash (no dedicated skill). The PR description embeds a brief change summary plus the validation outcome.
-5. **CI fix loop (max 3)** — poll GitHub Actions until checks settle. On red, invoke `kiro-debug` to root-cause + propose a fix, apply it, push. Use `kiro-verify-completion` (claim type `TEST_OR_BUILD`) to gate each push attempt with fresh evidence. Escalate if still red after the budget; the PR remains open per [FR 07: Worker Execution](07-worker-execution.md).
-6. **Produce `review.md`** — synthesize the structured `review.md` artifact at the path documented in [ref:artifacts](../reference/artifacts.md), drawing on the verdicts already accumulated this session (per-task `kiro-review` APPROVED set, `kiro-validate-impl` GO, the verify-cmd outcome, and any `kiro-verify-completion` VERIFIED stamps). Each `## Acceptance Criteria` entry from the ticket gets one row with `code_evidence` (file/line) and `test_evidence` (file/line) plus an overall verdict. The pre-PR gate ([FR 09](09-pre-pr-gate.md)) parses this artifact structurally; if it is missing or malformed the gate denies the transition.
-7. **Clean exit** — emit a final `ROKI_RESULT:` line on stdout (see §Skill → daemon terminal contract) and exit 0.
+| `phase` | Invocation | Skill (or prompt) | Purpose |
+|---|---|---|---|
+| `implement` | `claude -p '/kiro-impl <feature>' --output-format stream-json --max-turns N` | `kiro-impl` | Drives the implementer-then-reviewer loop per task in autonomous mode (no task numbers): for each pending task, dispatch a fresh implementer subagent (TDD-first), then dispatch `kiro-review` as an independent reviewer subagent. The skill's internal loop handles reviewer rejections by remediation + re-review until APPROVED, marks the task `[x]`, and proceeds. Counters live inside `kiro-impl`. |
+| `validate` | `claude -p '/kiro-validate-impl <feature>' --output-format stream-json --max-turns N` | `kiro-validate-impl` | Cross-task feature-level validation after `implement` reports done. Catches cross-task issues that per-task `kiro-review` cannot see (cross-task boundary spillover, integration seams, full-suite regressions). Output: `GO` / `NO_GO`. A decides whether to re-run `implement` with `additional_context` populated from validation findings, fall through to `ci_fix`, or `action=stop`. |
+| `open_pr` | `claude -p '<daemon-internal prompt fragment>' --output-format stream-json --max-turns N` | (no skill) | `gh pr create` via Bash. The PR description embeds a brief change summary plus the validation outcome A passes through `additional_context`. |
+| `ci_fix` | `claude -p '/kiro-debug <feature>' --output-format stream-json --max-turns N` | `kiro-debug` (with `kiro-verify-completion` used internally as the fresh-evidence gate) | On CI red, root-cause-first analysis + minimal fix + push. Each push attempt is gated by `kiro-verify-completion` (claim type `TEST_OR_BUILD`) before exit. A nominates this phase (typically after a `validate`-derived `phase_nonclean` or a poll observation A maintains in conversation context); the daemon does not auto-poll CI for A. |
+| `finalize_review` | `claude -p '<daemon-internal synthesis prompt>' --output-format stream-json --max-turns N` | (no skill) | Synthesize the structured `review.md` artifact at the path documented in [ref:artifacts](../reference/artifacts.md), drawing on the verdicts already accumulated this session (per-task `kiro-review` APPROVED set, `kiro-validate-impl` GO, the verify-cmd outcome, any `kiro-verify-completion` VERIFIED stamps, and the artefacts in the worktree). The pre-PR gate ([FR 09](09-pre-pr-gate.md)) parses this artifact structurally; if it is missing or malformed the gate denies the transition. |
 
-A Type B (with-human-planning) ticket inserts one phase before Phase 2: the worker uses the operator-installed Linear MCP (per [FR 11: Agent Tool Boundary](11-agent-tool-boundary.md)) to post questions as ticket comments and poll for replies. When the human approves a plan, write it to the ticket body as a `## kiro Plan` YAML section, then proceed. There is no dedicated `kiro-plan-with-human` skill today — this is normal Claude Code session work using Linear MCP and Bash.
+Slash commands work as the initial prompt argument in `-p` mode (the prompt string is parsed before headless takes over), so the `kiro-impl` SKILL.md `disable-model-invocation: true` flag does not prevent the daemon from launching it via `/kiro-impl <feature>`. Authoring-time skills (`kiro-spec-init`, `kiro-spec-requirements`, `kiro-spec-design`, `kiro-spec-tasks`, `kiro-spec-batch`, `kiro-spec-quick`, `kiro-spec-status`, `kiro-validate-design`, `kiro-validate-gap`, `kiro-discovery`, `kiro-steering`, `kiro-steering-custom`) are **operator-side** and are never invoked by the daemon; the per-issue spec materialization for the spec gate is owned by [FR 08](08-pre-implementation-gate.md), which produces `requirements.md` only — not `spec.json`, `design.md`, or `tasks.md`. (See §Open issues.)
 
-### Existing skill set
+A Type B (with-human-planning) ticket is handled inside an `implement` phase: the phase agent uses the operator-installed Linear MCP (per [FR 11: Agent Tool Boundary](11-agent-tool-boundary.md)) to post questions as ticket comments and poll for replies. There is no dedicated `kiro-plan-with-human` skill today — this is normal Claude Code session work using Linear MCP and Bash, scoped to the same `implement` phase budget.
 
-The phases above compose existing kiro skills installed at the operator's Claude Code skill directory. The worker uses them directly; no roki-specific subagents are introduced.
+### Skill set (verified manifests)
+
+The runtime skills below all exist at `.claude/skills/kiro-*/SKILL.md` (project) or `~/.claude/skills/kiro-*/SKILL.md` (operator). The daemon does not introduce roki-specific subagents beyond what these skills already compose internally.
 
 | Skill | Used in phase | Purpose | Tool scope (per skill manifest) |
 |---|---|---|---|
-| `kiro-impl` | Phase 2 | Drives the implementer-then-reviewer loop per task; owns TDD discipline, validation command discovery, and per-task remediation | Read, Write, Edit, MultiEdit, Bash, Glob, Grep, Agent, WebSearch, WebFetch |
-| `kiro-review` | Phase 2 (dispatched by `kiro-impl`) | Adversarial per-task review against approved spec + boundary; APPROVED / REJECTED | Read, Bash, Grep, Glob |
-| `kiro-validate-impl` | Phase 3 | Cross-task feature-level validation after all tasks complete; GO / NO_GO | Read, Bash, Grep, Glob, Agent |
-| `kiro-debug` | Phase 5 | Root-cause-first failure analysis; used on CI red to propose a minimal fix | per skill manifest |
-| `kiro-verify-completion` | Phases 3, 5 (and as a fresh-evidence gate elsewhere) | Refuses success claims that lack fresh evidence; VERIFIED / NOT_VERIFIED / MANUAL_VERIFY_REQUIRED | Read, Bash, Grep, Glob |
+| `kiro-impl` | `implement` | Drives the implementer-then-reviewer loop per task; owns TDD discipline, validation-command discovery, and per-task remediation. Manifest carries `disable-model-invocation: true` (slash-command entry only). | Read, Write, Edit, MultiEdit, Bash, Glob, Grep, Agent, WebSearch, WebFetch |
+| `kiro-review` | `implement` (dispatched by `kiro-impl` as an independent reviewer subagent) | Adversarial per-task review against approved spec + boundary; APPROVED / REJECTED. | Read, Bash, Grep, Glob |
+| `kiro-validate-impl` | `validate` | Cross-task feature-level validation after all tasks complete; GO / NO_GO. | Read, Bash, Grep, Glob, Agent |
+| `kiro-debug` | `ci_fix` | Root-cause-first failure analysis; used on CI red to propose a minimal fix. | per skill manifest |
+| `kiro-verify-completion` | `ci_fix` (internal) | Refuses success claims that lack fresh evidence; VERIFIED / NOT_VERIFIED / MANUAL_VERIFY_REQUIRED. | Read, Bash, Grep, Glob |
 
-The authoring-time skills (`kiro-spec-init`, `kiro-spec-requirements`, `kiro-spec-design`, `kiro-spec-tasks`, `kiro-spec-batch`, `kiro-spec-quick`, `kiro-spec-status`, `kiro-validate-design`, `kiro-validate-gap`, `kiro-discovery`, `kiro-steering`, `kiro-steering-custom`) are **operator-side**: they run in the operator's interactive Claude Code session before a ticket is admitted, not inside the worker invocation. The worker reads the artifacts those skills produce (`.kiro/specs/{feature}/*` and `.kiro/steering/*`) but does not invoke them.
+### Per-phase exit envelope (phase subprocess → daemon → A)
+
+The phase subprocess emits a terminal stream-json `result` event on clean exit. The daemon does not interpret reasoning text (per [FR 07: Worker Execution](07-worker-execution.md) §Boundaries); it observes the structured `result` and translates the outcome into one of two events delivered to A's stdin:
+
+- **`phase_complete`** — clean exit with `result.subtype = success`. Payload includes `phase` (which one just ran), the parsed `result` envelope, the `pr_url` when the phase produced one (currently `open_pr`), the `review_artifact_path` when the phase wrote one (`finalize_review`), and any phase-specific summary fields the skill emitted in its `result` payload. A reads this and returns either `action=run_phase` (next phase) or `action=stop` (`outcome=success` or `outcome=failure`).
+- **`phase_nonclean`** — non-zero exit, signal termination, stall-detected termination, exhausted `--max-turns`, or terminal `result` with a non-`success` subtype (including a subtype the daemon's compiled mapping does not recognize, in which case the raw subtype is forwarded to A — see [FR 07](07-worker-execution.md) §Termination handling). Payload includes the failure classification, the raw subtype when applicable, and the verbatim phase-`additional_context` A had passed in. A reads this and decides whether to re-run the same phase, fall through to a `ci_fix` phase, or `action=stop`.
+
+The standalone `ROKI_RESULT:` final-line contract from the prior single-worker model is **removed**. Each phase emits its own structured exit through the stream-json `result` event, and the daemon maps the `result` into the `phase_complete` / `phase_nonclean` events A consumes. A's strict JSON action contract ([FR 19 §Response schema](19-orchestrator-session.md)) is the only "thinking" surface the daemon parses; intra-phase advisory progress markers stay in the structured log but are not state-machine inputs.
 
 ### Acceptance criteria convention (EARS)
 
-Every Linear ticket eligible for roki dispatch MUST include an `## Acceptance Criteria` section in its body, written in EARS style — preferably the Ubiquitous (`The X shall Y.`) and Event-driven (`When <trigger>, the X shall Y.`) patterns. Without explicit, written criteria, there is no objective basis for `review.md` to populate per-criterion entries; the setup judge ([FR 05: Setup Judge](05-setup-judge.md)) is expected to refuse such tickets at admission.
+Every Linear ticket eligible for roki dispatch MUST include an `## Acceptance Criteria` section in its body, written in EARS style — preferably the Ubiquitous (`The X shall Y.`) and Event-driven (`When <trigger>, the X shall Y.`) patterns. Without explicit, written criteria, there is no objective basis for `review.md` to populate per-criterion entries; A is expected to refuse such tickets at admission via `judge=noop` (per [FR 19 §Event catalog](19-orchestrator-session.md)).
 
-### `review.md` artifact contract
+### `review.md` artifact
 
-Phase 6 writes one Markdown file with YAML front matter at the path documented in [ref:artifacts](../reference/artifacts.md). Front-matter keys (the structurally-parsed surface):
+`finalize_review` writes `review.md` at the canonical path `<workspace_root>/<repo>/<issue>/.kiro/specs/<issue>/review.md` ([ref:artifacts](../reference/artifacts.md), `req:roki-mvp:9.4` / [FR 09](09-pre-pr-gate.md)). The file is **not** written under the session tempdir.
 
-```yaml
----
-schema: roki-review/v1
-verdict: pass | fail
-verify_cmd_outcome: green | red
-all_criteria_satisfied: true | false
-criteria:
-  - id: AC-1
-    text: "<criterion text>"
-    satisfied: yes | partial | no
-    code_evidence: "src/foo.rs:42"
-    test_evidence: "tests/foo_test.rs:10"
----
-```
-
-The body is free-form prose summarizing the change for human reviewers. The pre-PR gate parses front matter only; prose drift never causes a deny by itself.
-
-### Skill → daemon terminal contract
-
-The daemon does not interpret subprocess output (per [FR 07: Worker Execution](07-worker-execution.md) §Boundaries). To convey a structured outcome without violating that boundary, the worker's final stdout line MUST start with the literal prefix `ROKI_RESULT:` followed by a single-line JSON object:
-
-```json
-{
-  "outcome": "pr_opened" | "escalated" | "failed",
-  "phase":   "context_load" | "plan" | "implement" |
-             "validate" | "open_pr" | "ci_fix" |
-             "review" | null,
-  "pr_url":  "https://github.com/..." | null,
-  "review_artifact_path": "<session-tempdir>/review.md" | null,
-  "summary": "human-readable single-paragraph summary",
-  "reason":  "non-null only when outcome ∈ {escalated, failed}",
-  "attempts": { "validate_remediation": 2, "ci_fix": 0 }
-}
-```
-
-`phase` is the phase the worker was *in* when it terminated. The daemon parses the **last** `ROKI_RESULT:` line; earlier lines are advisory progress markers. This stays compatible with [FR 07: Worker Execution](07-worker-execution.md) §Termination handling — the daemon derives state-machine transitions from subprocess exit and Linear state, treating `ROKI_RESULT` as a notification surface ([FR 14: Operator Notifications](14-operator-notifications.md)) and a `ref:log-events` payload, not as a state-machine input. The pre-PR gate's structural verdict comes from `review.md`, not from `ROKI_RESULT`.
+The schema is the canonical one defined in [ref:artifacts](../reference/artifacts.md): an overall `status` of `pass | fail`, per-criterion entries indexed by the numeric requirement ID drawn from `requirements.md`, and `code_references` (an array of workspace-relative file paths with optional line range) on each entry whose status is `pass`. The pre-PR gate parses this artifact structurally; this FR does not introduce a new schema.
 
 ### Cancellation / timeout
 
-If the daemon SIGTERMs the worker (per [FR 07: Worker Execution](07-worker-execution.md) stall handling), the active skill SHOULD treat it as cancellation: stop dispatching new subagents, allow the current subagent to wind down briefly, and exit. The worktree and session tempdir are preserved so a human can inspect intermediate state ([FR 06: Worktree and Session](06-worktree-and-session.md)).
+If the daemon SIGTERMs a phase subprocess (per [FR 07: Worker Execution](07-worker-execution.md) stall handling), the active skill SHOULD treat it as cancellation: stop dispatching new subagents, allow the current subagent to wind down briefly, and exit. The worktree and session tempdir are preserved so a human can inspect intermediate state. The daemon then sends `phase_nonclean` to A with the stall classification; A decides whether to retry, fall through to `ci_fix`, or `action=stop`.
 
 ## Capabilities
 
-- **Single-entry orchestration**: one worker invocation drives the whole phase plan; the daemon dispatches once, parses one terminal `ROKI_RESULT:` line, and reads one `review.md`.
-- **Bounded loops with skill-owned counters**: `kiro-impl`'s per-task review loop, the validate-remediation budget (3), and the CI fix budget (3) all live in skill / worker state, not in any daemon-side persistent column.
-- **Skill-first review.md production**: the gate-relevant artifact is produced inside the worker before clean exit, keeping the boundary "one bounded `claude` invocation per ticket" intact.
-- **Composes existing skills, not new ones**: phases map onto `kiro-impl` / `kiro-review` / `kiro-validate-impl` / `kiro-debug` / `kiro-verify-completion`. No roki-specific subagent is introduced.
-- **Operator-installed tools, no daemon proxy**: every Bash / `gh` / Linear-MCP call goes through the operator's Claude Code tool surface unchanged ([FR 11: Agent Tool Boundary](11-agent-tool-boundary.md)).
+- **Per-phase isolation**: each phase = its own bounded `claude -p` subprocess with its own `--max-turns` budget, its own slash-command-driven kiro skill (or daemon-internal prompt fragment), and its own structured exit envelope. The daemon supervises lifecycle uniformly per [FR 07](07-worker-execution.md).
+- **A nominates, daemon spawns**: A is the only "thinking" component that decides which phase runs next; the daemon never selects a phase on its own. The retry decision on a `phase_nonclean` is A's, not the daemon's.
+- **Composes existing skills, not new ones**: phases map onto `kiro-impl` / `kiro-review` (dispatched internally by `kiro-impl`) / `kiro-validate-impl` / `kiro-debug` / `kiro-verify-completion`. No roki-specific subagent is introduced.
+- **Slash-command headless invocation**: `/kiro-* <args>` works as the initial prompt argument in `-p` mode, even for skills whose manifest sets `disable-model-invocation: true` (the slash-command entry path is unaffected by the model-invocation flag).
+- **Operator-installed tools, no daemon proxy**: every Bash / `gh` / Linear-MCP call from inside a phase goes through the operator's Claude Code tool surface unchanged ([FR 11: Agent Tool Boundary](11-agent-tool-boundary.md)).
+- **`review.md` produced inside the catalog**: the `finalize_review` phase synthesizes the gate-relevant artifact before A's clean exit, keeping the structural-only review-gate contract intact.
 
 ## Boundaries
 
-- **The daemon does not drive these phases** — it observes subprocess lifecycle, the `review.md` artifact, and Linear state only. State-machine transitions come from those observations, not from `ROKI_RESULT.phase` ([FR 07: Worker Execution](07-worker-execution.md)).
-- **The daemon does not enforce the phase plan** — a worker that runs a different phase order is the operator's choice. The daemon's only structural expectations are (a) one bounded invocation eventually exits, (b) a `review.md` matching the documented schema is left at the documented path on a clean exit that intends to enter the review gate, and (c) optionally a final `ROKI_RESULT:` line.
-- **Loop budgets are advisory** — they describe the bundled flow's intended behavior. An operator-modified flow may set its own budgets; `attempts` in `ROKI_RESULT` reports whatever was used.
-- **Skill internals are skill-owned** — the per-task review loop, validation command discovery, and remediation strategies live inside `kiro-impl` / `kiro-validate-impl` / `kiro-review` and are not re-specified here. This FR only specifies how the worker composes them.
-- **Authoring-time skills are out of scope** — `kiro-spec-*`, `kiro-validate-design`, `kiro-validate-gap`, `kiro-discovery`, and the steering skills are operator-side. The worker reads their outputs but does not invoke them.
-- **No daemon-driven retry of the inner phases** — retries inside the worker are skill / worker responsibility; the daemon-level retry budget ([FR 07: Worker Execution](07-worker-execution.md)) only covers non-clean exits of the whole subprocess. The review-gate's `Deny+RetryWithContext` re-launches the whole worker once with `additional_context`, which is a separate mechanism owned by [FR 09](09-pre-pr-gate.md).
-- **Auto-merge is out of scope here** — Phase 4 ends at "PR opened". Whether the daemon then auto-merges on CI green is governed elsewhere (currently out of MVP).
-- **Multi-engine portability is out of scope** — the contract assumes one Claude Code session per worker invocation. If non-Claude engines are added later, the kiro skill set abstraction needs re-expression in those engines (deferred).
+- **The daemon does not drive these phases** — it spawns the phase subprocess A nominated, observes its lifecycle, and forwards the structured exit to A. State-machine transitions come from subprocess exit and Linear state, not from any phase-internal event ([FR 07: Worker Execution](07-worker-execution.md)).
+- **The daemon does not enforce the phase order** — A's `action=run_phase` directives are the only sequencing signal. A's `max_phases` budget is the daemon-side cap; per-phase order is A's choice.
+- **Loop budgets are skill-internal** — `kiro-impl`'s per-task review loop, `kiro-validate-impl`'s remediation, and the CI-fix budget all live in skill state, not in any daemon-side persistent column. Cross-phase budgets (ticket-level retry, `max_phases`) live on A and on the daemon, not in the skill.
+- **Skill internals are skill-owned** — the per-task review loop, validation-command discovery, and remediation strategies live inside `kiro-impl` / `kiro-validate-impl` / `kiro-review` / `kiro-debug` and are not re-specified here. This FR only specifies how A composes them through the phase catalog.
+- **Authoring-time skills are out of scope** — `kiro-spec-*`, `kiro-validate-design`, `kiro-validate-gap`, `kiro-discovery`, and the steering skills are operator-side. Phase subprocesses do not invoke them. The per-issue `requirements.md` materialization for the spec gate is owned by [FR 08](08-pre-implementation-gate.md).
+- **No standalone `ROKI_RESULT:` line** — superseded by the per-phase stream-json `result` event mapped into `phase_complete` / `phase_nonclean` events.
+- **No daemon-driven retry of the inner phases** — retries inside a phase are skill-internal; the daemon-level retry budget ([FR 07: Worker Execution](07-worker-execution.md)) only frames how many `phase_nonclean → run_phase` cycles A may drive before `daemon_directive (kind=retry_exhausted)`. The review-gate's `Deny+RetryWithContext` re-launches an `implement` phase via A's `gate_deny → run_phase` path, which is owned by [FR 09](09-pre-pr-gate.md) and [FR 19 §Event catalog](19-orchestrator-session.md).
+- **Auto-merge is out of scope here** — `open_pr` ends at "PR opened". Whether the daemon then auto-merges on CI green is governed elsewhere (currently out of MVP).
+- **Multi-engine portability is out of scope** — the contract assumes Claude Code stream-json. If non-Claude engines are added later, the kiro skill set abstraction needs re-expression in those engines (deferred).
+
+## Open issues (flagged, not invented)
+
+- **`kiro-impl` decomposition input**: the per-issue spec gate produces `requirements.md` only at the canonical artifact path ([ref:artifacts](../reference/artifacts.md)); it does not produce `spec.json`, `design.md`, or `tasks.md`. Whether `kiro-impl` requires a `tasks.md` decomposition layer to drive its per-task loop in the per-issue path — or whether it adapts to a single-`requirements.md` input — is an open question for [FR 08](08-pre-implementation-gate.md) / `kiro-impl` to resolve. This FR flags the gap; it does not invent a phase to fill it.
 
 ## Traceability
 
-- **Roadmap**: `roadmap.md` > Scope > In > "Single bounded `claude ...` invocation per admitted issue"; Boundary Strategy > "Agent-side tool surface (no daemon registration)".
-- **Requirements**: none yet — this FR documents the agent-side workflow contract that complements the daemon-side requirements in `roki-mvp` Req 5 / 7 / 9 and the gate-side requirements in `roki-review-gate`. A future spec covering the bundled kiro skill set should backfill explicit requirement IDs and add `implements:` here.
-- **Design**:
-  - `Engine Adapter` and `Worker invocation loop` sections of `.kiro/specs/roki-mvp/design.md`.
-  - `review.md` artifact section of `.kiro/specs/roki-review-gate/design.md`.
-  - Skill manifests under `.claude/skills/kiro-*/SKILL.md` (kiro-impl, kiro-review, kiro-validate-impl, kiro-debug, kiro-verify-completion).
-- **Related FR**: [07-worker-execution](07-worker-execution.md), [08-pre-implementation-gate](08-pre-implementation-gate.md), [09-pre-pr-gate](09-pre-pr-gate.md), [11-agent-tool-boundary](11-agent-tool-boundary.md), [14-operator-notifications](14-operator-notifications.md).
+- **Roadmap**: `roadmap.md` > Constraints > Engine ("Phase subprocess (short-lived, one per phase)"); Boundary Strategy > "Orchestrator-vs-phase boundary" and "Subprocess invocation taxonomy".
+- **Requirements**: complemented by `req:roki-mvp:5.6` (phase nomination spawn), `req:roki-mvp:5.8` (phase clean / non-clean exit translation), `req:roki-mvp:13` (`additional_context` channel). A future spec covering the bundled kiro skill set should backfill explicit requirement IDs and add `implements:` here.
+- **Reference**: [ref:artifacts](../reference/artifacts.md) (canonical `review.md` schema and path).
+- **Skill manifests**: `.claude/skills/kiro-impl/SKILL.md`, `.claude/skills/kiro-review/SKILL.md`, `.claude/skills/kiro-validate-impl/SKILL.md`, `.claude/skills/kiro-debug/SKILL.md`, `.claude/skills/kiro-verify-completion/SKILL.md`.
+- **Related FR**: [07-worker-execution](07-worker-execution.md), [08-pre-implementation-gate](08-pre-implementation-gate.md), [09-pre-pr-gate](09-pre-pr-gate.md), [11-agent-tool-boundary](11-agent-tool-boundary.md), [14-operator-notifications](14-operator-notifications.md), [19-orchestrator-session](19-orchestrator-session.md).

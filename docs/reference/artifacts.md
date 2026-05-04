@@ -13,8 +13,8 @@ The **canonical reference** for the paths and required elements of the **public 
 
 | Artifact | Path | Writer | Reader | Purpose | Used by | Requirements |
 |---|---|---|---|---|---|---|
-| `requirements.md` | `<workspace_root>/<repo>/<issue>/.kiro/specs/<issue>/requirements.md` | spec-materialization turn (agent) | review gate / operator / future spec-sync | Per-issue acceptance criteria in EARS form | [08-pre-implementation-gate](../fr/08-pre-implementation-gate.md), [09-pre-pr-gate](../fr/09-pre-pr-gate.md) | roki-spec-gate Req 2, Req 3 |
-| `review.md` | `<workspace_root>/<repo>/<issue>/.kiro/specs/<issue>/review.md` | worker session via `kiro-review` skill (agent, before clean exit) | review gate / operator | Per-criterion pass/fail + code references | [09-pre-pr-gate](../fr/09-pre-pr-gate.md) | roki-review-gate Req 2, Req 3 |
+| `requirements.md` | `<workspace_root>/<repo>/<issue>/.kiro/specs/<issue>/requirements.md` | spec-materialization turn (the constrained `Judging → Active` gate evaluation, owned by [08-pre-implementation-gate](../fr/08-pre-implementation-gate.md)) | review gate / operator / future spec-sync | Per-issue acceptance criteria in EARS form | [08-pre-implementation-gate](../fr/08-pre-implementation-gate.md), [09-pre-pr-gate](../fr/09-pre-pr-gate.md) | roki-spec-gate Req 2, Req 3 |
+| `review.md` | `<workspace_root>/<repo>/<issue>/.kiro/specs/<issue>/review.md` | `finalize_review` phase subprocess (per [18-worker-skill-workflow](../fr/18-worker-skill-workflow.md) phase catalog), synthesizing from prior-phase verdicts (per-task `kiro-review` APPROVED set, `kiro-validate-impl` GO, `kiro-verify-completion` VERIFIED stamps, worktree artefacts) before A's `action=stop` | review gate / operator | Per-criterion pass/fail + code references | [09-pre-pr-gate](../fr/09-pre-pr-gate.md), [18-worker-skill-workflow](../fr/18-worker-skill-workflow.md) | roki-review-gate Req 2, Req 3 |
 
 ## Required elements of `requirements.md`
 

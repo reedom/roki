@@ -36,9 +36,9 @@ The file falls into four broad groups:
 - **Linear access**: API token / webhook secret / assignee filter / `admit_states`
 - **Workspace policy**: path to `WORKFLOW.md`
 - **Network**: bind / port for the webhook receiver
-- **Repo allowlist**: zero or more `ghq` identifiers + `[judge].model` + `[permissions].strategy` + optional Slack notification settings
+- **Repo allowlist**: zero or more `ghq` identifiers + `[permissions].strategy`. The `[judge]` block is removed (orchestrator-session model selection lives in `extension.orchestrator.model` in `WORKFLOW.md`). The previous `extension.linear_updater.*` namespace is also removed and rejected by the loader; orchestrator-session-driven Linear writes replace it.
 
-Any invalid value or resolution failure (assignee cannot be resolved / empty `admit_states` / `WORKFLOW.md` path missing / token missing / Slack endpoint cannot be resolved) **refuses startup** and emits the offending field in the structured log.
+Any invalid value or resolution failure (assignee cannot be resolved / empty `admit_states` / `WORKFLOW.md` path missing / token missing) **refuses startup** and emits the offending field in the structured log.
 **`roki.toml` itself is not hot-reloaded; changing it requires a daemon restart.**
 
 The exact name, default, and validation rule for each key live in the "roki.toml schema" table in [`docs/reference/config.md`](../reference/config.md).
@@ -47,8 +47,8 @@ The exact name, default, and validation rule for each key live in the "roki.toml
 
 A single per-workspace file. It consists of front matter (YAML or TOML) and template blocks, and contains:
 
-- **Two named template blocks**: `prompt_template_setup` (for the setup judge) and `prompt_template_worker` (for the main worker). When rendering fails, a deterministic fallback (issue identifier / title / description only) is used so the subprocess can still be launched.
-- **Reserved extension namespaces**: regions where each downstream spec places its own keys (`extension.gates.spec.*` / `extension.gates.review.*` / `extension.server.*` / `extension.distill.*`). The loader **round-trips unknown keys** (it does not interpret them, and does not delete them).
+- **One named template block**: `prompt_template_orchestrator` (for the long-lived orchestrator session A; rendered once at A launch). Phase subprocesses are driven by their slash commands plus a small daemon-controlled context envelope and do not consume named WORKFLOW.md template blocks. When rendering fails, a deterministic fallback (issue identifier / title / description only) is used so A can still be launched.
+- **Reserved extension namespaces**: regions where each downstream spec places its own keys (`extension.orchestrator.*` / `extension.gates.spec.*` / `extension.gates.review.*` / `extension.server.*`). The loader **round-trips unknown keys** (it does not interpret them, and does not delete them). The legacy `extension.linear_updater.*` namespace is rejected by the loader; A's processing of `daemon_directive` events replaces it.
 
 The consuming spec, requiredness, default, and behavior on invalid values for each namespace live in the "WORKFLOW.md schema" table in [`docs/reference/config.md`](../reference/config.md).
 
@@ -85,7 +85,6 @@ The consuming spec, requiredness, default, and behavior on invalid values for ea
   - `roki-spec-gate Req 7`: WORKFLOW.md Configuration Surface
   - `roki-review-gate Req 6`: WORKFLOW.md Schema Keys
   - `roki-observability Req 1`, `Req 7`, `Req 15`: Server config gating
-  - `roki-distill-postmerge Req 4`: Artifact Discovery Configuration
 - **Design**:
   - `Configuration Schema` / `Workflow Loader` sections of `.kiro/specs/roki-mvp/design.md`
   - The Configuration sections of each spec's `design.md`

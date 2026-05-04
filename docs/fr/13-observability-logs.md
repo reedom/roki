@@ -16,21 +16,21 @@ refs:
 
 # FR 13: Observability Logs
 
-> A single structured logging pipeline shared by the daemon, every gate, and the distill phase. Includes per-issue debug capture, surfacing of subprocess stderr, and secret redaction.
+> A single structured logging pipeline shared by the daemon, every gate, and every `claude` subprocess (orchestrator session A and phase subprocesses). Includes per-issue debug capture, surfacing of subprocess stderr, and secret redaction.
 > See [`docs/reference/log-events.md`](../reference/log-events.md) for the full event list and the common context fields.
 
 ## Purpose
 
-Even in stages without a dedicated UI, an operator must be able to diagnose the daemon's behavior, gate decisions, and the distill phase from structured logs alone. By making every spec route through the roki-mvp tracing pipeline rather than its own log destination, log aggregation and redaction are centralized. (Required as a base layer even when [15-http-api](15-http-api.md) / [16-roki-tui](16-roki-tui.md) exist.)
+Even in stages without a dedicated UI, an operator must be able to diagnose the daemon's behavior, gate decisions, and orchestrator / phase subprocess outcomes from structured logs alone. By making every spec route through the roki-mvp tracing pipeline rather than its own log destination, log aggregation and redaction are centralized. (Required as a base layer even when [15-http-api](15-http-api.md) / [16-roki-tui](16-roki-tui.md) exist.)
 
 ## User-visible Behavior
 
 ### Shared pipeline
 
 - **A single tracing-crate-based pipeline**: every event passes through here.
-- **Per-issue / per-worker / per-repo fields**: automatically attached based on tracing spans.
-- **Correlation identifier**: one is allocated per worker invocation and attached to all related events.
-- **Secret redaction**: Linear API token / webhook secret / Slack credentials / other operator-declared secrets are redacted before emit (each spec does not have its own redaction; it is shared).
+- **Per-issue / per-subprocess / per-repo fields**: automatically attached based on tracing spans (subprocess role ∈ `orchestrator | phase | sweep`).
+- **Correlation identifier**: one is allocated per subprocess invocation and attached to all related events.
+- **Secret redaction**: Linear API token / webhook secret / other operator-declared secrets are redacted before emit (each spec does not have its own redaction; it is shared).
 - **Configurable destination**: stdout / file / both (`roki.toml`).
 - **Configurable log level.**
 
@@ -39,28 +39,28 @@ Even in stages without a dedicated UI, an operator must be able to diagnose the 
 The **exact list** of events emitted by each spec lives in [`docs/reference/log-events.md`](../reference/log-events.md).
 Here we only outline the conceptual categories:
 
-- **roki-mvp**: worker lifecycle changes (including `Inactive(reason=...)` transitions), session/worktree operations, Linear poll/webhook, backoff/stall decisions, retry attempts, state-machine transitions, setup-judge completion, linear-updater dispatch / outcome / escalation queue updates, subprocess stderr lines.
+- **roki-mvp**: orchestrator-session lifecycle (start / stop / turn / schema drift), phase subprocess lifecycle changes (including `Inactive(reason=...)` transitions covering the three orchestrator-dead reasons `orchestrator_crash` / `orchestrator_unparseable` / `orchestrator_budget_exhausted`), session/worktree operations, Linear poll/webhook, backoff/stall decisions, retry attempts, state-machine transitions, A's `daemon_directive` Linear-write outcomes, escalation queue updates, subprocess stderr lines.
 - **Pre-implementation gate** ([08](08-pre-implementation-gate.md)): gate-evaluation start, spec-materialization turn start/end, per-attempt timeout, validation outcome, veto decision, escalation.
 - **Pre-PR gate** ([09](09-pre-pr-gate.md)): gate decision (Allow / Deny+RetryWithContext / Deny exhausted), validation failure code, fix-finding context payload size, escalation.
 - **HTTP API** ([15](15-http-api.md)): per-request event (method/path/status/duration/correlation), refresh request.
 
 ### Surfacing subprocess stderr
 
-- The stderr of judge / worker / sweep subprocesses is surfaced as **one warn-severity structured event per line**.
-- Tags: issue identifier + role (`judge` / `worker` / `sweep`) + correlation identifier.
+- The stderr of orchestrator / phase / sweep subprocesses is surfaced as **one warn-severity structured event per line**.
+- Tags: issue identifier + role (`orchestrator` / `phase` / `sweep`) + correlation identifier.
 - Empty lines are skipped.
 
 ### Per-issue debug capture (opt-in)
 
 - Enabled by the `--debug` CLI flag (canonical reference: [01-daemon-lifecycle](01-daemon-lifecycle.md)) or a config block.
-- When enabled, every line of stdout/stderr from each worker subprocess is appended to a per-issue file (under the debug-log directory; the file name is e.g. `<issue>.log`).
-- Each line is tagged with an **RFC 3339 nanosecond timestamp + stream tag** (stdout/stderr).
-- On write failure, log the offending path at warn severity and continue without stopping the worker.
+- When enabled, every line of stdout/stderr from each `claude` subprocess (orchestrator session A and every phase subprocess) is appended to a per-issue file (under the debug-log directory; the file name is e.g. `<issue>.log`).
+- Each line is tagged with an **RFC 3339 nanosecond timestamp + stream tag** (stdout/stderr) plus subprocess role.
+- On write failure, log the offending path at warn severity and continue without stopping the subprocess.
 
 ### What is not logged
 
 - **Request / response bodies** (HTTP API) — only metadata fields, so agent strings do not leak into logs.
-- **Artifact contents** (distill phase) — only the artifact path and the manifest's structured fields.
+- **Artifact contents** (`requirements.md` / `review.md`) — only the artifact path and structured-field summaries (per-criterion status, etc.).
 
 ## Capabilities
 
@@ -75,7 +75,7 @@ Here we only outline the conceptual categories:
 - **Metrics / time-series** are out of scope (event log only).
 - **Log retention / rotation** is the responsibility of external tools (logrotate, etc.).
 - **Per-issue debug log analysis** is out of scope (the operator reads them).
-- **Persistent gate / distill decision history** is not maintained (log retention belongs to external tooling).
+- **Persistent gate decision history** is not maintained (log retention belongs to external tooling).
 - **Operator notification destinations** are a separate channel ([14-operator-notifications](14-operator-notifications.md)).
 
 ## Traceability
@@ -85,7 +85,6 @@ Here we only outline the conceptual categories:
   - `roki-mvp Req 11`: Observability of Daemon Internals
   - `roki-spec-gate Req 9`: Observability and Escalation
   - `roki-review-gate Req 8.5`: Decision logging
-  - `roki-distill-postmerge Req 13`: Observability of the Distill Phase
 - **Design**:
   - The Observability section of each spec's `design.md`
 - **Related reference**: [log-events.md](../reference/log-events.md), [cli.md](../reference/cli.md) (`--debug`), [config.md](../reference/config.md) (log destination / level)

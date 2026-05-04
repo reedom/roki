@@ -50,9 +50,8 @@ All docs across kinds. For per-kind indexes see the per-kind INDEX files; for AI
 | `fr:02-configuration` | Configuration | roki-mvp | [docs/fr/02-configuration.md](fr/02-configuration.md) |
 | `fr:03-linear-integration` | Linear Integration | roki-mvp | [docs/fr/03-linear-integration.md](fr/03-linear-integration.md) |
 | `fr:04-state-machine-and-recovery` | State Machine and Restart Recovery | roki-mvp | [docs/fr/04-state-machine-and-recovery.md](fr/04-state-machine-and-recovery.md) |
-| `fr:05-setup-judge` | Setup Judge | roki-mvp | [docs/fr/05-setup-judge.md](fr/05-setup-judge.md) |
 | `fr:06-worktree-and-session` | Worktree and Session Lifecycle | roki-mvp | [docs/fr/06-worktree-and-session.md](fr/06-worktree-and-session.md) |
-| `fr:07-worker-execution` | Worker Execution | roki-mvp | [docs/fr/07-worker-execution.md](fr/07-worker-execution.md) |
+| `fr:07-worker-execution` | Phase Subprocess Execution | roki-mvp | [docs/fr/07-worker-execution.md](fr/07-worker-execution.md) |
 | `fr:08-pre-implementation-gate` | Pre-Implementation Gate | roki-spec-gate | [docs/fr/08-pre-implementation-gate.md](fr/08-pre-implementation-gate.md) |
 | `fr:09-pre-pr-gate` | Pre-PR Gate | roki-review-gate | [docs/fr/09-pre-pr-gate.md](fr/09-pre-pr-gate.md) |
 | `fr:11-agent-tool-boundary` | Agent Tool Boundary | roki-mvp | [docs/fr/11-agent-tool-boundary.md](fr/11-agent-tool-boundary.md) |
@@ -62,7 +61,8 @@ All docs across kinds. For per-kind indexes see the per-kind INDEX files; for AI
 | `fr:15-http-api` | HTTP API | roki-observability | [docs/fr/15-http-api.md](fr/15-http-api.md) |
 | `fr:16-roki-tui` | roki-tui | roki-observability | [docs/fr/16-roki-tui.md](fr/16-roki-tui.md) |
 | `fr:17-doc-cross-references` | Doc Cross-References |  | [docs/fr/17-doc-cross-references.md](fr/17-doc-cross-references.md) |
-| `fr:18-worker-skill-workflow` | Worker Skill Workflow |  | [docs/fr/18-worker-skill-workflow.md](fr/18-worker-skill-workflow.md) |
+| `fr:18-worker-skill-workflow` | Phase Subprocess Catalog |  | [docs/fr/18-worker-skill-workflow.md](fr/18-worker-skill-workflow.md) |
+| `fr:19-orchestrator-session` | Orchestrator Session | roki-mvp | [docs/fr/19-orchestrator-session.md](fr/19-orchestrator-session.md) |
 
 ## reference (6)
 

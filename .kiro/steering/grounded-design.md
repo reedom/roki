@@ -37,25 +37,29 @@ Anything else is invention. If a workflow needs an affordance not in this list, 
 
 ## Principle 2: Headless engine constraints are real
 
-The worker runs as `claude --print --output-format stream-json`. This implies:
+The daemon launches two shapes of `claude` process:
 
-- **Slash commands do not work** in headless `-p` mode. Skills must auto-invoke by description.
-- **No interactive prompts** — anything that needs human input runs through Linear MCP (post comment, poll for reply) or fails closed.
-- **The agent's tool surface is the operator's installation verbatim** — the daemon does not register, proxy, or wrap any agent-side tool. If a spec wants the worker to do X, X must be reachable via the operator's existing Claude Code tool set (built-ins + their MCPs).
+- **Orchestrator session (A)** as `claude --input-format stream-json --output-format stream-json` — long-lived, reads daemon-produced JSON events on stdin, returns strict JSON action directives on stdout. Tool surface restricted to Linear MCP (write) + Read.
+- **Phase subprocesses** as `claude -p '/<kiro-skill> <args>' --output-format stream-json` — one-shot, slash-command-driven. **Slash commands work as the initial prompt argument in `-p` mode** (verified — the prompt string is parsed before headless takes over). Per-phase `--max-turns` budget.
+
+This implies:
+
+- **No interactive prompts** mid-session — anything that needs human input runs through Linear MCP (post comment, poll for reply) or fails closed.
+- **The agent's tool surface is the operator's installation verbatim** — the daemon does not register, proxy, or wrap any agent-side tool. If a spec wants the worker to do X, X must be reachable via the operator's existing Claude Code tool set (built-ins + their MCPs). The orchestrator session further narrows that surface via `--settings` (Linear MCP + Read only).
 
 If a draft assumes the daemon hands the agent a custom tool, it is wrong. Rewrite to compose existing affordances.
 
 ---
 
-## Principle 3: One bounded invocation per ticket
+## Principle 3: Two-shape engine taxonomy
 
-Per the roadmap: a single bounded `claude` invocation drives the implementation; the daemon does not relaunch the worker on its own initiative. The two exceptions are explicit and named:
+The daemon orchestrates one ticket via:
 
-- **Setup judge** before worker launch (one-shot bounded `claude`).
-- **linear-updater** on daemon-only failures (one-shot bounded `claude`).
-- **Review-gate `Deny+RetryWithContext`** re-launches the same worker once with `additional_context` populated.
+- **One orchestrator session (A)** — long-lived, makes admission / phase-planning / Linear-write directive decisions. Configured via `extension.orchestrator.{model, effort, max_phases, allowed_tools}`.
+- **Zero or more phase subprocesses** — bounded `claude -p '/kiro-* <args>'` calls A nominates. Phase catalog: `implement` (kiro-impl), `validate` (kiro-validate-impl), `open_pr` (custom prompt), `ci_fix` (kiro-debug + kiro-verify-completion), `finalize_review` (synthesizes review.md).
+- **Setup-judge subprocess and linear-updater subagent are removed** — both functions are absorbed by A (admission_request event + daemon_directive event respectively).
 
-Drafts that introduce new daemon-launched `claude` subprocesses for review, distill, summarization, etc., are scope inflation. The work belongs inside the existing worker invocation (skill-first), or it does not belong in the daemon at all.
+Drafts that introduce a new daemon-launched `claude` shape outside this taxonomy (a side review subprocess, a separate distill turn, a summarization session, etc.) are scope inflation. The work belongs inside an existing phase or does not belong in the daemon at all. Adding a new phase to the catalog is allowed but must satisfy Principle 4 (concrete pull, not hypothetical extensibility).
 
 ---
 
@@ -87,7 +91,7 @@ For any draft that names a concrete affordance:
 
 1. ☐ Does the named tool / skill / flag / event / namespace appear in the authoritative source from the table above?
 2. ☐ Is the new addition justified by a concrete failure path (not by hypothetical future extensibility)?
-3. ☐ Does the change keep the "single bounded `claude` invocation per ticket" boundary intact?
+3. ☐ Does the change preserve the orchestrator-session boundary? A is the only "thinking" component and the only Linear writer; phase subprocesses are the only code-changing components; the daemon never makes "what should happen next" judgements on its own.
 4. ☐ Are restated lists replaced with links to canonical reference docs?
 5. ☐ Does `roki-doctools validate` pass after the edit?
 

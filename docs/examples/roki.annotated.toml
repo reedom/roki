@@ -6,6 +6,13 @@
 #   { env  = "VAR_NAME" }            — read from an environment variable
 #   { file = "/path/to/secret" }     — read from a file (newline trimmed)
 #   "literal-value"                   — written inline (not recommended)
+#
+# Note: orchestrator session A's model / effort / max_phases / allowed_tools
+# are NOT configured here. They live under the reserved `extension.orchestrator.*`
+# namespace in WORKFLOW.md (hot-reloadable). The legacy [judge] block is
+# removed alongside the setup-judge subprocess shape; both admission
+# classification and daemon-only Linear writes are now performed by orchestrator
+# session A. See docs/fr/19-orchestrator-session.md.
 
 # ============================================================
 # [linear] — Linear access (required)
@@ -48,8 +55,9 @@ port = 8080          # CLI: --port <num>
 # [[repos]] — Allowlist (0+, ghq identifiers)
 # ============================================================
 # Refuses startup on duplicates
-# Booting with an empty allowlist is fine, but any repo returned by the judge
-#   will fail allowlist validation → admitted issues route to Skipped
+# Booting with an empty allowlist is fine, but any `act` admission decision A
+# returns will then fail allowlist validation and route the issue to
+# Inactive(reason=allowlist_rejected).
 
 [[repos]]
 ghq = "github.com/your-org/repo-a"
@@ -58,30 +66,15 @@ ghq = "github.com/your-org/repo-a"
 ghq = "github.com/your-org/repo-b"
 
 # ============================================================
-# [judge] — Setup judge (optional)
+# [permissions] — Phase subprocess permission strategy (required)
 # ============================================================
-[judge]
-# When omitted, uses the documented default model
-# (a small model in the same Claude family as the worker)
-model = "claude-haiku-4-5"
-
-# ============================================================
-# [permissions] — Worker permission strategy (required)
-# ============================================================
+# Applies to phase subprocesses only. Orchestrator session A always runs with a
+# read-only filesystem sandbox and rejected elicitations regardless of this
+# setting; A's tool surface is governed exclusively by
+# extension.orchestrator.allowed_tools in WORKFLOW.md.
 [permissions]
 # "settings-allowlist": via Claude Code's --settings allowlist (recommended)
 # "dangerously-skip":   pinned to --dangerously-skip-permissions
 #                        (fallback for when the allowlist cannot be trusted)
 strategy = "settings-allowlist"
 # Can be overridden at runtime via the --dangerously-skip-permissions CLI flag
-
-# ============================================================
-# [notifications.slack] — daemon-only failure notifications (optional)
-# ============================================================
-# Block absent:                warning + every Slack post is skipped (the daemon still boots)
-# Block present + cannot resolve:    refuses startup
-[notifications.slack]
-# Either webhook-URL based or bot-token based
-# webhook_url = { env = "SLACK_WEBHOOK_URL" }
-bot_token = { env = "SLACK_BOT_TOKEN" }
-channel = "#roki-alerts"
