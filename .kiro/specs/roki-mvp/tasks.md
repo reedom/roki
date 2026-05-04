@@ -34,7 +34,7 @@ refs:
   - Observable completion: unit tests cover (a) valid config loads, (b) malformed value names the offending field, (c) duplicate ghq id refused, (d) legacy keys refused with actionable message, (e) `assignee = "me"` accepted as a placeholder for runtime resolution.
   - _Requirements: 1.2, 2.1, 2.2, 2.3, 2.4, 2.5, 2.7, 2.8, 2.9, 2.10, 2.12, 2.13_
 
-- [ ] 1.4 Initialize tracing + redaction + per-issue debug capture
+- [x] 1.4 Initialize tracing + redaction + per-issue debug capture
   - Initialize `tracing-subscriber` with configurable level + destination (stdout, file, both); JSON output supported.
   - Add redaction layer scrubbing the Linear API token, the webhook HMAC secret, and operator-declared secret strings from every emitted event before egress.
   - Standardize structured fields (`issue`, `repo` when applicable, `correlation_id`, subprocess role tag) on every event that has them.
