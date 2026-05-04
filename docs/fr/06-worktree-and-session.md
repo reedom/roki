@@ -16,7 +16,7 @@ refs:
 
 ## Purpose
 
-Let phase subprocesses walk into a "prepared workspace". Concentrating worktree creation / deletion / path-safety verification in the daemon makes the operator-declared allowlist the single boundary for git side effects, so phase subprocesses can focus on implementing the ticket.
+Phase subprocesses walk into a prepared workspace. Concentrating worktree creation, deletion, and path-safety verification in the daemon makes the operator-declared allowlist the single boundary for git side effects.
 
 ## User-visible Behavior
 

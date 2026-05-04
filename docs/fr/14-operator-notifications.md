@@ -22,11 +22,11 @@ refs:
 
 ## Purpose
 
-Some failures are visible only to the daemon: a phase subprocess stalled and was killed, a phase non-clean-exit retry budget was exhausted, a filesystem error poisoned a worktree, restart-recovery found an orphan, the orchestrator itself crashed or schema-drifted persistently or exhausted `max_phases`. The phase agent never gets a chance to write back to Linear in those cases, and the daemon does not hold a Linear write path itself.
+Some failures are visible only to the daemon: a phase subprocess stalled and was killed, a phase non-clean-exit retry budget was exhausted, a filesystem error poisoned a worktree, restart-recovery found an orphan, the orchestrator itself crashed / schema-drifted persistently / exhausted `max_phases`. The phase agent gets no chance to write Linear in those cases, and the daemon holds no Linear write path.
 
-The new architecture replaces the prior linear-updater subagent with **the orchestrator processing a `daemon_directive` event** (see [fr:19-orchestrator-session > Event catalog](19-orchestrator-session.md)). When the orchestrator is alive the daemon sends a structured directive on the orchestrator's stdin; the orchestrator writes the appropriate Linear label + comment via the operator's installed Linear MCP and returns `action=linear_update_done`. When the orchestrator is dead — `orchestrator_crash`, `orchestrator_unparseable`, or `orchestrator_budget_exhausted` — the daemon does **not** fall back to a Linear write of its own; the failure surfaces via structured log + TUI escalation queue only.
+When the orchestrator is alive, the daemon sends a `daemon_directive` event on its stdin; the orchestrator writes the Linear label + comment via the operator's Linear MCP and returns `action=linear_update_done` (see [fr:19-orchestrator-session > Event catalog](19-orchestrator-session.md)). When the orchestrator is dead — `orchestrator_crash`, `orchestrator_unparseable`, `orchestrator_budget_exhausted` — there is no Linear-side fallback; the failure surfaces via structured log + TUI escalation queue only.
 
-The same failure events are also enqueued in the in-memory **escalation queue** so they are visible through the optional HTTP API ([15-http-api](15-http-api.md)) and the TUI ([16-roki-tui](16-roki-tui.md)) regardless of whether the orchestrator's Linear write path was usable.
+Failure events are also enqueued in the in-memory **escalation queue**, visible through the optional HTTP API ([15-http-api](15-http-api.md)) and the TUI ([16-roki-tui](16-roki-tui.md)) regardless of the orchestrator's Linear write outcome.
 
 ## User-visible Behavior
 
@@ -61,7 +61,7 @@ If a daemon-only failure (e.g. `fs_poison`, `orphan`, phase stall) is detected w
 
 ### `daemon_directive` event payload (daemon → orchestrator)
 
-Each `daemon_directive` event passes at minimum:
+Minimum fields:
 
 ```
 issue_id:    "ENG-1234"

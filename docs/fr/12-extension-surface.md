@@ -15,7 +15,7 @@ refs:
 
 ## Purpose
 
-Let downstream specs (currently observability) read / nudge / inject context / namespaced-configure against roki-mvp's per-issue lifecycle, without standing up their own Linear writes / DB / separate orchestrator. By having every downstream spec ride on the same contract, they stack additively without interfering with each other. The prior vetoable transition hooks consumed by the kiro-spec / kiro-review gates are removed alongside the gates themselves.
+Downstream specs (currently observability) read / nudge / inject context / namespaced-configure against roki-mvp's per-issue lifecycle, without standing up their own Linear writes / DB / separate orchestrator. Riding on a shared contract lets specs stack additively without interfering. Prior vetoable transition hooks (kiro-spec / kiro-review gates) are removed.
 
 ## User-visible Behavior
 

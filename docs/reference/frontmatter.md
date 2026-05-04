@@ -9,9 +9,9 @@ refs:
 
 # Reference: Frontmatter Schema
 
-The **canonical reference** for the YAML `refs:` block carried by every doc in the cross-reference graph.
+The YAML `refs:` block carried by every doc in the cross-reference graph.
 
-For semantics and authoring guidance, see [`.kiro/steering/refs.md`](../../.kiro/steering/refs.md). For the list of valid kinds and where each lives on disk, see [`docs/kinds.md`](../kinds.md). For the feature this powers, see [17-doc-cross-references](../fr/17-doc-cross-references.md).
+Semantics and authoring guidance: [`.kiro/steering/refs.md`](../../.kiro/steering/refs.md). Valid kinds and on-disk locations: [`docs/kinds.md`](../kinds.md). Feature narrative: [17-doc-cross-references](../fr/17-doc-cross-references.md).
 
 ## Block shape
 
@@ -38,7 +38,7 @@ refs:
 ---
 ```
 
-The block lives at the top of the file, between two `---` lines (standard Markdown front matter).
+Standard Markdown front matter, top of file between `---` lines.
 
 ## Fields
 
@@ -74,7 +74,7 @@ All list fields default to empty.
 id := <kind> | <kind>:<scope> | <kind>:<scope>:<sub>
 ```
 
-Per-kind conventions live in [`docs/kinds.md`](../kinds.md) (`id_pattern` field, informational only). Validation enforces uniqueness, not pattern shape.
+Per-kind conventions in [`docs/kinds.md`](../kinds.md) (`id_pattern` is informational). Validation enforces uniqueness, not pattern shape.
 
 | Kind | Example IDs |
 |---|---|
@@ -99,7 +99,7 @@ Per-kind conventions live in [`docs/kinds.md`](../kinds.md) (`id_pattern` field,
 | `crates/roki-daemon/src/orchestrator/` | any file under `crates/roki-daemon/src/orchestrator/` (trailing slash required) |
 | `crates/roki-daemon/src/orchestrator` | exact match for a file with that name (no trailing slash) |
 
-The same source path MAY appear in multiple docs' `modules:` lists. `roki-doctools touched <file>` surfaces all of them.
+A source path MAY appear in multiple docs' `modules:` lists; `roki-doctools touched <file>` surfaces all of them.
 
 ## When validation fails
 

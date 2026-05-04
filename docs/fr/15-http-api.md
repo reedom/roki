@@ -24,7 +24,7 @@ refs:
 
 ## Purpose
 
-Today an operator's only way to see "the daemon's current state" is to `tail | grep` the tracing log. The HTTP API fills that gap, with four guarantees: (a) default off, so network exposure happens only on purpose; (b) loopback default to prevent accidental exposure; (c) a read-only projection so that the orchestrator's single source of truth never has a divergent state; (d) sanitization so that any terminal escapes / markup mixed into agent strings cannot damage downstream consumers.
+Without it, an operator's only view of daemon state is `tail | grep` on the tracing log. The HTTP API fills that gap with four guarantees: (a) default off — network exposure is intentional; (b) loopback default to prevent accidental exposure; (c) read-only projection so the orchestrator's source of truth cannot diverge; (d) sanitization so terminal escapes / markup in agent strings cannot damage downstream consumers.
 
 ## User-visible Behavior
 

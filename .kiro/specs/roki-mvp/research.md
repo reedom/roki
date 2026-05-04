@@ -28,23 +28,21 @@ refs:
 ## Research Log
 
 ### Assignee Admission Location
-- **Context**: The requirements changed from broad active-issue admission to "handle only tickets assigned to me".
-- **Sources Consulted**: `.kiro/specs/roki-mvp/requirements.md`, `.kiro/specs/roki-mvp/design.md`, `.kiro/specs/roki-mvp/design-agent-driven-repo-selection.md`, current `crates/roki-daemon/src/config`, `tracker`, and `orchestrator` modules.
+- **Context**: Requirements changed from broad active-issue admission to "handle only tickets assigned to me".
 - **Findings**:
-  - `WORKFLOW.md` is loaded after daemon configuration and feeds agent prompt/policy for already-admitted workers.
+  - `WORKFLOW.md` loads after daemon configuration and feeds agent prompt/policy for already-admitted workers.
   - Worker launch side effects begin before the agent can apply any prompt-level policy.
-  - The tracker currently normalizes issues before orchestrator admission, making it the correct boundary for assignment checks.
+  - The tracker normalizes issues before orchestrator admission — the correct boundary for assignment checks.
 - **Implications**: `[linear].assignee` belongs in daemon config. `AssigneeAdmission` must resolve `me` to the Linear token owner at startup and filter webhook/poll/recovery observations before worker admission.
 
 ### Existing Integration Surface
-- **Context**: The current design is post-agent-driven repo selection and has a single workspace-level Linear tracker.
-- **Sources Consulted**: `design-agent-driven-repo-selection.md`, `crates/roki-daemon/src/tracker/model.rs`, `crates/roki-daemon/src/tracker/linear.rs`, `crates/roki-daemon/src/tracker/webhook.rs`, `crates/roki-daemon/src/orchestrator/recovery.rs`.
+- **Context**: Current design is post-agent-driven repo selection with a single workspace-level Linear tracker.
 - **Findings**:
-  - `NormalizedIssue` currently lacks assignee data and must grow an optional assignee id.
-  - The polling query currently fetches active issues visible to the token; it should include the resolved assignee id in the Linear issue filter where possible.
-  - Webhook delivery must still accept signed Issue payloads, normalize them, and filter locally because webhook sender-side filtering is not under daemon control.
-  - Recovery already reconciles filesystem-discovered issues against Linear, so applying the same assignee matcher there keeps restart behavior consistent.
-- **Implications**: The design adds one cohesive admission component rather than moving ownership into the orchestrator or the agent.
+  - `NormalizedIssue` lacks assignee data and must grow an optional assignee id.
+  - The polling query fetches active issues visible to the token; it should include the resolved assignee id in the Linear issue filter where Linear supports it.
+  - Webhook delivery must still accept signed Issue payloads, normalize them, and filter locally (sender-side filtering is not under daemon control).
+  - Recovery already reconciles filesystem-discovered issues against Linear, so applying the same matcher there keeps restart behavior consistent.
+- **Implications**: One cohesive admission component, not ownership split into orchestrator or agent.
 
 ## Architecture Pattern Evaluation
 

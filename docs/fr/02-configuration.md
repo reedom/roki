@@ -25,7 +25,7 @@ refs:
 
 ## Purpose
 
-Express "the daemon's startup conditions" (token, repo allowlist, admission filter, etc.) in `roki.toml`, and "the behavior of the agent and each gate" (prompts, gate parameters, observability config, etc.) in `WORKFLOW.md`. The former assumes a daemon restart on change; the latter can be **hot-reloaded without a restart**. Downstream specs each get a reserved namespace inside `WORKFLOW.md`, which lets them add their own configuration keys without forking the core schema.
+`roki.toml` holds daemon startup conditions (token, repo allowlist, admission filter); changes require restart. `WORKFLOW.md` holds agent and gate behavior (prompts, gate parameters, observability config) and is **hot-reloaded without restart**. Downstream specs each own a reserved namespace inside `WORKFLOW.md`, so they add keys without forking the core schema.
 
 ## User-visible Behavior
 
@@ -53,7 +53,7 @@ Two label names are **fixed** (not operator-configurable) and read by the daemon
 | `roki:ready` | Operator authorizes the daemon to process this ticket. Without this label the ticket is silently skipped at pre-admission. |
 | `roki:impl` | Operator declares that an existing project-level spec (`<repo>/.kiro/specs/<target>/`) is complete and the ticket should bypass classification and run `kiro-impl` directly. Implies `roki:ready` is also present; `roki:impl` alone (without `roki:ready`) is treated as not authorized and the ticket is skipped. |
 
-Fixed names avoid per-workspace label drift and let operators move tickets between workspaces without relabeling. If an operator wants additional gating (`roki:hold`, `roki:debug`), those can be implemented as workspace-side conventions outside the daemon contract.
+Fixed names avoid per-workspace label drift and let operators move tickets between workspaces without relabeling. Additional gating labels (`roki:hold`, `roki:debug`) belong to workspace-side conventions outside the daemon contract.
 
 ### `WORKFLOW.md` (hot-reloadable, Liquid + Markdown)
 
@@ -69,9 +69,9 @@ A single per-workspace file. It consists of front matter (YAML or TOML) and temp
   - `extension.orchestrator.*` — orchestrator session (model / effort / max_phases / allowed_tools / stall_seconds). `stall_seconds` (default `600`) sets the orchestrator-stall window; if the orchestrator emits no stdout for that long the daemon SIGTERMs it and routes the issue to `Inactive(reason=orchestrator_crash)` per [FR 19 §Failure modes](19-orchestrator-session.md). Default is sized for `effort=high` turns that combine extended-thinking blocks with tool calls.
   - `extension.phase.<name>.*` — per-phase override surface. Keys: `command` (slash-command override that swaps the catalog default skill, per [FR 18 §Phase override](18-worker-skill-workflow.md); mutually exclusive per phase with `prompt_template_<phase>`), `max_turns` (per-phase `--max-turns` override), and `stall_seconds` (per-phase stall window override; default `120` for every phase). The `max_turns` and `stall_seconds` keys are additive scalars: they may be set with or without `command`, and they coexist with `prompt_template_<phase>`.
   - `extension.server.*` — roki-observability HTTP API.
-  - The loader **round-trips unknown keys** (it does not interpret them, and does not delete them). The legacy `extension.linear_updater.*`, `extension.gates.spec.*`, and `extension.gates.review.*` namespaces are rejected by the loader (or simply ignored as unknown); the orchestrator's processing of `daemon_directive` events plus the orchestrator's own artifact validation replaces them.
+  - The loader **round-trips unknown keys** (it does not interpret or delete them). Legacy `extension.linear_updater.*`, `extension.gates.spec.*`, and `extension.gates.review.*` namespaces are rejected or ignored as unknown; replaced by orchestrator `daemon_directive` event processing and the orchestrator's artifact validation.
 
-The consuming spec, requiredness, default, and behavior on invalid values for each namespace live in the "WORKFLOW.md schema" table in [`docs/reference/config.md`](../reference/config.md).
+Per-namespace consuming spec, requiredness, default, and invalid-value behavior live in the "WORKFLOW.md schema" table in [`docs/reference/config.md`](../reference/config.md).
 
 ### Hot reload and validation
 

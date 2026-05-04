@@ -26,7 +26,7 @@ refs:
 
 ## Purpose
 
-Guarantee that an operator can run roki by simply "launching the single `roki` binary with `roki run` and stopping it with SIGINT". The daemon must not depend on a particular combination of scripts, systemd, or supervisor. When startup fails, the operator must immediately learn what went wrong from the structured logs.
+An operator runs roki by launching the single `roki` binary with `roki run` and stops it with SIGINT. No dependency on scripts, systemd, or supervisor. Startup failures must surface the cause in structured logs.
 
 ## User-visible Behavior
 
@@ -38,14 +38,14 @@ Guarantee that an operator can run roki by simply "launching the single `roki` b
 
 ### Orchestrator session lifecycle integration
 
-Per [FR 19: Orchestrator Session](19-orchestrator-session.md) the daemon launches one long-lived `claude --input-format stream-json --output-format stream-json` orchestrator session per ticket. The daemon's lifecycle responsibility for the orchestrator is mechanical:
+Per [FR 19: Orchestrator Session](19-orchestrator-session.md) the daemon launches one long-lived `claude --input-format stream-json --output-format stream-json` orchestrator session per ticket. Daemon responsibilities:
 
 - **Launch**: the orchestrator is started on entry to `Pending` for a ticket that passed the daemon's mechanical pre-admission-judge ([FR 04 §Pre-admission judge](04-state-machine-and-recovery.md)). The per-ticket `mode` flag (`SPEC_DRIVEN` or `NEEDS_CLASSIFY`) is rendered into the orchestrator's system prompt at launch; the orchestrator's first-turn behavior diverges per mode ([FR 19 §Lifecycle](19-orchestrator-session.md)).
 - **Graceful termination**: the orchestrator is gracefully terminated when the issue lands in any `Inactive(reason=*)` and any orchestrator-driven Linear writes for that terminal state have completed; the daemon sends a final `stop`-acknowledgement signal then closes the orchestrator's stdin and waits for clean exit within the configured shutdown window.
 - **Forced termination**: `Cleaning` (entered on tracker-observed terminal Linear state or assignment loss, per [04-state-machine-and-recovery](04-state-machine-and-recovery.md)) may force-terminate the orchestrator regardless of in-flight turns — cleanup of worktree / session tempdir takes priority.
 - **Restart non-persistence**: the orchestrator is not persisted across daemon restarts. On restart-recovery, a fresh the orchestrator is launched per re-admitted ticket when the issue re-enters `Pending`; in-flight turns and any orchestrator-internal scratch state are discarded.
 
-The contract for the orchestrator's tool surface, response schema, event catalog, configuration namespace, and failure modes lives in [FR 19: Orchestrator Session](19-orchestrator-session.md); this FR does not restate it.
+The orchestrator's tool surface, response schema, event catalog, configuration namespace, and failure modes are owned by [FR 19: Orchestrator Session](19-orchestrator-session.md).
 
 ## Capabilities
 

@@ -15,7 +15,7 @@ refs:
 
 ## Purpose
 
-Track "what stage is this ticket in right now" per issue inside the daemon, and book-keep subprocess lifecycle and cleanup. **Persistence is intentionally avoided**; on restart the daemon re-reads Linear and the filesystem to reconstruct state. Transitions are observable read-only by external subscribers (e.g. observability) but are not vetoable — substantive admission classification (Path A/B/C/D/E) is performed inside a phase subprocess (`classify`, per [18-worker-skill-workflow](18-worker-skill-workflow.md)) when the orchestrator nominates it, not by daemon-side gate hooks. Structural validation of `review.md` and (in SPEC_DRIVEN mode) the target spec docs is owned by the orchestrator session inside its own phase-planning loop ([19-orchestrator-session](19-orchestrator-session.md) §Artifact validation).
+Track per-issue stage inside the daemon and book-keep subprocess lifecycle and cleanup. **Persistence is intentionally avoided**; on restart the daemon re-reads Linear and the filesystem to reconstruct state. Transitions are observable read-only; not vetoable — substantive admission classification (Path A/B/C/D/E) runs inside the `classify` phase subprocess ([18-worker-skill-workflow](18-worker-skill-workflow.md)), not in daemon-side gate hooks. Structural validation of `review.md` and (in SPEC_DRIVEN mode) the target spec docs is owned by the orchestrator session ([19-orchestrator-session §Artifact validation](19-orchestrator-session.md)).
 
 ## User-visible Behavior
 
@@ -90,15 +90,13 @@ Each Linear issue moves through these daemon-local states:
 
 ### Read-only transition observers
 
-Subscribers may observe transition events read-only — there are no vetoable transitions. Observability ([15-http-api](15-http-api.md), [16-roki-tui](16-roki-tui.md)) is the primary consumer; structured logs are emitted alongside.
+Subscribers observe transition events read-only — no vetoable transitions. Observability ([15-http-api](15-http-api.md), [16-roki-tui](16-roki-tui.md)) is the primary consumer; structured logs emit alongside.
 
-The prior `Judging → Active` (spec gate) and `Active → Inactive` (review gate) vetoable hooks are removed alongside the gates and the `Judging` state itself. Substantive admission classification is owned by the `classify` phase subprocess (NEEDS_CLASSIFY mode); structural validation of `review.md` and the target spec docs is owned by the orchestrator session ([19-orchestrator-session §Artifact validation](19-orchestrator-session.md)).
-
-Even if a subscriber raises an unhandled error, only that subscriber's failure is logged; the other subscribers and the orchestrator keep running.
+A subscriber's unhandled error is logged in isolation; other subscribers and the orchestrator keep running.
 
 ### Restart recovery
 
-> The orchestrator session is **not** persisted across daemon restarts. A fresh orchestrator is launched for each re-admitted issue when the issue re-enters `Pending` (per [19-orchestrator-session §Lifecycle](19-orchestrator-session.md), `req:roki-mvp:8.5`); in-flight orchestrator turns and any orchestrator-internal scratch state are discarded. The pre-admission-judge re-runs against the current Linear label set, so a relabeling that occurred while the daemon was down is honored on restart.
+> Orchestrator sessions are **not** persisted across daemon restarts. A fresh orchestrator launches per re-admitted issue on `Pending` re-entry ([19-orchestrator-session §Lifecycle](19-orchestrator-session.md), `req:roki-mvp:8.5`); in-flight turns and orchestrator-internal scratch state are discarded. The pre-admission-judge re-runs against the current Linear label set, so a relabeling that occurred while the daemon was down is honored on restart.
 
 - At startup: enumerate **all session tempdirs** under the platform-appropriate user cache root, and the **worktrees in each allowlisted repo whose branch name matches the issue identifier pattern**.
 - Reconcile each discovered issue identifier against Linear (applying the assignee + label filter).

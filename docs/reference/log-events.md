@@ -9,12 +9,11 @@ refs:
 
 # Reference: Structured Log Events
 
-The **canonical reference** for the structured log events that roki emits.
-Every event flows through roki-mvp's single tracing pipeline + redaction layer ([13-observability-logs](../fr/13-observability-logs.md)).
+Structured log events that roki emits. All events flow through roki-mvp's single tracing pipeline + redaction layer ([13-observability-logs](../fr/13-observability-logs.md)).
 
 ## Common context fields
 
-Fields automatically attached to every event via spans.
+Attached to every event via spans.
 
 | Field | Type | Attached when |
 |---|---|---|
@@ -85,12 +84,12 @@ Enabled by the `--debug` CLI flag or a config block ([cli.md](cli.md)).
 ## When adding a new event
 
 1. Add a row to the relevant section's table.
-2. If there are dedicated fields beyond the common context fields, document them here as well.
+2. Document any fields beyond the common context fields here.
 3. Link to this reference from the FR pages that use it.
 4. Update the corresponding requirements.
 
 ## Related reference
 
-- [cli.md](cli.md): flags that change logging behavior, such as `--debug`
+- [cli.md](cli.md): flags that change logging behavior (e.g. `--debug`)
 - [config.md](config.md): log destination / level configuration
 - [artifacts.md](artifacts.md): artifact contents that are not logged

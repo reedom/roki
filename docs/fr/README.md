@@ -4,7 +4,7 @@
 
 ## Position in the documentation stack
 
-This directory is the **per-feature narrative** layer:
+The **per-feature narrative** layer:
 
 | Layer | Location | Axis | Primary readers |
 |---|---|---|---|

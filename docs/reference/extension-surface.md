@@ -10,7 +10,7 @@ refs:
 
 # Reference: Extension Surface
 
-The **canonical reference** for the traits / hooks / context channels that downstream specs use to plug in without forking the orchestrator core.
+Traits / hooks / context channels that downstream specs use to plug in without forking the orchestrator core.
 
 ## Surface list
 
@@ -78,15 +78,14 @@ The legacy `extension.linear_updater.*`, `extension.gates.spec.*`, and `extensio
 
 ## When adding a new surface
 
-Adding a new surface requires **agreement on the roki-mvp side** (downstream cannot extend on its own).
-Steps for additions:
+Adding a new surface requires **agreement on the roki-mvp side** — downstream cannot extend on its own.
 
 1. Add a row to the **Surface list** table above.
-2. Add a section under "Contract for each surface" describing the new surface (semantics, invariants that must not be bypassed, failure-isolation rules).
+2. Add a section under "Contract for each surface" describing semantics, invariants that must not be bypassed, and failure-isolation rules.
 3. Link to this reference from the FR pages that use it.
 4. Update `roki-mvp Req 13` and the consuming spec's requirements.
 
 ## Related reference
 
 - [config.md](config.md): details of the WORKFLOW.md reserved namespaces
-- [log-events.md](log-events.md): structured log events for the orchestrator's lifecycle and `daemon_directive` outcomes
+- [log-events.md](log-events.md): orchestrator lifecycle and `daemon_directive` log events

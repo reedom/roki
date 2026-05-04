@@ -12,11 +12,11 @@ refs:
 
 ## Overview
 
-**Purpose**: roki-distill-postmerge adds a post-terminal-state phase to the roki-mvp per-issue state machine. After an issue reaches `TerminalSuccess` (driven by the agent observing Linear `Done`/PR merge), the daemon dispatches a single bounded sweep turn that has the agent classify and route flow-type artifacts (kiro `design.md` and `tasks.md`, superpowers specs, plan outputs, scratch notes) into one of three dispositions — delete, archive, distill — and write a manifest. The daemon validates the manifest against a stable JSON-Schema and against roki-mvp's path-safety invariants before allowing terminal cleanup of the workspace.
+**Purpose**: A post-terminal-state phase in the roki-mvp per-issue state machine. After `TerminalSuccess` (driven by the agent observing Linear `Done`/PR merge), the daemon dispatches one bounded sweep turn for the agent to classify and route flow-type artifacts (kiro `design.md`/`tasks.md`, superpowers specs, plan outputs, scratch notes) into delete/archive/distill and write a manifest. The daemon validates the manifest against a stable JSON-Schema and roki-mvp's path-safety invariants before terminal cleanup.
 
-**Users**: A solo developer or small team operator already running roki-mvp who wants flow-type artifacts handled deterministically post-merge without manually grooming `.kiro/specs/<issue>/`, `.superpowers/specs/`, `plans/`, or `notes/` after each ticket.
+**Users**: Solo developer or small team operator running roki-mvp who wants flow-type artifacts handled deterministically post-merge.
 
-**Impact**: Inserts a new phase between roki-mvp's `TerminalSuccess` transition and its existing post-terminal workspace deletion. roki-mvp must publish a vetoable hook on the existing transition into `TerminalSuccess` (or a thin extension to allow a deferred-cleanup gate); this spec subscribes to that hook and gates cleanup until manifest validation passes. No other roki-mvp boundary changes.
+**Impact**: A new phase inserted between `TerminalSuccess` and post-terminal workspace deletion. roki-mvp must publish a vetoable hook on the transition into `TerminalSuccess` (or extend for a deferred-cleanup gate); this spec subscribes and gates cleanup until manifest validation passes. No other roki-mvp boundary changes.
 
 ### Goals
 - A post-terminal phase in the orchestrator that runs exactly once per `(repo, issue)` per terminal transition and gates workspace deletion.
@@ -132,8 +132,6 @@ graph TB
 | Workflow | liquid + serde_yaml | `WORKFLOW.md` extension keys for `distill.*` | Reuses roki-mvp's loader |
 | Engine | tokio process (via roki-mvp engine adapter) | Sweep turn dispatched against existing session | No new subprocess lifecycle |
 
-> No new crates are introduced. Manifest schema validation reuses the same `jsonschema` integration roki-mvp uses for `WORKFLOW.md`.
-
 ## File Structure Plan
 
 ### Directory Structure
@@ -162,8 +160,6 @@ tests/
 ├── integration_distill_failure.rs   # Schema and path-safety failure paths
 └── unit_distill_validator.rs
 ```
-
-> The `distill/` module is self-contained: only `workflow/schema.rs` and `orchestrator/mod.rs` need light edits to register the extension keys and wire the subscriber. Everything else lives behind the `distill::` namespace.
 
 ### Modified Files
 - `src/workflow/schema.rs` — Register `distill.paths` (list of workspace-relative path patterns) and `distill.routes` (list of `{ pattern, disposition, archive_root? }` rules) under the existing extension namespace. Additive only; existing consumers are unaffected.

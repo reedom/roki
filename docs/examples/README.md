@@ -1,37 +1,29 @@
 # Examples
 
-**Working samples** of roki configuration files.
-
-## Layout
-
 | File | Purpose |
 |---|---|
-| [`roki.minimal.toml`](roki.minimal.toml) | The smallest configuration that boots. Usable as a starting point with `cp` |
-| [`roki.annotated.toml`](roki.annotated.toml) | An annotated reference that lists **every key** with comments |
-| [`WORKFLOW.minimal.md`](WORKFLOW.minimal.md) | The smallest working `WORKFLOW.md` (two template blocks + empty front matter) |
-| [`WORKFLOW.annotated.md`](WORKFLOW.annotated.md) | An exhaustive version including every reserved extension namespace and every template variable |
+| [`roki.minimal.toml`](roki.minimal.toml) | Smallest config that boots |
+| [`roki.annotated.toml`](roki.annotated.toml) | Every key, annotated |
+| [`WORKFLOW.minimal.md`](WORKFLOW.minimal.md) | Smallest working `WORKFLOW.md` |
+| [`WORKFLOW.annotated.md`](WORKFLOW.annotated.md) | Every reserved extension namespace and template variable |
 
-## Usage
-
-### Setting up a new workspace
+## Setup
 
 ```bash
 cp docs/examples/roki.minimal.toml ./roki.toml
 cp docs/examples/WORKFLOW.minimal.md ./WORKFLOW.md
-# edit, and pass LINEAR_API_TOKEN etc. via environment variables
+# edit, pass LINEAR_API_TOKEN etc. via environment
 roki run --config ./roki.toml
 ```
 
-### When adding a key / extension
+## Adding a key / extension
 
-To learn the full set of keys and the meaning of each, the convenient order is:
+1. [`docs/reference/config.md`](../reference/config.md) — canonical schema.
+2. [`roki.annotated.toml`](roki.annotated.toml) / [`WORKFLOW.annotated.md`](WORKFLOW.annotated.md) — annotated examples.
+3. [`docs/fr/02-configuration.md`](../fr/02-configuration.md) — narrative.
 
-1. [`docs/reference/config.md`](../reference/config.md) — the schema tables (canonical)
-2. [`roki.annotated.toml`](roki.annotated.toml) / [`WORKFLOW.annotated.md`](WORKFLOW.annotated.md) — working annotated examples
-3. [`docs/fr/02-configuration.md`](../fr/02-configuration.md) — the narrative
+## Maintenance
 
-## Maintenance policy
-
-- These examples are placed as **real files** and their parseability is validated in CI.
-- When a new key / namespace is added to the schema, also add an entry to the `*.annotated.*` files.
-- Keep "minimal" at the absolute bare minimum that still boots; do not let it grow casually.
+- CI validates parseability.
+- Add new schema keys / namespaces to the `*.annotated.*` files.
+- Keep `*.minimal.*` at the bare minimum that boots.

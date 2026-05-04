@@ -18,13 +18,13 @@ refs:
 
 ## Purpose
 
-As the repository grows past the point where every doc fits in one mental model, "which design covers this code? which FR explains this requirement? what depends on the file I am about to edit?" become real navigation costs. This feature gives those questions a single answer surface: every doc carries a YAML `refs:` block declaring its identity, its upstream artifacts, and the source paths it documents; tooling traverses the resulting graph.
+Once the repository outgrows a single mental model, "which design covers this code? which FR explains this requirement? what depends on the file I am about to edit?" become real navigation costs. Every doc carries a YAML `refs:` block declaring its identity, upstream artifacts, and documented source paths; tooling traverses the resulting graph.
 
-The same surface doubles as RAG / vector-search fuel for AI coding agents: a generated `ai/graph.json` and a per-source-path map (`ai/modules.md`) let an agent jump directly from a code path to the docs of record without grepping prose for `[link](...)`.
+The same surface fuels RAG / vector search for AI coding agents: generated `ai/graph.json` and `ai/modules.md` let an agent jump from a code path to the docs of record without grepping prose for `[link](...)`.
 
 ## User-visible Behavior
 
-The contributor's editor / dev-loop flow:
+Contributor dev-loop:
 
 - **Author or edit a doc.** Add a `refs:` front-matter block declaring `id`, `kind`, and any `implements` / `depends_on` / `related` / `modules` references.
 - **Run `roki-doctools validate`.** Dangling references, duplicate IDs, unknown kinds, or missing `modules:` paths fail with a non-zero exit and a per-error line. Clean repos print `OK (N docs)`.

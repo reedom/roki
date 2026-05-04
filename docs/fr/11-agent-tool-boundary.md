@@ -19,16 +19,16 @@ refs:
 
 ## Purpose
 
-Guarantee that the tools available to every agent invocation — Linear / git / gh / shell / other MCP — match exactly what the operator's Claude Code installation exposes. This way the daemon does not need to hold Linear write credentials, and additions / updates / replacements of agent-side tools are decoupled from daemon releases.
+Tools available to every agent invocation — Linear / git / gh / shell / other MCP — match the operator's Claude Code installation exactly. The daemon holds no Linear write credentials, and agent-side tool changes are decoupled from daemon releases.
 
-The same principle applies to both agent invocation roles:
+Both agent invocation roles obey the same principle:
 
 - **Orchestrator session A** ([FR 19](19-orchestrator-session.md)) — long-lived `claude --input-format stream-json --output-format stream-json` per ticket. Tool surface restricted to **Linear MCP (write)** + **Read** + **Bash** only via `--settings`. No Edit, no Write, no Agent dispatch, no other MCPs. Bash invocations execute inside a read-only filesystem sandbox (regardless of operator overrides) so they cannot mutate the worktree, session tempdir, or the project-level spec dir; they are intended for structural artifact validation (`stat`, `test -f`, `grep -E`, `jq` spot-checks) per [FR 19 §Artifact validation](19-orchestrator-session.md). Read scope additionally includes `<repo>/.kiro/specs/<target>/{spec.json,requirements.md,design.md,tasks.md}` in SPEC_DRIVEN mode (a project-level path outside the issue's session tempdir).
 - **Phase subprocesses** ([FR 18](18-worker-skill-workflow.md), [FR 07](07-worker-execution.md)) — short-lived `claude -p '/<skill> <args>' --output-format stream-json` (or `claude --input-format stream-json` with daemon-internal prompt template) per phase the orchestrator nominates. Tool surface = the operator's full Claude Code installation (built-ins + their MCPs), narrowed only by the per-phase `allowed_tools` list and the configured permission strategy ([FR 07 §Permission strategy](07-worker-execution.md)). The `classify` phase ([FR 18](18-worker-skill-workflow.md)) is the narrowest: its skill (`roki-classify`) declares only `Read` + `Glob` + `Grep` (no Bash, no Agent dispatch, no MCP writes) since classification consumes only project-side metadata.
 
-Neither is a special daemon-internal route — both are `claude` subprocesses inheriting the operator's MCP surface.
+Both are `claude` subprocesses inheriting the operator's MCP surface; neither is a daemon-internal route.
 
-There are no agent-side self-diagnosis tools. The prior gate specs registered `kiro_spec_status` / `kiro_review_status` read-only tools for the daemon-side gate state; with gates absorbed into the orchestrator those tools are removed. The orchestrator reads SPEC_DRIVEN target spec docs and `review.md` directly via `Read` and validates them via `Bash`; phase subprocesses needing prior-phase context inherit it through the engine adapter's `additional_context` channel ([FR 19 §Event catalog](19-orchestrator-session.md)).
+No agent-side self-diagnosis tools exist. The orchestrator reads SPEC_DRIVEN target spec docs and `review.md` directly via `Read` and validates them via `Bash`; phase subprocesses needing prior-phase context inherit it through the engine adapter's `additional_context` channel ([FR 19 §Event catalog](19-orchestrator-session.md)).
 
 ## User-visible Behavior
 

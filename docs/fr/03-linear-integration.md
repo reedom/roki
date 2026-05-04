@@ -14,7 +14,7 @@ refs:
 
 ## Purpose
 
-Let the daemon admit assigned tickets without dropping any, while not touching anyone else's tickets, and while respecting the Linear API rate limit (5,000 req/hr) and Linear's recommendations (avoid aggressive polling). All writes to Linear are confined to the agent-side MCP; the daemon process never performs writes.
+Admit assigned tickets without drops, never touch others' tickets, and respect the Linear API rate limit (5,000 req/hr) and Linear's no-aggressive-polling recommendation. Linear writes are confined to the agent-side MCP; the daemon never writes.
 
 ## User-visible Behavior
 

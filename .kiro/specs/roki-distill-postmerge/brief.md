@@ -9,7 +9,7 @@ refs:
 # Brief: roki-distill-postmerge
 
 ## Problem
-Each ticket leaves behind a trail of "flow-type" documents: kiro `design.md` and `tasks.md`, superpowers specs, plan command outputs, scratch notes. These have served their purpose by the time the PR merges. Left alone they accumulate noise; deleted blindly they lose useful long-term context. We need a deliberate sweep that classifies each artifact and routes it.
+Each ticket leaves flow-type documents (kiro `design.md`/`tasks.md`, superpowers specs, plan outputs, scratch notes) that have served their purpose by merge. Left alone they accumulate noise; deleted blindly they lose long-term context. Need a deliberate sweep that classifies and routes each artifact.
 
 ## Current State
 - monorail had `/monorail-ears-distill-command` planned (post-PR distillation of spec docs) but unbuilt.

@@ -9,7 +9,7 @@ refs:
 # Brief: roki-observability
 
 ## Problem
-A long-running daemon doing autonomous work needs an observability surface humans can scan in seconds. Without it, "what is roki currently doing?" requires tailing logs and grepping. The user explicitly wants a TUI; a TUI needs a state-source.
+"What is roki currently doing?" requires tailing logs and grepping. A TUI is wanted; a TUI needs a state-source.
 
 ## Current State
 - roki-mvp has structured logs via tracing, but no programmatic surface for state.

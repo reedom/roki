@@ -11,9 +11,9 @@ refs:
 
 # roki-doctools
 
-Cross-reference graph tooling for roki specs and docs. Reads YAML `refs:` frontmatter across the repository and answers "what depends on what / who is the design of record for this source path / regenerate the per-kind indexes."
+Cross-reference graph tooling. Reads YAML `refs:` frontmatter across the repo and answers dependency, doc-of-record, and per-kind index queries.
 
-Schema and conventions are documented in [`.kiro/steering/refs.md`](../../.kiro/steering/refs.md). The kind manifest (which kinds exist, where their files live, which kinds get a generated index) is at [`docs/kinds.md`](../../docs/kinds.md).
+Schema and conventions: [`.kiro/steering/refs.md`](../../.kiro/steering/refs.md). Kind manifest: [`docs/kinds.md`](../../docs/kinds.md).
 
 ## Subcommands
 

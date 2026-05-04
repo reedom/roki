@@ -23,11 +23,11 @@ refs:
 
 ## Purpose
 
-Run the agent (whose orchestration is performed inside by a slash-command-driven kiro skill, or by a small daemon-internal prompt fragment for `open_pr` and `finalize_review`) as a **single bounded subprocess per phase the orchestrator nominates**. The daemon stays a thin layer that only observes its lifecycle and forwards a structured exit envelope back to the orchestrator; it does not drive the agent loop itself, and it does not select which phase runs next — the orchestrator does (per [FR 19 §Event catalog](19-orchestrator-session.md), [FR 18: Phase Subprocess Catalog](18-worker-skill-workflow.md)).
+Run the agent (orchestrated inside by a slash-command kiro skill, or by a small daemon-internal prompt fragment for `open_pr` and `finalize_review`) as a **single bounded subprocess per phase the orchestrator nominates**. The daemon observes lifecycle and forwards a structured exit envelope back to the orchestrator; it does not drive the agent loop nor select the next phase — the orchestrator does ([FR 19 §Event catalog](19-orchestrator-session.md), [FR 18: Phase Subprocess Catalog](18-worker-skill-workflow.md)).
 
-The orchestrator session is launched and supervised separately ([FR 19](19-orchestrator-session.md)); this FR does not restate the orchestrator's launch flags or stall-window contract. The same engine adapter supervises both shapes (orchestrator and phase subprocess) using a uniform stream-json parser and stall detector ([FR 19 §Lifecycle](19-orchestrator-session.md)).
+The orchestrator session is supervised separately ([FR 19](19-orchestrator-session.md)). The same engine adapter supervises both shapes (orchestrator and phase subprocess) using a uniform stream-json parser and stall detector.
 
-The permission strategy lets the operator pick "the safest profile that works" for phase subprocesses, plus a fallback "for when Claude's allowlist cannot be trusted". The orchestrator session always runs with a read-only filesystem sandbox and has its own narrow tool surface, regardless of operator overrides ([FR 19 §Tool surface](19-orchestrator-session.md)).
+Permission strategy lets the operator pick the safest profile that works for phase subprocesses, with a fallback when Claude's allowlist cannot be trusted. The orchestrator session always runs read-only sandbox with its own narrow tool surface, regardless of operator overrides ([FR 19 §Tool surface](19-orchestrator-session.md)).
 
 ## User-visible Behavior
 

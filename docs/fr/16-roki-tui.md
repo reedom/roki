@@ -19,7 +19,7 @@ refs:
 
 ## Purpose
 
-Let the operator see "the daemon's current state" in a single terminal at second-by-second granularity. The TUI's lifecycle is independent of the daemon process, so opening or closing the TUI does not affect the daemon. Even in v1 (no auth, no TLS), it can be operated safely under the loopback assumption.
+A single-terminal view of daemon state at second-by-second granularity. The TUI's lifecycle is independent of the daemon. Safe to operate under v1's loopback assumption (no auth, no TLS).
 
 ## User-visible Behavior
 

@@ -127,13 +127,9 @@ extension:
 
 ## prompt_template_orchestrator
 
-System prompt for the orchestrator session. Rendered once at orchestrator
-launch (entry to Pending after the pre-admission-judge passes) against the
-Linear issue context, with the per-ticket `mode` flag substituted in. The
-orchestrator consumes it across every event the daemon delivers:
-phase_complete, phase_nonclean, daemon_directive, tracker_terminal.
+System prompt for the orchestrator session. Rendered once at launch (entry to Pending after the pre-admission-judge passes) and used across every daemon event (`phase_complete`, `phase_nonclean`, `daemon_directive`, `tracker_terminal`).
 
-The orchestrator's tool surface (enforced by the daemon via `--settings`):
+Tool surface (enforced by the daemon via `--settings`):
 - Linear MCP (write) — the operator's installed Linear MCP
 - Read (workspace, read-only) — including `<repo>/.kiro/specs/<target>/`
   in SPEC_DRIVEN mode (project-level path outside the issue's session tempdir)
@@ -321,16 +317,9 @@ authoritative field reference.
 
 ## prompt_template_implement_direct
 
-Required template block. Drives the `implement` phase in NEEDS_CLASSIFY
-(Path B / direct) mode. The daemon launches
-`claude --input-format stream-json --output-format stream-json --max-turns N`
-with this block rendered onto stdin.
+Required. Drives `implement` in NEEDS_CLASSIFY (Path B / direct) mode. The Linear ticket body's `## Acceptance Criteria` (numbered EARS) is the sole authoritative spec source.
 
-In direct mode there is no project-level spec; the Linear ticket body's
-`## Acceptance Criteria` section (numbered EARS) is the sole authoritative
-spec source.
-
-Liquid variables available in this block:
+Liquid variables:
   issue.id                  — Linear issue identifier
   issue.title               — ticket title
   issue.description         — full ticket body (Markdown)
@@ -394,11 +383,7 @@ handoff.
 
 ## prompt_template_validate_direct
 
-Required template block. Drives the `validate` phase in NEEDS_CLASSIFY
-(Path B / direct) mode.
-
-Same Liquid variables as `prompt_template_implement_direct`. The validate phase
-runs after `review` returns APPROVED and before `open_pr`.
+Required. Drives `validate` in NEEDS_CLASSIFY (Path B / direct) mode. Same Liquid variables as `prompt_template_implement_direct`. Runs after `review` returns APPROVED and before `open_pr`.
 
 {% raw %}
 You are the validate phase subprocess for Linear ticket {{ issue.id }} in NEEDS_CLASSIFY (Path B / direct) mode.
@@ -440,8 +425,7 @@ your findings injected via `additional_context`.
 
 ## prompt_template_open_pr
 
-Required template block. Drives the `open_pr` phase in both modes. The daemon
-passes the orchestrator's validation outcome through `additional_context`.
+Required. Drives `open_pr` in both modes. The daemon passes the orchestrator's validation outcome through `additional_context`.
 
 {% raw %}
 You are the open_pr phase subprocess for Linear ticket {{ issue.id }}.
@@ -478,24 +462,13 @@ here — those phases are owned upstream.
 
 ## prompt_template_finalize_review
 
-Optional per-phase override for the `finalize_review` phase. When present, the
-daemon writes the rendered text to the phase subprocess's stdin instead of
-launching the catalog default `claude -p '/roki-finalize-review <feature-or-ticket>'`.
+Optional override for `finalize_review`. When present, the daemon pipes this rendered text to the phase subprocess instead of launching the catalog default `claude -p '/roki-finalize-review <feature-or-ticket>'`.
 
-Mutually exclusive per phase with `extension.phase.finalize_review.command` —
-declaring both is a configuration error rejected at startup or retained as the
-previous policy at hot reload (per req:roki-mvp:6.7).
+Mutually exclusive with `extension.phase.finalize_review.command`; declaring both is a configuration error rejected at startup, or retained as previous policy on hot reload (req:roki-mvp:6.7).
 
-The criterion ID source is mode-dependent:
-- SPEC_DRIVEN: numeric requirement IDs in
-  `<repo>/.kiro/specs/<target>/requirements.md`.
-- NEEDS_CLASSIFY: numbered EARS sentences in the Linear ticket body's
-  `## Acceptance Criteria` section.
-
-The block below is a thin example illustrating the override pattern; in
-practice operators are likely to keep the default `roki-finalize-review` skill
-and only override the prose or section emphasis when their workspace has
-unusual conventions.
+Criterion ID source is mode-dependent:
+- SPEC_DRIVEN: numeric requirement IDs in `<repo>/.kiro/specs/<target>/requirements.md`.
+- NEEDS_CLASSIFY: numbered EARS sentences in the ticket body's `## Acceptance Criteria`.
 
 {% raw %}
 You are the finalize_review phase subprocess for Linear ticket {{ issue.id }} in {{ mode }} mode.

@@ -1,16 +1,13 @@
 # Reference
 
-`docs/reference/` collects the **comprehensive lookup documents** for roki.
+Lookup documents for roki.
 
 ## Position in the documentation stack
 
 | Directory | Purpose | How to read |
 |---|---|---|
-| [`docs/fr/`](../fr/) | Per-feature narrative (what the feature does / why it is needed / how it behaves) | Read through |
-| **`docs/reference/`** (this directory) | Exhaustive lookup tables (the meaning of this flag / key / event) | Look up in tables |
-
-reference is documentation that **operators look up at runtime**. Its readers and timing differ from the narrative.
-It prioritizes completeness and at-a-glance access; it does not carry a story.
+| [`docs/fr/`](../fr/) | Per-feature narrative | Read through |
+| **`docs/reference/`** (this directory) | Exhaustive lookup tables | Look up in tables |
 
 ## Index
 
@@ -24,11 +21,6 @@ It prioritizes completeness and at-a-glance access; it does not carry a story.
 
 ## Update rules
 
-- **When you add a new CLI flag / config key / artifact field / extension surface / log event, add a row to the corresponding reference.**
-- Each entry in reference is the **canonical home** of the definition. The FR side does not restate it; it links here.
-- Each entry should also list "which FR page uses it" and "the corresponding requirement", so that traceability runs both ways.
-
-## Traceability
-
-- Each entry → FR pages: linked in the "Used by" column.
-- Each entry → requirements: in the form `<spec> Req N.M`.
+- When you add a new CLI flag / config key / artifact field / extension surface / log event, add a row to the corresponding reference.
+- Each entry is the **canonical home** of the definition; FR pages link here instead of restating.
+- Each entry lists "Used by" (FR pages) and the corresponding requirement (`<spec> Req N.M`) for two-way traceability.

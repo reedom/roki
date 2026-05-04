@@ -17,8 +17,7 @@ refs:
 
 # Reference: CLI Flags
 
-The **canonical reference** for the CLI flags accepted by the `roki run` subcommand.
-Flags override the corresponding values in the configuration file (`roki.toml`).
+CLI flags accepted by `roki run`. Flags override the corresponding values in `roki.toml`.
 
 ## Flags
 
@@ -30,14 +29,14 @@ Flags override the corresponding values in the configuration file (`roki.toml`).
 | `--dangerously-skip-permissions` | (boolean) | Pins the entire permission strategy to `--dangerously-skip-permissions` | Fallback for when Claude Code's allowlist cannot be trusted | [07-worker-execution](../fr/07-worker-execution.md) | roki-mvp Req 1.6, Req 9.4 |
 | `--debug` | (boolean) | Enables per-issue debug capture | Records each worker subprocess's stdout/stderr to a per-issue file | [13-observability-logs](../fr/13-observability-logs.md) | roki-mvp Req 1.6, Req 11.6 |
 
-`roki --help` and the `--help` of each subcommand document every flag in the table above together with **the configuration key it corresponds to**.
+`roki --help` and each subcommand's `--help` document every flag together with **the configuration key it corresponds to**.
 
 ## When adding a new CLI flag
 
-1. Add a row to the table above (Flag / Argument / Overrides / Purpose / Used by / Requirements).
-2. From the FR page that uses the flag, link to this table (no duplicate explanation).
+1. Add a row to the table above.
+2. Link to this table from the FR page that uses the flag.
 3. Update the corresponding `roki-mvp` requirements.
 
 ## Related reference
 
-- [config.md](config.md): the schema of the configuration keys overridden by the CLI flags
+- [config.md](config.md): schema of the configuration keys overridden by these flags

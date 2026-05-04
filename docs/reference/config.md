@@ -11,11 +11,11 @@ refs:
 
 # Reference: Configuration Schema
 
-The **canonical schema reference** for `roki.toml` (per workspace) and `WORKFLOW.md` (Liquid + Markdown, hot-reloaded).
+Schema for `roki.toml` (per workspace) and `WORKFLOW.md` (Liquid + Markdown, hot-reloaded).
 
-For working samples, see [`docs/examples/`](../examples/):
+Working samples in [`docs/examples/`](../examples/):
 
-- [`roki.minimal.toml`](../examples/roki.minimal.toml) / [`WORKFLOW.minimal.md`](../examples/WORKFLOW.minimal.md) — the smallest configuration that boots (usable as a starting point with `cp`)
+- [`roki.minimal.toml`](../examples/roki.minimal.toml) / [`WORKFLOW.minimal.md`](../examples/WORKFLOW.minimal.md) — smallest configuration that boots
 - [`roki.annotated.toml`](../examples/roki.annotated.toml) / [`WORKFLOW.annotated.md`](../examples/WORKFLOW.annotated.md) — every key with comments
 
 ## `roki.toml` schema
@@ -82,12 +82,12 @@ The legacy `[judge].model` `roki.toml` block and the `extension.linear_updater.*
 
 ## When adding a new key / namespace
 
-1. Add a row to the corresponding table above (Block/Key / Required / Meaning / Used by / Requirements).
-2. From the FR page that uses it, link to this table.
+1. Add a row to the corresponding table above.
+2. Link to this table from the FR page that uses it.
 3. Update `roki-mvp Req 2` (for `roki.toml`) or `roki-mvp Req 13.5` (for a `WORKFLOW.md` namespace) and the consuming spec's requirements.
 
 ## Related
 
 - [cli.md](cli.md): override via CLI flags
-- [extension-surface.md](extension-surface.md): the extension contract including WORKFLOW.md namespaces
-- [`docs/examples/`](../examples/): working samples (minimal + annotated)
+- [extension-surface.md](extension-surface.md): extension contract including WORKFLOW.md namespaces
+- [`docs/examples/`](../examples/): working samples

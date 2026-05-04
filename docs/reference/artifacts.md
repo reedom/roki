@@ -7,7 +7,7 @@ refs:
 
 # Reference: Public Artifacts
 
-The **canonical reference** for the paths and required elements of the **public artifacts** that operators and downstream specs read or write.
+Paths and required elements of public artifacts that operators and downstream specs read or write.
 
 ## Artifact list
 
@@ -57,4 +57,4 @@ Validation is performed by the orchestrator session (`Read` + `Bash` `test -f` f
 ## Related reference
 
 - [config.md](config.md): operator-facing configuration knobs
-- [extension-surface.md](extension-surface.md): the read-only `OrchestratorRead` snapshot, `TrackerRefresh` nudge, `additional_context` channel, and reserved `WORKFLOW.md` namespaces
+- [extension-surface.md](extension-surface.md): `OrchestratorRead`, `TrackerRefresh`, `additional_context`, reserved `WORKFLOW.md` namespaces

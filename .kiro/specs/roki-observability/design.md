@@ -12,11 +12,11 @@ refs:
 
 ## Overview
 
-**Purpose**: roki-observability adds an operator-facing observability surface to roki without changing roki-mvp's orchestrator. Two artifacts ship: (1) an optional axum HTTP server module compiled into the existing `roki` daemon binary, gated by `WORKFLOW.md` `server.port` and bound to loopback by default; (2) a separate `roki-tui` ratatui binary in the same Cargo workspace that consumes the HTTP API on a refresh loop. The API is a read-only projection of the orchestrator's in-memory state plus a single mutating endpoint (`POST /api/v1/refresh`) that nudges the tracker poller — no cancel, retry, or reschedule. The JSON schema mirrors symphony's so that future web UIs and external dashboards can interop without per-tool variants.
+**Purpose**: Two artifacts: (1) an optional axum HTTP server module compiled into the `roki` daemon binary, gated by `WORKFLOW.md` `server.port` and bound to loopback by default; (2) a separate `roki-tui` ratatui binary in the same Cargo workspace that consumes the HTTP API on a refresh loop. The API is a read-only projection of orchestrator in-memory state plus one mutating endpoint (`POST /api/v1/refresh`) that nudges the tracker poller — no cancel, retry, or reschedule. The JSON schema mirrors symphony's so future web UIs and external dashboards interop without per-tool variants.
 
-**Users**: A solo developer or small team operator who already runs roki as a long-running daemon and wants a TUI ("what is roki currently doing?") in seconds rather than tailing tracing logs and grepping. Future web-UI authors and external dashboard scripts are downstream consumers of the same JSON schema.
+**Users**: Solo developer or small team operator running roki as a daemon. Future web-UI authors and external dashboards are downstream consumers of the same JSON schema.
 
-**Impact**: Adds two seams without disturbing roki-mvp: a `TransitionSubscriber` registered against the orchestrator's existing event bus and an on-demand projection that reads the orchestrator's live state. The orchestrator core does not depend on the API in either direction. The daemon continues to function with the API disabled, which is the default state.
+**Impact**: Two seams added without disturbing roki-mvp: a `TransitionSubscriber` against the existing event bus, and an on-demand projection over the live state. The orchestrator core does not depend on the API. The daemon continues to function with the API disabled (the default).
 
 ### Goals
 - Optional axum HTTP server module gated by `WORKFLOW.md` `server.port` (off by default), loopback-only by default.
@@ -123,7 +123,7 @@ graph TB
 | Logging | tracing, tracing-subscriber | Server request logs and TUI startup logs | Reuses existing pipeline; TUI logs to stderr only |
 | CLI | clap 4.x | TUI binary CLI | Workspace dependency; daemon CLI is unchanged here |
 
-> The server module reuses axum from roki-mvp's webhook receiver to keep the dependency footprint flat. The TUI binary deliberately uses crossterm rather than termion for macOS plus Linux uniformity.
+> TUI uses crossterm rather than termion for macOS plus Linux uniformity.
 
 ## File Structure Plan
 
@@ -172,7 +172,7 @@ src/                                     # Existing daemon crate (roki-mvp owned
 - `SPEC.md` — add a section documenting the `/api/v1/*` contract, the `server.*` config block, the loopback-only default, and the symphony-compatibility note.
 - `WORKFLOW.example.md` — add a commented-out example `server.*` block with the exposure warning.
 
-> Each file owns one clear responsibility. The split between `projection.rs` (snapshot assembly logic) and `escape.rs` (string-sanitization helpers) keeps the escape/strip pass reusable from the per-issue endpoint without duplicating the logic.
+> Splitting `projection.rs` (snapshot assembly) from `escape.rs` (sanitization) keeps the escape/strip pass reusable from the per-issue endpoint.
 
 ## System Flows
 
