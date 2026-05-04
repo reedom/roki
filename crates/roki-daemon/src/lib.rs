@@ -5,3 +5,4 @@
 //! configuration, and runtime helpers without spawning the binary.
 
 pub mod cli;
+pub mod config;

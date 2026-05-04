@@ -26,7 +26,7 @@ refs:
   - Observable completion: `cargo run --bin roki -- run --help` prints usage with all five documented flags; a unit test parses each flag and asserts the parsed `RunArgs` shape.
   - _Requirements: 1.6, 1.7_
 
-- [ ] 1.3 Build layered config loader with secret resolution and legacy-key refusal
+- [x] 1.3 Build layered config loader with secret resolution and legacy-key refusal
   - Define typed config: `[linear]` (token source, webhook secret source, `assignee`, `admit_states`), `[workflow]` (path), `[server]` (bind, port), `[debug]` (per-issue log dir, level), `[[repos]]` (ghq identifier only), permission strategy.
   - Refuse to start on duplicate `[[repos]]` ghq identifier entries.
   - Refuse to start when `assignee` is empty / unresolvable, when `admit_states` resolves to empty (default `["Todo"]`), when `[linear]` token / webhook secret cannot be resolved, when `[workflow]` path is missing or unreadable.
