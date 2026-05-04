@@ -294,7 +294,7 @@ refs:
   - _Requirements: 6.7_
   - _Boundary: engine/phase_subprocess/override_
 
-- [ ] 6.7 Implement PhaseSubprocessAdapter spawn + invocation + classify pinning
+- [x] 6.7 Implement PhaseSubprocessAdapter spawn + invocation + classify pinning
   - Spawn one bounded `claude` subprocess per `OrchestratorAction { action=run_phase, phase, additional_context, ... }`. Resolve invocation per `(phase, mode)` via `PhaseCatalog`; apply per-phase override via `OverrideResolver`.
   - Render the per-phase context envelope: issue id, target spec name (when SPEC_DRIVEN), worktree path (None for `classify`; required for every other phase), mode, plus the orchestrator's `additional_context` verbatim through the engine adapter's stable forwarding section ([Req 13.4]).
   - Apply `--max-turns` per the catalog default unless overridden by `extension.phase.<name>.max_turns`. The `classify` phase invocation is `claude -p '/roki-classify <ticket-context>' --max-turns 5`.
@@ -304,7 +304,7 @@ refs:
   - _Requirements: 4.4, 5.6, 5.12, 6.7, 7.1, 9.1, 9.2, 9.3, 9.4, 13.4_
   - _Boundary: engine/phase_subprocess_
 
-- [ ] 6.8 Implement PhaseSubprocessAdapter exit translation + per-phase stall
+- [x] 6.8 Implement PhaseSubprocessAdapter exit translation + per-phase stall
   - Translate the phase subprocess's terminal stream-json `result` event:
     - `subtype = success` → `phase_complete { phase, result_payload, pr_url? (open_pr), review_artifact_path? (finalize_review), classify.* (classify) }`.
     - Any documented non-`success` `subtype` (`error_max_turns`, `error_during_execution`, …) → `phase_nonclean(non_success_subtype, raw_subtype=...)`.
@@ -319,7 +319,7 @@ refs:
   - _Requirements: 5.7, 5.8, 5.9, 11.5, 11.8_
   - _Boundary: engine/phase_subprocess_
 
-- [ ] 6.9 Implement RetryPolicy daemon-internal replay loop
+- [x] 6.9 Implement RetryPolicy daemon-internal replay loop
   - On `phase_nonclean` (non-`stall`, non-`max_turns_exhausted` classifications): drive `Active → Backoff → Active` daemon-internal replay using the same `PhaseLaunchContext` (phase / mode / additional_context / worktree_path / max_turns) until the ticket-level `max_attempts` budget is exhausted (default `3`, range `1..10`; configurable via `extension.phase.<name>.max_attempts`).
   - Apply exponential backoff bounded between 10 s and 5 min between attempts; tunable backoff floor for tests.
   - Replays consume **zero** `extension.orchestrator.max_phases` slots (no `phase_nonclean` re-delivery; no fresh `run_phase` nomination during replay).

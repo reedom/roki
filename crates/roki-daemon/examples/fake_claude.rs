@@ -51,6 +51,42 @@ fn main() {
             emit_run_phase("implement", &prompt_marker);
             drain_stdin(&mut reader);
         }
+        "phase_success" => {
+            // Drain whatever the adapter pushed into stdin (it may write
+            // the rendered template body for template-form invocations).
+            drain_stdin(&mut reader);
+            emit_stream_result("success");
+        }
+        "phase_error_max_turns" => {
+            drain_stdin(&mut reader);
+            emit_stream_result("error_max_turns");
+        }
+        "phase_error_during_execution" => {
+            drain_stdin(&mut reader);
+            emit_stream_result("error_during_execution");
+        }
+        "phase_unknown_subtype" => {
+            drain_stdin(&mut reader);
+            emit_stream_result("error_future_unknown_signal");
+        }
+        "phase_nonzero_no_result" => {
+            drain_stdin(&mut reader);
+            // Exit non-zero without a terminal `result` event. The adapter
+            // must classify this as `phase_nonclean(NonZero)`.
+            std::process::exit(7);
+        }
+        "phase_stall" => {
+            // Emit nothing on stdout; let the adapter's per-phase stall
+            // detector SIGTERM the child.
+            drain_stdin(&mut reader);
+            std::thread::sleep(std::time::Duration::from_secs(60));
+        }
+        "phase_stderr_then_success" => {
+            eprintln!("ROKI-PHASE-STDERR-MARKER: phase warning");
+            let _ = std::io::stderr().flush();
+            drain_stdin(&mut reader);
+            emit_stream_result("success");
+        }
         _ => {
             eprintln!("fake_claude: unknown mode `{mode}`");
             std::process::exit(2);
@@ -65,6 +101,20 @@ fn emit_run_phase(phase: &str, reason_extra: &str) {
         "action": "run_phase",
         "phase": phase,
         "reason": format!("nominate {phase} {reason_extra}"),
+    });
+    let _ = writeln!(out, "{payload}");
+    let _ = out.flush();
+}
+
+/// Emit a stream-json terminal `result` event with the given subtype. Used
+/// by the phase-subprocess adapter integration tests.
+fn emit_stream_result(subtype: &str) {
+    let stdout = std::io::stdout();
+    let mut out = stdout.lock();
+    let payload = serde_json::json!({
+        "type": "result",
+        "subtype": subtype,
+        "total_cost": 0.0,
     });
     let _ = writeln!(out, "{payload}");
     let _ = out.flush();
