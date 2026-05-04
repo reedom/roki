@@ -11,7 +11,6 @@ refs:
     - fr:19-orchestrator-session
     - fr:04-state-machine-and-recovery
     - fr:07-worker-execution
-    - fr:09-pre-pr-gate
     - fr:13-observability-logs
     - fr:15-http-api
     - fr:16-roki-tui
@@ -23,7 +22,7 @@ refs:
 
 ## Purpose
 
-Some failures are visible only to the daemon: a phase subprocess stalled and was killed, a phase non-clean-exit retry budget was exhausted, a filesystem error poisoned a worktree, restart-recovery found an orphan, the review gate denied beyond its retry budget, A itself crashed or schema-drifted persistently or exhausted `max_phases`. The phase agent never gets a chance to write back to Linear in those cases, and the daemon does not hold a Linear write path itself.
+Some failures are visible only to the daemon: a phase subprocess stalled and was killed, a phase non-clean-exit retry budget was exhausted, a filesystem error poisoned a worktree, restart-recovery found an orphan, A itself crashed or schema-drifted persistently or exhausted `max_phases`. The phase agent never gets a chance to write back to Linear in those cases, and the daemon does not hold a Linear write path itself.
 
 The new architecture replaces the prior linear-updater subagent with **A processing a `daemon_directive` event** (see [fr:19-orchestrator-session > Event catalog](19-orchestrator-session.md)). When A is alive the daemon sends a structured directive on A's stdin; A writes the appropriate Linear label + comment via the operator's installed Linear MCP and returns `action=linear_update_done`. When A is dead — `orchestrator_crash`, `orchestrator_unparseable`, or `orchestrator_budget_exhausted` — the daemon does **not** fall back to a Linear write of its own; the failure surfaces via structured log + TUI escalation queue only.
 
@@ -39,13 +38,12 @@ The daemon emits a `daemon_directive` event to A whenever a daemon-only failure 
 |---|---|---|
 | Phase subprocess stalled and was terminated | `daemon_directive` (`kind=stall`); A typically follows with `action=stop` | [07-worker-execution](07-worker-execution.md) |
 | Ticket-level retry budget exhausted on phase non-clean exits | `daemon_directive` (`kind=retry_exhausted`) → A `action=stop` with `outcome=failure` | [07-worker-execution](07-worker-execution.md), `req:roki-mvp:5.10` |
-| Pre-PR review gate Denied beyond its retry budget | `daemon_directive` (`kind=review_gate_exhausted`) → `Inactive(reason=review_gate_exhausted)` | [09-pre-pr-gate](09-pre-pr-gate.md) |
 | Filesystem error poisoned an issue | `daemon_directive` (`kind=fs_poison`) | [04-state-machine-and-recovery](04-state-machine-and-recovery.md) |
 | Restart-recovery saw orphaned residue | `daemon_directive` (`kind=orphan`) | [04-state-machine-and-recovery](04-state-machine-and-recovery.md), Req 10.3 |
 
 The `needs_split` and `allowlist_rejected` admission rejections are **not** routed through `daemon_directive` — A returns those `admission_decision` directives and writes the matching Linear label + comment in the same turn (per [fr:19-orchestrator-session](19-orchestrator-session.md)).
 
-Events that an agent (A or a phase subprocess) is expected to self-report through Linear (normal phase completions, agent-recoverable errors the phase agent surfaces in the ticket itself, the review-gate fix-finding loop's intentional re-launches via `gate_deny`) **do not** trigger a `daemon_directive`.
+Events that an agent (A or a phase subprocess) is expected to self-report through Linear (normal phase completions, agent-recoverable errors the phase agent surfaces in the ticket itself, A's artifact-validation retry-budget exhaustion which A surfaces directly via Linear MCP before its terminal `action=stop`) **do not** trigger a `daemon_directive`.
 
 ### When A is dead (no Linear-side notification)
 
@@ -67,7 +65,7 @@ Each `daemon_directive` event passes at minimum:
 
 ```
 issue_id:    "ENG-1234"
-kind:        "stall" | "retry_exhausted" | "review_gate_exhausted" |
+kind:        "stall" | "retry_exhausted" |
              "fs_poison" | "orphan" | "<future kind>"
 fields:      { ...kind-specific structured fields, e.g.
                correlation_id, repos[], worktree_path, last_subtype,
@@ -97,7 +95,7 @@ Consumers:
 
 ### Configuration
 
-- The orchestrator namespace `extension.orchestrator.{model, effort, max_phases, allowed_tools}` ([fr:19-orchestrator-session > Configuration](19-orchestrator-session.md)) governs A's behaviour, including its tool surface (Linear MCP write + `Read`). There is no separate `extension.linear_updater.*` namespace; the loader rejects that legacy key per `req:roki-mvp:2.13`.
+- The orchestrator namespace `extension.orchestrator.{model, effort, max_phases, allowed_tools}` ([fr:19-orchestrator-session > Configuration](19-orchestrator-session.md)) governs A's behaviour, including its tool surface (Linear MCP write + `Read` + `Bash`, with `Bash` running inside a read-only filesystem sandbox). There is no separate `extension.linear_updater.*` namespace; the loader rejects that legacy key per `req:roki-mvp:2.13`.
 - Slack and other push notification channels are **not** configured here. Daemon-only failure surfacing routes through A → Linear MCP (when A is alive) and the TUI escalation queue (always).
 
 ## Capabilities
@@ -114,7 +112,7 @@ Consumers:
 - **Per-event routing rules / per-issue or per-repo channel split** are out of scope (a single `daemon_directive` path handles every alive-A trigger).
 - **Acknowledgement / read management on the Linear side** depends on Linear's own labelling / comment workflow; the daemon does not track ack state.
 - **Notifications to Linear tickets for normal phase progress** (PR opened, status updates) are performed by the phase agent's own Linear MCP path, not by `daemon_directive`.
-- **A is not a substitute for a phase subprocess**: A does not implement, review, or write to the worktree; A's role is admission classification, phase planning, daemon-directive interpretation, and Linear writes only ([fr:19-orchestrator-session](19-orchestrator-session.md)).
+- **A is not a substitute for a phase subprocess**: A does not implement, review, or write to the worktree; A's role is admission classification, phase planning, artifact validation, daemon-directive interpretation, and Linear writes only ([fr:19-orchestrator-session](19-orchestrator-session.md)).
 - **A failure mid-`daemon_directive`** does not trigger another `daemon_directive` (no infinite recursion); the daemon routes A's death to `Inactive(reason=orchestrator_crash)` and the TUI surfaces it.
 - **No Linear fallback when A is dead**: the three orchestrator-dead reasons surface via structured log + TUI escalation queue only.
 
@@ -126,4 +124,4 @@ Consumers:
   - `req:roki-mvp:5.10`: retry-exhausted `daemon_directive` contract
   - `req:roki-mvp:2`: orchestrator namespace replaces the removed `extension.linear_updater.*`
 - **Reference**: [`docs/reference/log-events.md`](../reference/log-events.md) (canonical structured-log event catalog including `daemon_directive` payload schema)
-- **Related FR**: [04-state-machine-and-recovery](04-state-machine-and-recovery.md), [07-worker-execution](07-worker-execution.md), [09-pre-pr-gate](09-pre-pr-gate.md), [13-observability-logs](13-observability-logs.md), [15-http-api](15-http-api.md), [16-roki-tui](16-roki-tui.md), [19-orchestrator-session](19-orchestrator-session.md)
+- **Related FR**: [04-state-machine-and-recovery](04-state-machine-and-recovery.md), [07-worker-execution](07-worker-execution.md), [13-observability-logs](13-observability-logs.md), [15-http-api](15-http-api.md), [16-roki-tui](16-roki-tui.md), [19-orchestrator-session](19-orchestrator-session.md)

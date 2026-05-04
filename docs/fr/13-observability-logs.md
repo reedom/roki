@@ -39,9 +39,7 @@ Even in stages without a dedicated UI, an operator must be able to diagnose the 
 The **exact list** of events emitted by each spec lives in [`docs/reference/log-events.md`](../reference/log-events.md).
 Here we only outline the conceptual categories:
 
-- **roki-mvp**: orchestrator-session lifecycle (start / stop / turn / schema drift), phase subprocess lifecycle changes (including `Inactive(reason=...)` transitions covering the three orchestrator-dead reasons `orchestrator_crash` / `orchestrator_unparseable` / `orchestrator_budget_exhausted`), session/worktree operations, Linear poll/webhook, backoff/stall decisions, retry attempts, state-machine transitions, A's `daemon_directive` Linear-write outcomes, escalation queue updates, subprocess stderr lines.
-- **Pre-implementation gate** ([08](08-pre-implementation-gate.md)): gate-evaluation start, spec-materialization turn start/end, per-attempt timeout, validation outcome, veto decision, escalation.
-- **Pre-PR gate** ([09](09-pre-pr-gate.md)): gate decision (Allow / Deny+RetryWithContext / Deny exhausted), validation failure code, fix-finding context payload size, escalation.
+- **roki-mvp**: orchestrator-session lifecycle (start / stop / turn / schema drift), phase subprocess lifecycle changes (including `Inactive(reason=...)` transitions covering the three orchestrator-dead reasons `orchestrator_crash` / `orchestrator_unparseable` / `orchestrator_budget_exhausted`), session/worktree operations, Linear poll/webhook, backoff/stall decisions, retry attempts, state-machine transitions, A's `daemon_directive` Linear-write outcomes, escalation queue updates, subprocess stderr lines. A's artifact-validation outcomes (after `materialize_spec` / `finalize_review` clean exit) surface through the existing `Orchestrator turn` event (`action` / `phase` / `additional_context` / `reason`).
 - **HTTP API** ([15](15-http-api.md)): per-request event (method/path/status/duration/correlation), refresh request.
 
 ### Surfacing subprocess stderr
@@ -75,7 +73,7 @@ Here we only outline the conceptual categories:
 - **Metrics / time-series** are out of scope (event log only).
 - **Log retention / rotation** is the responsibility of external tools (logrotate, etc.).
 - **Per-issue debug log analysis** is out of scope (the operator reads them).
-- **Persistent gate decision history** is not maintained (log retention belongs to external tooling).
+- **Persistent artifact-validation history** is not maintained (log retention belongs to external tooling).
 - **Operator notification destinations** are a separate channel ([14-operator-notifications](14-operator-notifications.md)).
 
 ## Traceability
@@ -83,8 +81,6 @@ Here we only outline the conceptual categories:
 - **Roadmap**: `roadmap.md` > Scope > In > "Optional HTTP API + ratatui TUI for observability" — base layer that the observability surface assumes
 - **Requirements**:
   - `roki-mvp Req 11`: Observability of Daemon Internals
-  - `roki-spec-gate Req 9`: Observability and Escalation
-  - `roki-review-gate Req 8.5`: Decision logging
 - **Design**:
   - The Observability section of each spec's `design.md`
 - **Related reference**: [log-events.md](../reference/log-events.md), [cli.md](../reference/cli.md) (`--debug`), [config.md](../reference/config.md) (log destination / level)

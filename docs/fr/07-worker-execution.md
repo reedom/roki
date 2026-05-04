@@ -11,7 +11,6 @@ refs:
   related:
     - fr:01-daemon-lifecycle
     - fr:04-state-machine-and-recovery
-    - fr:09-pre-pr-gate
     - fr:11-agent-tool-boundary
     - fr:14-operator-notifications
     - fr:18-worker-skill-workflow
@@ -67,15 +66,15 @@ The ticket-level retry budget for phase non-clean exits (default 3 attempts, ran
 
 The daemon does not auto-retry a phase: A must return `action=run_phase` for the same `phase` for the daemon to spend a retry slot. A may also choose to fall through to a `ci_fix` phase, change `additional_context`, or `action=stop` — those choices are A's, and only same-phase re-nominations count against the retry budget.
 
-The review-gate intentional re-launch is a separate path: `Deny+RetryWithContext(payload)` from the review gate translates into a `gate_deny` event on A's stdin, after which A returns `action=run_phase` with `phase=implement` and populated `additional_context` (per [FR 19 §Event catalog](19-orchestrator-session.md), [FR 09: Pre-PR Gate](09-pre-pr-gate.md)). The review-gate retry budget is owned by [FR 09](09-pre-pr-gate.md) and is independent of the phase-non-clean retry budget above.
+A's artifact-validation retries (after `materialize_spec` or `finalize_review` clean exit, per [FR 19 §Artifact validation](19-orchestrator-session.md)) re-use the same `action=run_phase` channel. Because the producing phase exited cleanly, those retries do not consume a phase-`nonclean` retry slot and are not bounded by this retry budget — A's own retry budget (drawn from `prompt_template_orchestrator`) bounds them, with `max_phases` as the overall ceiling.
 
 ### Daemon-only failure surfacing (no linear-updater)
 
-Daemon-only failures (phase stall after the daemon killed the subprocess; phase non-clean retry-budget exhaustion; review-gate retry exhaustion; filesystem poison; restart-recovery orphan) are surfaced through `daemon_directive` events on A's stdin per [FR 14: Operator Notifications](14-operator-notifications.md). When A is alive, A writes the appropriate Linear label + comment via Linear MCP and returns `action=linear_update_done`. When A is dead — `orchestrator_crash`, `orchestrator_unparseable`, `orchestrator_budget_exhausted` — there is no Linear-side notification; the daemon logs structurally and populates the TUI escalation queue. The previously specified linear-updater subagent is removed; the `daemon_directive → A → Linear MCP` path is its full replacement.
+Daemon-only failures (phase stall after the daemon killed the subprocess; phase non-clean retry-budget exhaustion; filesystem poison; restart-recovery orphan) are surfaced through `daemon_directive` events on A's stdin per [FR 14: Operator Notifications](14-operator-notifications.md). When A is alive, A writes the appropriate Linear label + comment via Linear MCP and returns `action=linear_update_done`. When A is dead — `orchestrator_crash`, `orchestrator_unparseable`, `orchestrator_budget_exhausted` — there is no Linear-side notification; the daemon logs structurally and populates the TUI escalation queue. The previously specified linear-updater subagent is removed; the `daemon_directive → A → Linear MCP` path is its full replacement. Artifact-validation retry-budget exhaustion (`requirements.md` after `materialize_spec`, `review.md` after `finalize_review`) is owned entirely by A — the daemon does not send a `daemon_directive` for it; A writes the Linear feedback itself before its terminal `action=stop`.
 
 ## Capabilities
 
-- **One phase subprocess per A-nominated phase**: the daemon never re-launches a phase on its own initiative. The only re-launch paths are (a) A returns `action=run_phase` for the same phase after a `phase_nonclean` (consumes one retry slot), and (b) A returns `action=run_phase` with `phase=implement` after a `gate_deny` event (review-gate intentional re-launch, owned by [FR 09](09-pre-pr-gate.md)).
+- **One phase subprocess per A-nominated phase**: the daemon never re-launches a phase on its own initiative. Re-launch paths are all A-initiated: (a) A returns `action=run_phase` for the same phase after a `phase_nonclean` (consumes one retry slot from the phase-non-clean budget); (b) A returns `action=run_phase` after artifact validation found a structural problem in `requirements.md` or `review.md` (re-uses the producing phase or jumps to `implement`, depending on which artifact failed; bounded by A's own retry budget, not by the phase-non-clean budget — see [FR 19 §Artifact validation](19-orchestrator-session.md)).
 - **`--max-turns` passthrough**: a per-phase turn budget is configurable. Each phase subprocess honors its own budget; the orchestrator session A is bounded by `max_phases` instead ([FR 19](19-orchestrator-session.md)).
 - **Retryable phase-nonclean classifications**: the daemon classifies the `phase_nonclean` payload but does not retry on its own; A's `run_phase` decision is what consumes a retry slot. The compiled subtype mapping (e.g. `error_during_execution` as of the MVP build) flows verbatim into the `phase_nonclean` payload so A can decide.
 - **Per-launch logging of the permission strategy**: each `--dangerously-skip-permissions` elevation decision is recorded on every phase launch.
@@ -106,4 +105,4 @@ Daemon-only failures (phase stall after the daemon killed the subprocess; phase 
 - **Design**:
   - `Engine Adapter` / `Permission Strategy` sections of `.kiro/specs/roki-mvp/design.md`
   - `.kiro/specs/roki-mvp/design-retry-policy.md`
-- **Related FR**: [01-daemon-lifecycle](01-daemon-lifecycle.md), [04-state-machine-and-recovery](04-state-machine-and-recovery.md), [09-pre-pr-gate](09-pre-pr-gate.md), [11-agent-tool-boundary](11-agent-tool-boundary.md), [14-operator-notifications](14-operator-notifications.md), [18-worker-skill-workflow](18-worker-skill-workflow.md), [19-orchestrator-session](19-orchestrator-session.md)
+- **Related FR**: [01-daemon-lifecycle](01-daemon-lifecycle.md), [04-state-machine-and-recovery](04-state-machine-and-recovery.md), [11-agent-tool-boundary](11-agent-tool-boundary.md), [14-operator-notifications](14-operator-notifications.md), [18-worker-skill-workflow](18-worker-skill-workflow.md), [19-orchestrator-session](19-orchestrator-session.md)

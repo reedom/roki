@@ -46,7 +46,7 @@ Per workspace, Liquid + Markdown, hot-reload supported. Composed of front matter
 
 | Key | Required | Meaning | Used by | Requirements |
 |---|---|---|---|---|
-| `prompt_template_orchestrator` (named template block) | yes | System prompt for orchestrator session A. Rendered against the issue context once per A launch; A consumes it as it processes `admission_request`, `phase_complete`, `phase_nonclean`, `daemon_directive`, `gate_deny`, and `tracker_terminal` events | [19-orchestrator-session](../fr/19-orchestrator-session.md) | roki-mvp Req 6.1, Req 6.6 |
+| `prompt_template_orchestrator` (named template block) | yes | System prompt for orchestrator session A. Rendered against the issue context once per A launch; A consumes it as it processes `admission_request`, `phase_complete`, `phase_nonclean`, `daemon_directive`, and `tracker_terminal` events, including artifact validation after `materialize_spec` and `finalize_review` clean exits | [19-orchestrator-session](../fr/19-orchestrator-session.md) | roki-mvp Req 6.1, Req 6.6 |
 
 ### Reserved extension namespaces
 
@@ -57,12 +57,7 @@ Each downstream spec consumes only its own namespace. The loader **round-trips u
 | `extension.orchestrator.model` | roki-mvp (orchestrator session A) | no | Claude model identifier for A (default `"claude-opus-4-7"`) | [19-orchestrator-session](../fr/19-orchestrator-session.md) | roki-mvp Req 2.11 |
 | `extension.orchestrator.effort` | roki-mvp (orchestrator session A) | no | Extended-thinking budget for A; one of `low` / `middle` / `high` (default `"middle"`) | [19-orchestrator-session](../fr/19-orchestrator-session.md) | roki-mvp Req 2.11 |
 | `extension.orchestrator.max_phases` | roki-mvp (orchestrator session A) | no | Total phase subprocesses A may nominate before the budget routes the issue to `Inactive(reason=orchestrator_budget_exhausted)` (default `20`) | [19-orchestrator-session](../fr/19-orchestrator-session.md) | roki-mvp Req 2.11, Req 5.5 |
-| `extension.orchestrator.allowed_tools` | roki-mvp (orchestrator session A) | no | Allowlist passed to A via `--settings` (default permits Linear MCP write + `Read`) | [19-orchestrator-session](../fr/19-orchestrator-session.md), [11-agent-tool-boundary](../fr/11-agent-tool-boundary.md) | roki-mvp Req 2.11, Req 5.1 |
-| `extension.gates.spec.required_status` | roki-spec-gate | no | The Linear status the gate evaluates (logged when defaulted) | [08-pre-implementation-gate](../fr/08-pre-implementation-gate.md) | roki-spec-gate Req 7.1, Req 7.3 |
-| `extension.gates.spec.timeout_ms` | roki-spec-gate | no | Per-attempt timeout. Non-positive causes the gate evaluation for that repo to be refused | [08-pre-implementation-gate](../fr/08-pre-implementation-gate.md) | roki-spec-gate Req 4.1, Req 7.5 |
-| `extension.gates.spec.max_attempts` | roki-spec-gate | no | Attempt cap. Same as above for non-positive | [08-pre-implementation-gate](../fr/08-pre-implementation-gate.md) | roki-spec-gate Req 4.3, Req 7.5 |
-| `extension.gates.review.required_status` | roki-review-gate | no | The artifact status considered a pass (default `pass`) | [09-pre-pr-gate](../fr/09-pre-pr-gate.md) | roki-review-gate Req 6.2 |
-| `extension.gates.review.max_attempts` | roki-review-gate | no | Review attempt cap (default 3); each Deny+RetryWithContext re-launches the `implement` phase once with the failing-criterion payload as `additional_context` (translated from `gate_deny` to A's `run_phase` directive per [19-orchestrator-session](../fr/19-orchestrator-session.md)) | [09-pre-pr-gate](../fr/09-pre-pr-gate.md) | roki-review-gate Req 5.1, Req 6.3 |
+| `extension.orchestrator.allowed_tools` | roki-mvp (orchestrator session A) | no | Allowlist passed to A via `--settings` (default permits Linear MCP write + `Read` + `Bash`; `Bash` runs inside a read-only filesystem sandbox and is intended for artifact validation) | [19-orchestrator-session](../fr/19-orchestrator-session.md), [11-agent-tool-boundary](../fr/11-agent-tool-boundary.md) | roki-mvp Req 2.11, Req 5.1 |
 | `extension.server.port` | roki-observability | no | HTTP API port (omitting disables the API) | [15-http-api](../fr/15-http-api.md) | roki-observability Req 1.1, Req 1.2, Req 15.2 |
 | `extension.server.bind` | roki-observability | no | HTTP API bind host (default `127.0.0.1`) | [15-http-api](../fr/15-http-api.md) | roki-observability Req 7.1, Req 15.2 |
 | `extension.server.min_refresh_interval_seconds` | roki-observability | no | Minimum coalescing interval for `POST /refresh` | [15-http-api](../fr/15-http-api.md) | roki-observability Req 4.4, Req 15.2 |
@@ -75,7 +70,7 @@ The legacy `[judge].model` `roki.toml` block and the `extension.linear_updater.*
 - **Schema validation failure at startup** → refuse to start + log the offending key path
 - **Validation passes on hot reload** → apply the new policy
 - **Validation fails on hot reload** → **keep the previous policy** + log the failure (do not stop the daemon)
-- **Per-key invalidity inside `extension.*`** (e.g. non-positive `timeout_ms`) → the corresponding spec refuses evaluation + logs the misconfiguration
+- **Per-key invalidity inside `extension.*`** (e.g. negative `extension.orchestrator.max_phases`) → the corresponding spec refuses evaluation + logs the misconfiguration
 
 ## When adding a new key / namespace
 

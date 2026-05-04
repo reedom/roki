@@ -48,7 +48,7 @@ The exact name, default, and validation rule for each key live in the "roki.toml
 A single per-workspace file. It consists of front matter (YAML or TOML) and template blocks, and contains:
 
 - **One named template block**: `prompt_template_orchestrator` (for the long-lived orchestrator session A; rendered once at A launch). Phase subprocesses are driven by their slash commands plus a small daemon-controlled context envelope and do not consume named WORKFLOW.md template blocks. When rendering fails, a deterministic fallback (issue identifier / title / description only) is used so A can still be launched.
-- **Reserved extension namespaces**: regions where each downstream spec places its own keys (`extension.orchestrator.*` / `extension.gates.spec.*` / `extension.gates.review.*` / `extension.server.*`). The loader **round-trips unknown keys** (it does not interpret them, and does not delete them). The legacy `extension.linear_updater.*` namespace is rejected by the loader; A's processing of `daemon_directive` events replaces it.
+- **Reserved extension namespaces**: regions where each downstream spec places its own keys (`extension.orchestrator.*` / `extension.server.*`). The loader **round-trips unknown keys** (it does not interpret them, and does not delete them). The legacy `extension.linear_updater.*`, `extension.gates.spec.*`, and `extension.gates.review.*` namespaces are rejected by the loader (or simply ignored as unknown); A's processing of `daemon_directive` events plus A's own artifact validation replaces them.
 
 The consuming spec, requiredness, default, and behavior on invalid values for each namespace live in the "WORKFLOW.md schema" table in [`docs/reference/config.md`](../reference/config.md).
 
@@ -82,8 +82,6 @@ The consuming spec, requiredness, default, and behavior on invalid values for ea
 - **Requirements**:
   - `roki-mvp Req 2`: Configuration, Assignee Admission, and Multi-Repo Allowlist
   - `roki-mvp Req 6`: Workspace-Level WORKFLOW.md Policy Loader
-  - `roki-spec-gate Req 7`: WORKFLOW.md Configuration Surface
-  - `roki-review-gate Req 6`: WORKFLOW.md Schema Keys
   - `roki-observability Req 1`, `Req 7`, `Req 15`: Server config gating
 - **Design**:
   - `Configuration Schema` / `Workflow Loader` sections of `.kiro/specs/roki-mvp/design.md`

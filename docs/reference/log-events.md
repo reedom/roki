@@ -46,23 +46,9 @@ Fields automatically attached to every event via spans.
 | State-machine transition | Per-issue state transition (prev / next / trigger source / `Inactive.reason` when transitioning to `Inactive`); `reason` may be any of the discriminator values including the three orchestrator-dead values `orchestrator_crash`, `orchestrator_unparseable`, `orchestrator_budget_exhausted` | [04-state-machine-and-recovery](../fr/04-state-machine-and-recovery.md) | roki-mvp Req 8.1, Req 8.2, Req 11.1, Req 12.3 |
 | Subprocess stderr line | One stderr line of orchestrator / phase / sweep subprocess = one warn event tagged with the subprocess role and (for phases) the phase name | [13-observability-logs](../fr/13-observability-logs.md) | roki-mvp Req 11.5 |
 
-## Events emitted by roki-spec-gate
+## Events emitted by orchestrator-driven artifact validation
 
-| Event | Summary | Used by | Requirements |
-|---|---|---|---|
-| Gate-evaluation start | Gate evaluation begins | [08-pre-implementation-gate](../fr/08-pre-implementation-gate.md) | roki-spec-gate Req 9.1 |
-| Spec-materialization turn start / end | Boundaries of the constrained turn | [08-pre-implementation-gate](../fr/08-pre-implementation-gate.md) | roki-spec-gate Req 9.1 |
-| Per-attempt timeout | Timeout detected | [08-pre-implementation-gate](../fr/08-pre-implementation-gate.md) | roki-spec-gate Req 4.1, Req 9.1 |
-| Validation outcome | Verdict + machine-readable reason | [08-pre-implementation-gate](../fr/08-pre-implementation-gate.md) | roki-spec-gate Req 3.5, Req 9.1 |
-| Veto decision | The allow/deny returned to the orchestrator | [08-pre-implementation-gate](../fr/08-pre-implementation-gate.md) | roki-spec-gate Req 9.1 |
-| Escalation | On cap exhaustion (`(repo, issue)` / final attempt index / final reason / applied `required_status`) | [08-pre-implementation-gate](../fr/08-pre-implementation-gate.md) | roki-spec-gate Req 4.5, Req 9.4 |
-
-## Events emitted by roki-review-gate
-
-| Event | Summary | Used by | Requirements |
-|---|---|---|---|
-| Gate decision | `(repo, issue)` + correlation identifier (review turn) + attempt counter + decision | [09-pre-pr-gate](../fr/09-pre-pr-gate.md) | roki-review-gate Req 8.5 |
-| Veto / escalation | Failing reason + on escalation (cap exhausted / `fail-missing-spec`) | [09-pre-pr-gate](../fr/09-pre-pr-gate.md) | roki-review-gate Req 8.2, Req 8.5 |
+A's structural validation of `requirements.md` and `review.md` runs inside A's own session ([19-orchestrator-session](../fr/19-orchestrator-session.md) §Artifact validation). Each validation outcome surfaces through the existing `Orchestrator turn` event (the `action` / `phase` / `additional_context` / `reason` fields) plus the `Phase subprocess lifecycle change` event for the producing phase. There are no dedicated gate events because there is no daemon-side gate; the prior `roki-spec-gate` and `roki-review-gate` event tables are removed.
 
 ## Events emitted by the roki-mvp escalation queue
 
