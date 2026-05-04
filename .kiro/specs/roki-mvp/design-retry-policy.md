@@ -12,6 +12,18 @@ refs:
 
 Status: PROPOSAL — needs user sign-off before task 3.7 is opened.
 
+## FR-18+19 Amendment (2026-05-05): Daemon-internal replay
+
+Post-FR-18/19, the retry primitive remains as defined below, but the actor changes from "Worker" to "PhaseSubprocess" and the loop runs **daemon-internal**:
+
+- `phase_nonclean` (renamed from `NonCleanExit`) triggers replay. `stall` and `--max-turns` exhaustion (renamed from `Stalled` / `TurnBudgetExhausted`) still bypass retry and route to `Inactive(stall)` / `Inactive(retry_exhausted)` respectively.
+- The daemon does NOT re-deliver `phase_nonclean` to the orchestrator and does NOT request a fresh `run_phase` nomination during replay. The same `PhaseLaunchContext` (phase, mode, additional_context, worktree_path, max_turns) is re-spawned verbatim.
+- Replays therefore consume **zero** `extension.orchestrator.max_phases` slots. Only the orchestrator's own `run_phase` nominations consume slots.
+- Only on `max_attempts` exhaustion does the daemon emit a single `daemon_directive(retry_exhausted)` to the orchestrator (if alive); the orchestrator emits `action=stop outcome=failure` per [fr:14-operator-notifications](../../../docs/fr/14-operator-notifications.md).
+- State arcs `Active → Backoff → Active` (renamed from `Active → Backoff → Active` in the prior 8-state machine) remain unchanged primitive; the 5-state machine of the post-FR-19 design.md keeps the same arcs.
+
+The §State machine deltas / §Schema delta / §Touch list sections below describe the prior 8-state shape and prior `engine.max_attempts` schema slot. Implementation work folds them into the post-FR-19 5-state shape (`Active`/`Backoff`) and the `extension.phase.<name>.max_attempts` schema slot — identical retry semantics, updated names.
+
 ## Decision matrix
 
 | # | Decision | Options | Recommendation | Why |
