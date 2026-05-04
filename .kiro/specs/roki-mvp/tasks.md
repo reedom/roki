@@ -596,84 +596,84 @@ refs:
 
 - [ ] 13. End-to-end tests
 
-- [ ] 13.1 (P) Write e2e_bootstrap test
+- [x] 13.1 (P) Write e2e_bootstrap test
   - Drive `runtime::run_with_shutdown` end-to-end against a real config, wiremock Linear, `fake_claude` binary, and an HTTP client posting a signed webhook. Assert (a) composition order completes, (b) refusals fire on missing `wt` / `ghq` / `claude`, (c) Linear token + webhook secret resolve and never appear in log output, (d) `--debug` activates the per-issue debug sink, (e) `[judge].model` in config refuses at startup.
   - Observable completion: `cargo test e2e_bootstrap` passes; refusal scenarios assert non-zero exit + actionable error message.
   - _Depends: 10.1, 10.2, 10.3_
   - _Requirements: 1.1, 1.2, 1.3, 1.4, 11.6, 11.7_
   - _Boundary: runtime_
 
-- [ ] 13.2 (P) Write e2e_spec_driven_happy test
+- [x] 13.2 (P) Write e2e_spec_driven_happy test
   - SPEC_DRIVEN end-to-end: orchestrator first turn structurally validates the target spec docs (using `Read` + `Bash` in the read-only sandbox), nominates `implement` (`/kiro-impl <target>`) → `review` → `validate` → `open_pr` → `finalize_review` → orchestrator reads `review.md` and validates → `action=stop outcome=success` → daemon maps to `Inactive(awaiting_linear)`.
   - Observable completion: `cargo test e2e_spec_driven_happy` passes; the resulting transition log shows the documented sequence and final `Inactive(awaiting_linear)`.
   - _Depends: 10.1, 11.6, 11.4_
   - _Requirements: 4.3, 5.6, 5.11_
   - _Boundary: runtime_
 
-- [ ] 13.3 (P) Write e2e_needs_classify_path_b test
+- [x] 13.3 (P) Write e2e_needs_classify_path_b test
   - NEEDS_CLASSIFY Path B end-to-end: `classify` returns `Path B` → `implement` (direct mode, daemon-internal `prompt_template_implement_direct` rendered with the ticket body's numbered acceptance criteria as `additional_context`) → `review` → `validate` → `open_pr` → `finalize_review` → `outcome=success`.
   - Observable completion: `cargo test e2e_needs_classify_path_b` passes; the rendered direct-mode prompt contains the verbatim `additional_context` in the documented section.
   - _Depends: 10.1, 11.6_
   - _Requirements: 4.4, 5.6_
   - _Boundary: runtime_
 
-- [ ] 13.4 (P) Write e2e_needs_classify_path_a test
+- [x] 13.4 (P) Write e2e_needs_classify_path_a test
   - NEEDS_CLASSIFY Path A end-to-end: `classify` returns `Path A` → orchestrator writes Linear comment + label via Linear MCP in the same turn → `action=stop outcome=needs_operator` → daemon maps to `Inactive(needs_operator)`; worktree + session preserved.
   - Observable completion: `cargo test e2e_needs_classify_path_a` passes; the daemon does NOT issue a Linear write itself; the issue's worktree and session tempdir are retained.
   - _Depends: 10.1_
   - _Requirements: 4.4, 4.11, 5.11, 7.2_
   - _Boundary: runtime_
 
-- [ ] 13.5 (P) Write e2e_phase_nonclean_retry test
+- [x] 13.5 (P) Write e2e_phase_nonclean_retry test
   - Drive a phase non-clean exit on `implement`: first → `Active → Backoff → Active`; second non-clean exhausts `max_attempts = 2` → daemon emits `daemon_directive(retry_exhausted)` to the orchestrator → orchestrator emits `action=stop outcome=failure` → daemon maps to `Inactive(retry_exhausted)`.
   - Observable completion: `cargo test e2e_phase_nonclean_retry` passes; replays consume zero `extension.orchestrator.max_phases` slots; backoff between attempts respects the configured curve.
   - _Depends: 10.1, 6.9_
   - _Requirements: 5.10, 12.2_
   - _Boundary: runtime_
 
-- [ ] 13.6 (P) Write e2e_orchestrator_crash test
+- [x] 13.6 (P) Write e2e_orchestrator_crash test
   - Force the orchestrator session to non-zero-exit without `action=stop` → daemon routes to `Inactive(orchestrator_crash)`; assert no Linear write occurs; an escalation-queue entry is present; worktree + session are preserved.
   - Observable completion: `cargo test e2e_orchestrator_crash` passes; the escalation queue snapshot via `OrchestratorRead` contains the entry; the daemon emits no Linear-related side effects.
   - _Depends: 10.1, 8.5_
   - _Requirements: 12.3_
   - _Boundary: runtime_
 
-- [ ] 13.7 (P) Write e2e_orchestrator_unparseable test
+- [x] 13.7 (P) Write e2e_orchestrator_unparseable test
   - Drive two consecutive schema-drift turns (after one daemon-side reprompt) → daemon routes to `Inactive(orchestrator_unparseable)`; raw stdout captured in the log.
   - Observable completion: `cargo test e2e_orchestrator_unparseable` passes; the structured log contains the raw drift payload.
   - _Depends: 10.1, 6.5_
   - _Requirements: 5.4, 12.3_
   - _Boundary: runtime_
 
-- [ ] 13.8 (P) Write e2e_orchestrator_budget_exhausted test
+- [x] 13.8 (P) Write e2e_orchestrator_budget_exhausted test
   - Configure `extension.orchestrator.max_phases = 2`. Drive the orchestrator stub to nominate a third phase → daemon routes to `Inactive(orchestrator_budget_exhausted)`; the additional phase is NOT spawned.
   - Observable completion: `cargo test e2e_orchestrator_budget_exhausted` passes; the assertion on the spawn primitive confirms only two phase subprocesses were created.
   - _Depends: 10.1, 6.5_
   - _Requirements: 5.5, 12.3_
   - _Boundary: runtime_
 
-- [ ] 13.9 (P) Write e2e_assignment_loss test
+- [x] 13.9 (P) Write e2e_assignment_loss test
   - Drive a webhook reporting assignment moved away mid-`implement` → orchestrator + phase terminated → `Cleaning` without retry-budget consumption → allowlist-iteration cleanup removes the worktree (branch == issue id verbatim) → session tempdir removed.
   - Observable completion: `cargo test e2e_assignment_loss` passes; the resulting transition log shows `Active → Cleaning` without entering `Backoff`; the cleaned worktree is gone but the branch is retained.
   - _Depends: 10.1, 8.6_
   - _Requirements: 3.10, 4.9_
   - _Boundary: runtime_
 
-- [ ] 13.10 (P) Write e2e_review_md_validation_retry test
+- [x] 13.10 (P) Write e2e_review_md_validation_retry test
   - `finalize_review` clean exit but the orchestrator's structural validation of `review.md` reports overall `status = fail` → orchestrator re-nominates `implement` with `additional_context` populated from failing per-criterion entries → eventually `review.md` validation passes → `outcome=success`.
   - Observable completion: `cargo test e2e_review_md_validation_retry` passes; the implement re-nomination's rendered envelope contains the failing per-criterion entries verbatim.
   - _Depends: 10.1, 11.4_
   - _Requirements: 4.4, 13.4_
   - _Boundary: runtime_
 
-- [ ] 13.11 (P) Write e2e_multi_repo_rejection test
+- [x] 13.11 (P) Write e2e_multi_repo_rejection test
   - Drive the orchestrator stub to detect a classify Path B context naming two repos OR an out-of-allowlist repo → orchestrator emits `outcome=needs_split` or `outcome=allowlist_rejected` with a Linear comment in the same turn → daemon maps to `Inactive(needs_split)` or `Inactive(allowlist_rejected)`.
   - Observable completion: `cargo test e2e_multi_repo_rejection` passes; the daemon does NOT issue a Linear write itself; the worktree is NOT materialized for an out-of-allowlist repo id.
   - _Depends: 10.1, 5.4_
   - _Requirements: 4.5_
   - _Boundary: runtime_
 
-- [ ] 13.12 (P) Write e2e_recovery test
+- [x] 13.12 (P) Write e2e_recovery test
   - Kill the daemon mid-phase (orchestrator + phase both alive); restart; assert the recovery scan reconciles sessions + worktrees + Linear; the resume-active issue gets a fresh orchestrator with `mode` recomputed from the current Linear label set; orphan paths surface via the escalation queue.
   - Observable completion: `cargo test e2e_recovery` passes; no in-flight orchestrator is persisted across restart; the fresh orchestrator's rendered prompt contains the recomputed `mode`.
   - _Depends: 10.1, 9.2_
