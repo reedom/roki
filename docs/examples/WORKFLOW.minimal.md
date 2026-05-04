@@ -43,7 +43,7 @@ After any extended-thinking block, emit exactly ONE JSON object. The daemon pars
 
     {"action": "admission_decision" | "run_phase" | "linear_update_done" | "stop", ...}
 
-`action=run_phase` requires `phase` ∈ `materialize_spec` / `implement` / `validate` / `open_pr` / `ci_fix` / `finalize_review`.
+`action=run_phase` requires `phase` ∈ `materialize_spec` / `implement` / `review` / `validate` / `open_pr` / `ci_fix` / `finalize_review`.
 `action=admission_decision` requires `judge` ∈ `act` / `noop` / `needs_split` / `allowlist_rejected`; for `act` also include `repo`; for `needs_split` / `allowlist_rejected` also include `rejected_repos` and write the matching Linear label + comment in the same turn.
 `action=stop` requires `outcome` ∈ `success` / `failure` / `cancelled`.
 `action=linear_update_done` requires `linear_writes` listing what you wrote this turn.

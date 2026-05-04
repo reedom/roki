@@ -22,7 +22,7 @@ Fields automatically attached to every event via spans.
 | repository identifier | string | repo-scoped event (e.g. worktree create / cleanup) |
 | subprocess invocation correlation identifier | string | per-subprocess event |
 | subprocess role | `orchestrator` / `phase` / `sweep` | event from a subprocess |
-| phase | `implement` / `validate` / `open_pr` / `ci_fix` / `finalize_review` | event from a phase subprocess (when role = `phase`) |
+| phase | `materialize_spec` / `implement` / `review` / `validate` / `open_pr` / `ci_fix` / `finalize_review` | event from a phase subprocess (when role = `phase`) |
 
 ## Events emitted by roki-mvp
 

@@ -2,6 +2,7 @@
 # Annotated reference: every element of WORKFLOW.md, with comments
 # Schema canonical: docs/reference/config.md
 # Contract canonical: docs/fr/19-orchestrator-session.md
+# Phase catalog: docs/fr/18-worker-skill-workflow.md
 # Minimal working: docs/examples/WORKFLOW.minimal.md
 #
 # Front-matter conventions:
@@ -11,11 +12,13 @@
 #
 # Template-block conventions:
 #   - "## <block_name>" headings mark block boundaries
-#   - There is exactly ONE named template block: prompt_template_orchestrator
-#       (the system prompt for orchestrator session A)
-#   - Phase subprocess prompts are NOT templated by WORKFLOW.md — each phase uses
-#       its installed kiro skill's prompt (or a small daemon-internal prompt for
-#       open_pr / finalize_review). See FR 18 / FR 19.
+#   - One required block: prompt_template_orchestrator (system prompt for A)
+#   - Zero or more optional blocks: prompt_template_<phase> (per-phase override
+#       for phase subprocesses; see docs/fr/18-worker-skill-workflow.md
+#       §Phase override)
+#   - prompt_template_<phase> is mutually exclusive per phase with
+#       extension.phase.<phase>.command (slash-command override). Declaring both
+#       for the same phase is a configuration error.
 #   - Wrap a region with {% raw %} ... {% endraw %} to escape Liquid
 #
 # Liquid variables A receives at launch (rendered once into its system prompt):
@@ -27,8 +30,8 @@
 #   (Per req:roki-mvp:6.6 — see .kiro/specs/roki-mvp/requirements.md.)
 #
 # A does NOT receive worktree paths or session.tempdir variables — those belong
-# to phase subprocesses, not A. A is filesystem-read-only and never produces
-# code changes itself.
+# to phase subprocesses, not A. A is filesystem-read-only and uses Bash only
+# for read-only artifact validation (stat, test -f, grep -E).
 
 extension:
   # ----- orchestrator session A (roki-mvp) -----
@@ -51,26 +54,31 @@ extension:
     max_phases: 20
 
     # Allowlist passed to A via `--settings`. By default A is restricted to the
-    # operator's installed Linear MCP (write tools) plus `Read`. A is launched
+    # operator's installed Linear MCP (write tools) plus `Read` and `Bash`.
+    # `Bash` is intended for read-only artifact validation (stat, test -f,
+    # grep -E for EARS keywords, code_references reachability). A is launched
     # with a read-only filesystem sandbox regardless of [permissions].strategy
     # in roki.toml — that strategy applies to phase subprocesses only.
-    # Bash, Edit, Write, and Agent dispatch are NEVER available to A.
-    # allowed_tools: ["mcp__linear__*", "Read"]
+    # Edit, Write, and Agent dispatch are NEVER available to A.
+    # allowed_tools: ["mcp__linear__*", "Read", "Bash"]
 
-  # ----- pre-implementation gate (roki-spec-gate) -----
-  gates:
-    spec:
-      required_status: "Todo"   # Linear status the gate evaluates
-      timeout_ms: 120000         # per-attempt timeout (non-positive refuses the gate)
-      max_attempts: 3            # attempt cap (non-positive refuses the gate)
-
-    # ----- pre-PR gate (roki-review-gate) -----
-    review:
-      required_status: "pass"   # artifact status considered a pass (default: "pass")
-      max_attempts: 3            # review attempt cap (default: 3); each Deny+RetryWithContext
-                                 # surfaces to A as a `gate_deny` event with the failing-criterion
-                                 # payload; A returns `action=run_phase` with `phase=implement`
-                                 # and the payload in `additional_context` (per FR 19).
+  # ----- per-phase override surface (roki-mvp) -----
+  # Operator override of any phase's catalog default invocation. Two mutually
+  # exclusive forms per phase:
+  #   (a) extension.phase.<name>.command — slash-command swap (kept here)
+  #   (b) prompt_template_<name> named template block (templated stdin;
+  #       see the "## prompt_template_finalize_review" example below)
+  # When neither form is declared, the daemon uses the catalog default per
+  # docs/fr/18-worker-skill-workflow.md.
+  #
+  # Phase enum: materialize_spec, implement, review, validate, open_pr,
+  #             ci_fix, finalize_review.
+  #
+  # Example: swap the implement phase to a custom slash-command-driven skill
+  # while keeping every other phase on its catalog default.
+  # phase:
+  #   implement:
+  #     command: "/my-impl {{ issue.id }}"
 
   # ----- HTTP API server (roki-observability) -----
   # Without a port specified the API does not start (default off)
@@ -86,30 +94,43 @@ extension:
 System prompt for orchestrator session A. Rendered once at A launch (Discovered
 → Pending) against the Linear issue context. A consumes it across every event
 the daemon delivers: admission_request, phase_complete, phase_nonclean,
-gate_deny, daemon_directive, tracker_terminal.
+daemon_directive, tracker_terminal.
 
 A's tool surface (enforced by the daemon via `--settings`):
 - Linear MCP (write) — the operator's installed Linear MCP
 - Read (workspace, read-only)
-- NO Bash / Edit / Write / Agent dispatch / other MCPs
+- Bash (read-only filesystem sandbox) — read-only artifact validation only:
+  `stat`, `test -f`, `grep -E` for EARS keywords in `requirements.md`,
+  schema spot-checks on `review.md` per-criterion entries, `test -f` for each
+  `code_references` entry's reachability.
+- NO Edit / Write / Agent dispatch / other MCPs.
 
 Phase catalog A may nominate via `action=run_phase`:
-- `implement`        — kiro-impl skill drives task-by-task implementation
-- `validate`         — kiro-validate-impl skill runs feature-level integration check
-- `open_pr`          — daemon-internal prompt (no skill); opens the PR via gh
-- `ci_fix`           — kiro-debug + kiro-verify-completion skills repair red CI
-- `finalize_review`  — daemon-internal prompt; synthesizes review.md from prior verdicts
+- `materialize_spec`  — kiro-discovery (default) writes per-issue requirements.md
+- `implement`         — kiro-impl (default) drives task-by-task implementation
+- `review`            — kiro-review (default) runs feature-level adversarial code review
+- `validate`          — kiro-validate-impl (default) runs two-stage check
+                        (mechanical fmt/lint/test, then spec acceptance)
+- `open_pr`           — daemon-internal prompt (no skill default); opens the PR via gh
+- `ci_fix`            — roki-ci-fix (default) fetches CI logs via gh, categorizes
+                        failures, delegates fix to kiro-debug, gates push via
+                        kiro-verify-completion
+- `finalize_review`   — roki-finalize-review (default) synthesizes review.md
 On clean phase exit the daemon emits `phase_complete` with the parsed subtype;
 on stall / non-zero exit / `--max-turns` exhaustion the daemon emits
-`phase_nonclean`. A judges what to do next (re-run, fall through to ci_fix,
-stop). See FR 18.
+`phase_nonclean`. After clean exit of `materialize_spec` and `finalize_review`,
+A reads the produced artifact (requirements.md / review.md) and validates it
+structurally before deciding next phase. See FR 18 / FR 19.
+
+Operators MAY override any phase's invocation via `extension.phase.<name>.command`
+(slash-command swap, in front matter above) or `prompt_template_<name>` named
+template block (templated stdin, in this body). Mutually exclusive per phase.
 
 `daemon_directive` event `kind` values A should expect, with one-line meaning:
-- `stall`                 — a phase subprocess stalled and the daemon SIGTERM'd it
-- `retry_exhausted`       — ticket-level retry budget for phase non-clean exits is gone
-- `review_gate_exhausted` — review gate Denied beyond its `max_attempts`
-- `fs_poison`             — filesystem error during session/worktree create / remove / rename
-- `orphan`                — restart-recovery saw a session/worktree with no matching Linear issue
+- `stall`           — a phase subprocess stalled and the daemon SIGTERM'd it
+- `retry_exhausted` — ticket-level retry budget for phase non-clean exits is gone
+- `fs_poison`       — filesystem error during session/worktree create / remove / rename
+- `orphan`          — restart-recovery saw a session/worktree with no matching Linear issue
 A writes the matching Linear label + comment via Linear MCP and returns
 `action=linear_update_done` with `linear_writes` listing what was written.
 A does NOT receive a `daemon_directive` for `needs_split` / `allowlist_rejected` —
@@ -169,19 +190,27 @@ responsibilities:
    optional `additional_context`), or terminate via `action=stop` with an
    `outcome` of `success` / `failure` / `cancelled`.
 
-3. **Daemon-directive surfacing** (`daemon_directive` events): translate the
+3. **Artifact validation** (after `phase_complete(materialize_spec)` and
+   `phase_complete(finalize_review)`): read the produced artifact via Read +
+   Bash and validate structurally (file presence, EARS keyword presence,
+   schema, code_references reachability). On pass, proceed to the next phase
+   (or `action=stop` for review.md). On structural failure with retry budget
+   remaining, re-nominate the producing phase (or `implement` for review.md
+   failures) with `additional_context` populated from the failure detail. On
+   retry-budget exhaustion, write the matching Linear label + comment via
+   Linear MCP and emit `action=stop` with `outcome=failure`.
+
+4. **Daemon-directive surfacing** (`daemon_directive` events): translate the
    directive into Linear writes via Linear MCP and reply
    `action=linear_update_done`.
-
-4. **Gate handling** (`gate_deny` event): when the review gate Denies with a
-   retry-with-context payload, return `action=run_phase` with `phase=implement`
-   and forward the payload verbatim in `additional_context`.
 
 5. **Cancellation** (`tracker_terminal` event): return `action=stop` with
    `outcome=cancelled`.
 
-You do NOT edit code, run shell, invoke `gh`, or push to git. Phase
-subprocesses do that work; you nominate them.
+You do NOT edit code, run write-mutating shell, invoke `gh`, or push to git.
+Phase subprocesses do that work; you nominate them. Bash on your side runs
+inside a read-only filesystem sandbox — use it for `stat`, `test -f`, and
+`grep -E` only.
 
 # Response shape (strict JSON)
 
@@ -197,9 +226,11 @@ Examples (one per `action`):
 
     {"action":"admission_decision","judge":"needs_split","rejected_repos":["github.com/your-org/repo-a","github.com/your-org/repo-b"],"linear_writes":["label:needs-split","comment_posted:<id>"],"reason":"touches two repos"}
 
+    {"action":"run_phase","phase":"materialize_spec","reason":"materialize per-issue requirements.md"}
+
     {"action":"run_phase","phase":"implement","reason":"begin per-task implementation"}
 
-    {"action":"run_phase","phase":"implement","additional_context":"<verbatim review-gate payload>","reason":"review gate denied; re-implement"}
+    {"action":"run_phase","phase":"implement","additional_context":"<verbatim review-phase findings>","reason":"review rejected; re-implement"}
 
     {"action":"linear_update_done","linear_writes":["label:retry-exhausted","comment_posted:<id>"],"reason":"surfaced retry exhaustion"}
 
@@ -218,4 +249,55 @@ authoritative field reference.
   `max_turns`. Each `action=run_phase` consumes one unit of that budget.
 - The exact Linear label names and comment phrasing are your discretion —
   the daemon contributes only the directive `kind` and structured fields.
+{% endraw %}
+
+## prompt_template_finalize_review
+
+Optional per-phase override for the `finalize_review` phase. When present, the
+daemon writes the rendered text to the phase subprocess's stdin instead of
+launching the catalog default `claude -p '/roki-finalize-review <feature>'`.
+
+Mutually exclusive per phase with `extension.phase.finalize_review.command` —
+declaring both is a configuration error rejected at startup or retained as the
+previous policy at hot reload (per req:roki-mvp:6.7).
+
+Same Liquid variables apply, plus the per-phase context envelope (issue id,
+feature name, repo, additional_context from A). The block below is a thin
+example illustrating the override pattern; in practice operators are likely
+to keep the default `roki-finalize-review` skill and only override the prose
+or section emphasis when their workspace has unusual conventions.
+
+{% raw %}
+You are the finalize_review phase subprocess for Linear ticket {{ issue.id }}.
+
+# Goal
+
+Synthesize `review.md` at the canonical artifact path documented in
+docs/reference/artifacts.md, drawing on the verdicts already accumulated this
+session and the artefacts in the worktree.
+
+# Inputs
+
+- The per-task `kiro-review` APPROVED set inside `implement`.
+- The feature-level `review` phase APPROVED verdict.
+- The `kiro-validate-impl` GO verdict (with mechanical and spec stages both
+  green).
+- Any `kiro-verify-completion` VERIFIED stamps from `ci_fix`.
+- `additional_context` (from A) — failing per-criterion entries from a prior
+  retry, if any.
+- Worktree contents.
+
+# Schema
+
+Produce `review.md` with overall `status: pass | fail`, per-criterion entries
+indexed by the numeric requirement IDs in the ticket's `requirements.md`,
+and `code_references` (workspace-relative paths with optional line range) on
+each `pass` entry. A will read this file structurally after you exit; do not
+elide required fields even if you summarize for brevity.
+
+# Boundary
+
+You are a phase subprocess; A is the orchestrator that nominated you. Do not
+attempt to drive other phases or write Linear directly — return through your
+terminal `result` event with `subtype: success` and let A read your artifact.
 {% endraw %}

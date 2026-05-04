@@ -57,7 +57,7 @@ After any extended-thinking block, A emits exactly one JSON object per turn on s
 ```json
 {
   "action": "admission_decision" | "run_phase" | "linear_update_done" | "stop",
-  "phase": "implement" | "validate" | "open_pr" | "ci_fix" | "finalize_review" | null,
+  "phase": "materialize_spec" | "implement" | "review" | "validate" | "open_pr" | "ci_fix" | "finalize_review" | null,
   "judge": "act" | "noop" | "needs_split" | "allowlist_rejected" | null,
   "repo": "<ghq-id>" | null,
   "rejected_repos": ["<ghq>", ...] | null,

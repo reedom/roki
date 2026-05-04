@@ -19,13 +19,14 @@ Let downstream specs (currently observability) read / nudge / inject context / n
 
 ## User-visible Behavior
 
-### Four kinds of surface
+### Five kinds of surface
 
 | Kind | Role |
 |---|---|
 | **Read** (`OrchestratorRead` trait) | Read-only snapshot of per-issue state + single-issue lookup + escalation queue |
 | **Nudge** (`TrackerRefresh` trait) | Request a poll while respecting the cadence cap and 429 backoff |
 | **Inject** (engine adapter `additional_context`) | Inject machine-extractable additional context into the phase subprocess's prompt envelope (A populates this on `action=run_phase` directives, including the artifact-validation retry path) |
+| **Phase override** (`extension.phase.<name>.command` / `prompt_template_<phase>` block) | Per-phase swap of the catalog default skill (slash-command override) or full prompt (templated stdin); mutually exclusive forms ([FR 18 §Phase override](18-worker-skill-workflow.md)) |
 | **Namespaced config** (`WORKFLOW.md` reserved namespaces) | Each downstream spec gets its own configuration keys |
 
 The exact signatures of each surface, the invariants that must not be bypassed, and the FR pages that consume them live in the table in [`docs/reference/extension-surface.md`](../reference/extension-surface.md).
