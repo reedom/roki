@@ -52,7 +52,7 @@ refs:
 
 - [ ] 2. Core domain types
 
-- [ ] 2.1 (P) Define WorkerState, InactiveReason, Mode enums and transition table
+- [x] 2.1 (P) Define WorkerState, InactiveReason, Mode enums and transition table
   - Define `WorkerState { Pending, Active, Backoff, Inactive(InactiveReason), Cleaning }`.
   - Define `InactiveReason` with the 12 documented values: `AwaitingLinear`, `NeedsOperator`, `SpecIncomplete`, `NeedsSplit`, `AllowlistRejected`, `OrchestratorCrash`, `OrchestratorUnparseable`, `OrchestratorBudgetExhausted`, `Stall`, `RetryExhausted`, `FsPoison`, `Orphan`.
   - Define `Mode { SpecDriven, NeedsClassify }`.
@@ -62,7 +62,7 @@ refs:
   - _Requirements: 2.6, 8.1, 8.2, 13.2_
   - _Boundary: orchestrator/state_
 
-- [ ] 2.2 (P) Define NormalizedIssue and Linear domain types
+- [x] 2.2 (P) Define NormalizedIssue and Linear domain types
   - Define `IssueId`, `LinearStateName`, `LinearLabel`, `LinearUserId`, `RepoId` newtypes.
   - Define `NormalizedIssue { issue, title, body, current_linear_state, labels: BTreeSet<LinearLabel>, assignee: Option<LinearUserId> }`.
   - Recognize fixed labels `roki:ready` and `roki:impl` as constants (not operator-configurable).
@@ -70,7 +70,7 @@ refs:
   - _Requirements: 3.5_
   - _Boundary: tracker/model_
 
-- [ ] 2.3 (P) Define OrchestratorAction schema and supporting types
+- [x] 2.3 (P) Define OrchestratorAction schema and supporting types
   - Define `OrchestratorAction { action: ActionKind, phase: Option<PhaseName>, additional_context: Option<String>, outcome: Option<Outcome>, linear_writes: Option<Vec<LinearWriteAck>>, reason: BoundedString200 }`.
   - Define `ActionKind { RunPhase, LinearUpdateDone, Stop }`.
   - Define `Outcome { Success, Failure, Cancelled, NeedsOperator, SpecIncomplete, NeedsSplit, AllowlistRejected }`.
@@ -80,7 +80,7 @@ refs:
   - _Requirements: 4.2, 5.2, 5.11_
   - _Boundary: engine/orchestrator_session/action_parser_
 
-- [ ] 2.4 (P) Define daemon → orchestrator event catalog payloads
+- [x] 2.4 (P) Define daemon → orchestrator event catalog payloads
   - Define `DaemonEvent { PhaseComplete(payload), PhaseNonclean(payload), DaemonDirective(payload), TrackerTerminal(payload) }`.
   - `PhaseComplete` payload: `phase`, `result`, optional `pr_url` (`open_pr`), optional `review_artifact_path` (`finalize_review`), optional `classify.path` / `classify.suggested_command` / `classify.suggested_label` / `classify.target_feature` (`classify`).
   - `PhaseNonclean` payload: `phase`, `classification` (`non_zero` / `signal` / `stall` / `max_turns_exhausted` / `non_success_subtype` / `unknown_subtype`), `raw_subtype?`, `additional_context`.
@@ -91,7 +91,7 @@ refs:
   - _Requirements: 4.2, 5.2, 12.5, 12.6_
   - _Boundary: engine/orchestrator_session_
 
-- [ ] 2.5 (P) Define PhaseName, PhaseLaunchContext, PhaseCatalog static lookup
+- [x] 2.5 (P) Define PhaseName, PhaseLaunchContext, PhaseCatalog static lookup
   - Define `PhaseName { Classify, Implement, Review, Validate, OpenPr, CiFix, FinalizeReview }`.
   - Define `PhaseLaunchContext { issue, phase, mode, additional_context: Option<String>, worktree_path: Option<PathBuf>, session_tempdir, max_turns, workflow_policy, permission_strategy, allowed_tools }`.
   - Define `PhaseCatalogEntry { invocation: PhaseInvocation, default_max_turns: u32 }` and `PhaseInvocation { SlashCommand { skill, arg_template }, DaemonInternalTemplate { template_name } }`.
