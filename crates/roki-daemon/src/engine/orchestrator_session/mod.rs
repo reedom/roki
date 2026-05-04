@@ -6,4 +6,6 @@
 //! Interfaces" OrchestratorSessionAdapter section.
 
 pub mod action_parser;
+pub mod adapter;
+pub mod budget;
 pub mod events;

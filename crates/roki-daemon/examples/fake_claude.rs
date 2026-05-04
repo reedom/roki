@@ -1,0 +1,94 @@
+//! Test harness binary stubbing the `claude` CLI surface used by the
+//! orchestrator-session adapter (and, in the future, the phase subprocess
+//! adapter).
+//!
+//! Mode selection is driven by a `.fake_claude_mode` file in CWD. The
+//! adapter sets CWD to the per-session tempdir so each test can write a
+//! distinct mode without colliding with concurrent tests.
+//!
+//! The harness deliberately ignores `--settings` / `--input-format` /
+//! `--output-format` flags; it only models the behaviors the adapter tests
+//! need. Stdout is line-buffered via explicit flushes so the parser
+//! observes turn boundaries on the fast path.
+
+use std::io::{BufRead, BufReader, Read, Write};
+
+fn main() {
+    let mode = std::fs::read_to_string(".fake_claude_mode")
+        .map(|s| s.trim().to_owned())
+        .unwrap_or_default();
+
+    // The adapter writes the system prompt as the first stdin line — read
+    // it so the test can assert delivery via the marker the harness echoes
+    // back into its first action's `reason` field.
+    let stdin = std::io::stdin();
+    let mut reader = BufReader::new(stdin.lock());
+    let mut first_line = String::new();
+    let _ = reader.read_line(&mut first_line);
+    let prompt_marker = extract_system_prompt_marker(&first_line);
+
+    match mode.as_str() {
+        "single_action" => {
+            emit_run_phase("implement", &prompt_marker);
+            // Drain stdin so EOF on the parent's drop unblocks `read_line`.
+            drain_stdin(&mut reader);
+        }
+        "echo_phase_complete" => {
+            emit_run_phase("implement", &prompt_marker);
+            // Wait for one event line on stdin, then emit a follow-up.
+            let mut event_line = String::new();
+            let _ = reader.read_line(&mut event_line);
+            emit_run_phase("open_pr", "after_phase_complete");
+            drain_stdin(&mut reader);
+        }
+        "wait_for_stdin_close" => {
+            // No stdout; just wait for stdin to close (parent shutdown).
+            drain_stdin(&mut reader);
+        }
+        "stderr_then_action" => {
+            eprintln!("ROKI-STDERR-MARKER: warning from fake_claude");
+            let _ = std::io::stderr().flush();
+            emit_run_phase("implement", &prompt_marker);
+            drain_stdin(&mut reader);
+        }
+        _ => {
+            eprintln!("fake_claude: unknown mode `{mode}`");
+            std::process::exit(2);
+        }
+    }
+}
+
+fn emit_run_phase(phase: &str, reason_extra: &str) {
+    let stdout = std::io::stdout();
+    let mut out = stdout.lock();
+    let payload = serde_json::json!({
+        "action": "run_phase",
+        "phase": phase,
+        "reason": format!("nominate {phase} {reason_extra}"),
+    });
+    let _ = writeln!(out, "{payload}");
+    let _ = out.flush();
+}
+
+/// Pull the marker text out of the system-prompt envelope so it round-trips
+/// into the harness's first action and the test can assert delivery.
+fn extract_system_prompt_marker(first_line: &str) -> String {
+    let trimmed = first_line.trim();
+    if trimmed.is_empty() {
+        return "<no-prompt>".to_owned();
+    }
+    let value: serde_json::Value = match serde_json::from_str(trimmed) {
+        Ok(v) => v,
+        Err(_) => return "<unparseable-prompt>".to_owned(),
+    };
+    value
+        .get("system_prompt")
+        .and_then(|v| v.as_str())
+        .unwrap_or("<missing-system-prompt-field>")
+        .to_owned()
+}
+
+fn drain_stdin<R: Read>(reader: &mut R) {
+    let mut sink = Vec::new();
+    let _ = reader.read_to_end(&mut sink);
+}

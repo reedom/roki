@@ -264,7 +264,7 @@ refs:
   - _Requirements: 4.7, 5.2, 5.4_
   - _Boundary: engine/orchestrator_session/action_parser_
 
-- [ ] 6.4 Implement OrchestratorSessionAdapter launch and bidirectional I/O
+- [x] 6.4 Implement OrchestratorSessionAdapter launch and bidirectional I/O
   - Launch one `claude --input-format stream-json --output-format stream-json` per ticket on entry to `Pending`; CWD = the per-issue session tempdir; `--settings` enforces `extension.orchestrator.allowed_tools`; filesystem sandbox pinned read-only and elicitations rejected regardless of operator overrides.
   - Render `prompt_template_orchestrator` with the per-ticket render context (issue / title / body / labels / `mode` / bucketed state) via the workflow renderer; deliver the rendered output as the system prompt input.
   - Write daemon → orchestrator JSON events to stdin (`phase_complete`, `phase_nonclean`, `daemon_directive`, `tracker_terminal`); each event is one JSON object on its own line; events are written only between phases except for `tracker_terminal` which preempts.
@@ -276,7 +276,7 @@ refs:
   - _Requirements: 4.1, 4.2, 5.1, 5.2, 6.6, 9.6, 11.5, 11.8_
   - _Boundary: engine/orchestrator_session_
 
-- [ ] 6.5 Implement orchestrator session budget + stall + drift routing
+- [x] 6.5 Implement orchestrator session budget + stall + drift routing
   - Enforce `extension.orchestrator.max_phases` (default `15`): each `OrchestratorAction { action=run_phase }` consumes one slot; on exhaustion, emit a routing signal that the orchestrator core maps to `Inactive(orchestrator_budget_exhausted)` and refuses to spawn the additional phase. Daemon-internal phase replay (Task 6.10) consumes zero slots.
   - Detect orchestrator stall via `extension.orchestrator.stall_seconds` (default `600`): no stdout for that many seconds → SIGTERM the orchestrator and route to `Inactive(orchestrator_crash)`; no Linear-side notification on the daemon's behalf.
   - On a non-zero exit / SIGSEGV / non-zero exit without `action=stop`, route to `Inactive(orchestrator_crash)`. On second consecutive schema drift (after one daemon-side reprompt), route to `Inactive(orchestrator_unparseable)` with raw stdout captured in the structured log.
