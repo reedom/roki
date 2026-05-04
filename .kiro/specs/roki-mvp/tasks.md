@@ -197,7 +197,7 @@ refs:
 
 - [ ] 5. Session and worktree managers; daemon-internal external CLIs
 
-- [ ] 5.1 Implement SessionManager (per-issue tempdir lifecycle)
+- [x] 5.1 Implement SessionManager (per-issue tempdir lifecycle)
   - Create per-issue session tempdir under platform user cache root (`~/Library/Caches/roki/sessions/<issue>` macOS / `~/.cache/roki/sessions/<issue>` Linux) on entry to `Pending`; idempotent on subsequent verification.
   - Use the session tempdir as the orchestrator session's CWD.
   - Remove the session tempdir on `Cleaning` after worktree cleanup completes.
@@ -207,7 +207,7 @@ refs:
   - _Requirements: 4.6, 4.8, 4.11, 10.5_
   - _Boundary: session_
 
-- [ ] 5.2 (P) Implement WtTool trait and RealWt shellout
+- [x] 5.2 (P) Implement WtTool trait and RealWt shellout
   - Define `WtTool` trait: `switch_create(repo_path, branch) -> PathBuf` (computes sibling worktree path `{repo_path}/../{repo_name}.{branch}`), `list(repo_path) -> Vec<WorktreeEntry>` (or `git worktree list --porcelain` fallback), `remove(worktree_path)`.
   - Branch sanitization: characters outside `[A-Za-z0-9_-]` mapped to `-`.
   - Daemon-internal only — never reachable from inside any agent subprocess.
@@ -215,14 +215,14 @@ refs:
   - _Requirements: 4.6_
   - _Boundary: exec/wt_
 
-- [ ] 5.3 (P) Implement GhqTool trait and RealGhq shellout
+- [x] 5.3 (P) Implement GhqTool trait and RealGhq shellout
   - Define `GhqTool` trait: `list_path(ghq_id) -> Option<PathBuf>` (`ghq list -p` lookup), `ensure_cloned(ghq_id) -> PathBuf` (lookup-or-clone via `ghq get`).
   - Daemon-internal only — never reachable from inside any agent subprocess.
   - Observable completion: unit test asserts `list_path` returns `Some(_)` for a present repo and `None` for a missing one; integration test executes against a fixture ghq root and asserts `ensure_cloned` returns a usable path on the second call without re-cloning.
   - _Requirements: 4.6, 10.1_
   - _Boundary: exec/ghq_
 
-- [ ] 5.4 Implement WorktreeManager idempotent ensure + cleanup via allowlist iteration
+- [x] 5.4 Implement WorktreeManager idempotent ensure + cleanup via allowlist iteration
   - Implement `WorktreeManager::ensure(issue, repo_id) -> PathBuf`: on first invocation, validate `repo_id` against `[[repos]]` allowlist, run `ghq list -p` to resolve the repo's local checkout, and run `wt switch-create <issue>` to create the sibling-pathed worktree on the issue-id branch; on subsequent invocations for the same issue, verify the worktree's continued presence via `wt list` (or fallback) and short-circuit without re-invoking `wt switch-create`.
   - On `Cleaning` entry, iterate the `[[repos]]` allowlist + `wt list` filtered by branch == issue id verbatim, and `wt remove` every match. Branches are not deleted.
   - On orchestrator-emitted repo identifiers that are out of allowlist or imply multi-repo touch, return a typed error so the orchestrator's outcome (`needs_split` or `allowlist_rejected`) maps to the matching `Inactive.reason`.
@@ -232,7 +232,7 @@ refs:
   - _Requirements: 4.5, 4.6, 4.9, 10.1, 10.2_
   - _Boundary: worktree_manager_
 
-- [ ] 5.5 Implement path sanitization + collision invariants
+- [x] 5.5 Implement path sanitization + collision invariants
   - Provide a shared sanitizer that rejects paths that, after normalization, escape the expected root, contain `..` segments, are absolute when relative was expected, or sanitize-collide with another active issue's session / worktree.
   - Used by `SessionManager` and `WorktreeManager`.
   - Observable completion: unit test rejects a curated set of crafted identifiers (path traversal, absolute paths, identifiers colliding after sanitization) and accepts canonical valid identifiers.
@@ -333,14 +333,14 @@ refs:
 
 - [ ] 7. Permissions
 
-- [ ] 7.1 Implement phase-subprocess permission strategy resolver
+- [x] 7.1 Implement phase-subprocess permission strategy resolver
   - Default: `workspace-write` sandbox + rejected elicitations. Operator may override sandbox + elicitation policy via `WORKFLOW.md`.
   - Strategies: `--settings` allowlist (default; built from configuration) or `--dangerously-skip-permissions` (CLI flag / config opt-in fallback). On selection of the fallback, log the elevated-permission decision per phase launch.
   - Observable completion: unit test asserts (a) default strategy passes `workspace-write` + reject elicitations to the spawn primitive, (b) `--settings` strategy passes the configured allowlist via the documented mechanism, (c) `--dangerously-skip-permissions` strategy passes the flag and logs a per-launch warn entry.
   - _Requirements: 9.1, 9.2, 9.3, 9.4_
   - _Boundary: permissions_
 
-- [ ] 7.2 Pin orchestrator session permissions (read-only filesystem + reject elicitations)
+- [x] 7.2 Pin orchestrator session permissions (read-only filesystem + reject elicitations)
   - Pin the orchestrator session to a read-only filesystem sandbox + rejected elicitations regardless of operator overrides.
   - Build `--settings` enforcing `extension.orchestrator.allowed_tools` (default: Linear MCP write + `Read` + `Bash`); the read-only sandbox prevents `Bash` mutations.
   - The `--dangerously-skip-permissions` fallback does NOT apply to the orchestrator session.
@@ -348,7 +348,7 @@ refs:
   - _Requirements: 9.6_
   - _Boundary: permissions_
 
-- [ ] 7.3 Pin classify-phase tool surface and refuse missing strategy
+- [x] 7.3 Pin classify-phase tool surface and refuse missing strategy
   - For the `classify` phase specifically, intersect the phase-subprocess `allowed_tools` to `Read + Glob + Grep` only per [fr:11-agent-tool-boundary](../../../docs/fr/11-agent-tool-boundary.md), regardless of the operator's broader phase-subprocess sandbox.
   - Refuse to start when neither phase-subprocess permission strategy is configured (`--settings` allowlist or `--dangerously-skip-permissions` fallback); report the missing configuration with an actionable message.
   - Observable completion: unit test asserts (a) classify launch context's `allowed_tools` is `{Read, Glob, Grep}` even when broader sandbox is permissive, (b) startup refuses with the documented message when the strategy is absent.

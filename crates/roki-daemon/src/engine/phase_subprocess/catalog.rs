@@ -37,10 +37,11 @@ pub enum PhaseName {
 /// it spawned with for its lifetime per Req 6.3).
 pub type WorkflowPolicyHandle = Arc<WorkflowPolicy>;
 
-/// Stub for the resolved permission strategy (`--settings` vs
-/// `--dangerously-skip-permissions`). Real type lands in tasks 7.x.
-#[derive(Debug, Clone, Default)]
-pub struct PermissionStrategy;
+/// Resolved permission strategy (`--settings` vs
+/// `--dangerously-skip-permissions`). Canonical home is
+/// [`crate::permissions::PermissionStrategy`]; re-exported here so existing
+/// `PhaseLaunchContext` consumers keep their import path.
+pub use crate::permissions::PermissionStrategy;
 
 /// Captured at the point the orchestrator nominates a phase. Carries every
 /// piece of context the phase subprocess needs to spawn.

@@ -7,8 +7,12 @@
 pub mod cli;
 pub mod config;
 pub mod engine;
+pub mod exec;
 pub mod logging;
 pub mod orchestrator;
+pub mod permissions;
+pub mod session;
 pub mod shutdown;
 pub mod tracker;
 pub mod workflow;
+pub mod worktree_manager;
