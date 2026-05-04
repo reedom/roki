@@ -30,9 +30,13 @@ Validation is performed by the orchestrator session (`Read` + `Bash` `grep -E`) 
 | Field | Type / range | Meaning |
 |---|---|---|
 | Overall status | `pass` or `fail` | Verdict for the whole review |
-| Per-criterion entries | array | One entry for each numeric requirement ID in `requirements.md` |
+| Per-criterion entries | array | One entry for each criterion ID in the active criteria source (SPEC_DRIVEN: numeric requirement IDs in `requirements.md`; direct mode: numbered EARS sentences in the ticket body's `## Acceptance Criteria`) |
 | `status` of each per-criterion entry | `pass` or `fail` | Verdict for the individual criterion |
 | `code_references` of each per-criterion entry (only when status=`pass`) | One or more workspace-relative file paths (optional line range) | The code positions that justify a `pass` (must be on-disk reachable at validation time) |
+| `failure_detail.category` of each per-criterion entry (only when status=`fail`) | `missing` / `regression` / `partial` / `drift` | Per-criterion failure taxonomy emitted by the producing skill (`roki-finalize-review`). Advisory: the orchestrator's structural validation does not cross-check this field, but the skill MUST emit one of the four values when the per-criterion `status` is `fail` so the artifact is parseable downstream |
+| `failure_detail.diagnostic` of each per-criterion entry (only when status=`fail`) | Free text | Short human-readable failure description; not interpreted by the orchestrator |
+| Frontmatter `criteria_source` (optional) | `spec_driven` / `direct` | Records the active mode at synthesis time. Advisory; not validated structurally |
+| Frontmatter `target` (optional) | Feature name (SPEC_DRIVEN) or issue ID (direct mode) | Records what the artifact is reviewing. Advisory; not validated structurally |
 
 Validation is performed by the orchestrator session (`Read` + `Bash` `test -f` for reachability) after the `finalize_review` phase clean-exits, per [fr:19-orchestrator-session §Artifact validation](../fr/19-orchestrator-session.md). The orchestrator's structural failure categories (used to populate `additional_context` on the retry path):
 
