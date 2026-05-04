@@ -16,7 +16,7 @@ refs:
 
 # FR 13: Observability Logs
 
-> A single structured logging pipeline shared by the daemon, every gate, and every `claude` subprocess (orchestrator session A and phase subprocesses). Includes per-issue debug capture, surfacing of subprocess stderr, and secret redaction.
+> A single structured logging pipeline shared by the daemon, every gate, and every `claude` subprocess (orchestrator session and phase subprocesses). Includes per-issue debug capture, surfacing of subprocess stderr, and secret redaction.
 > See [`docs/reference/log-events.md`](../reference/log-events.md) for the full event list and the common context fields.
 
 ## Purpose
@@ -39,7 +39,7 @@ Even in stages without a dedicated UI, an operator must be able to diagnose the 
 The **exact list** of events emitted by each spec lives in [`docs/reference/log-events.md`](../reference/log-events.md).
 Here we only outline the conceptual categories:
 
-- **roki-mvp**: orchestrator-session lifecycle (start / stop / turn / schema drift), phase subprocess lifecycle changes (including `Inactive(reason=...)` transitions covering the three orchestrator-dead reasons `orchestrator_crash` / `orchestrator_unparseable` / `orchestrator_budget_exhausted`), session/worktree operations, Linear poll/webhook, backoff/stall decisions, retry attempts, state-machine transitions, A's `daemon_directive` Linear-write outcomes, escalation queue updates, subprocess stderr lines. A's artifact-validation outcomes (after `materialize_spec` / `finalize_review` clean exit) surface through the existing `Orchestrator turn` event (`action` / `phase` / `additional_context` / `reason`).
+- **roki-mvp**: orchestrator-session lifecycle (start / stop / turn / schema drift), phase subprocess lifecycle changes (including `Inactive(reason=...)` transitions covering the three orchestrator-dead reasons `orchestrator_crash` / `orchestrator_unparseable` / `orchestrator_budget_exhausted`), session/worktree operations, Linear poll/webhook, backoff/stall decisions, retry attempts, state-machine transitions, the orchestrator's `daemon_directive` Linear-write outcomes, escalation queue updates, subprocess stderr lines. The orchestrator's artifact-validation outcomes (after `materialize_spec` / `finalize_review` clean exit) surface through the existing `Orchestrator turn` event (`action` / `phase` / `additional_context` / `reason`).
 - **HTTP API** ([15](15-http-api.md)): per-request event (method/path/status/duration/correlation), refresh request.
 
 ### Surfacing subprocess stderr
@@ -51,7 +51,7 @@ Here we only outline the conceptual categories:
 ### Per-issue debug capture (opt-in)
 
 - Enabled by the `--debug` CLI flag (canonical reference: [01-daemon-lifecycle](01-daemon-lifecycle.md)) or a config block.
-- When enabled, every line of stdout/stderr from each `claude` subprocess (orchestrator session A and every phase subprocess) is appended to a per-issue file (under the debug-log directory; the file name is e.g. `<issue>.log`).
+- When enabled, every line of stdout/stderr from each `claude` subprocess (orchestrator session and every phase subprocess) is appended to a per-issue file (under the debug-log directory; the file name is e.g. `<issue>.log`).
 - Each line is tagged with an **RFC 3339 nanosecond timestamp + stream tag** (stdout/stderr) plus subprocess role.
 - On write failure, log the offending path at warn severity and continue without stopping the subprocess.
 

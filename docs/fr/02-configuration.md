@@ -48,13 +48,13 @@ The exact name, default, and validation rule for each key live in the "roki.toml
 A single per-workspace file. It consists of front matter (YAML or TOML) and template blocks, and contains:
 
 - **Named template blocks**:
-  - `prompt_template_orchestrator` (required) — for the long-lived orchestrator session A; rendered once at A launch. When rendering fails, a deterministic fallback (issue identifier / title / description only) is used so A can still be launched.
+  - `prompt_template_orchestrator` (required) — for the long-lived orchestrator session; rendered once at orchestrator launch. When rendering fails, a deterministic fallback (issue identifier / title / description only) is used so the orchestrator can still be launched.
   - `prompt_template_<phase>` (optional, one per phase, named after the phase) — operator override for a specific phase subprocess's prompt; rendered against the per-phase context envelope and written to the subprocess's stdin. The phases for which this is defined are listed in the [phase catalog](18-worker-skill-workflow.md). When the block is absent the daemon uses the phase's catalog default (slash-command skill or daemon-internal prompt fragment) per [FR 18 §Phase override](18-worker-skill-workflow.md).
 - **Reserved extension namespaces**: regions where each downstream spec places its own keys.
-  - `extension.orchestrator.*` — orchestrator session A (model / effort / max_phases / allowed_tools).
+  - `extension.orchestrator.*` — orchestrator session (model / effort / max_phases / allowed_tools).
   - `extension.phase.<name>.*` — per-phase override surface; the canonical key under each phase is `command`, the slash-command override that swaps the catalog default skill (per [FR 18 §Phase override](18-worker-skill-workflow.md)). Mutually exclusive per phase with `prompt_template_<phase>`.
   - `extension.server.*` — roki-observability HTTP API.
-  - The loader **round-trips unknown keys** (it does not interpret them, and does not delete them). The legacy `extension.linear_updater.*`, `extension.gates.spec.*`, and `extension.gates.review.*` namespaces are rejected by the loader (or simply ignored as unknown); A's processing of `daemon_directive` events plus A's own artifact validation replaces them.
+  - The loader **round-trips unknown keys** (it does not interpret them, and does not delete them). The legacy `extension.linear_updater.*`, `extension.gates.spec.*`, and `extension.gates.review.*` namespaces are rejected by the loader (or simply ignored as unknown); the orchestrator's processing of `daemon_directive` events plus the orchestrator's own artifact validation replaces them.
 
 The consuming spec, requiredness, default, and behavior on invalid values for each namespace live in the "WORKFLOW.md schema" table in [`docs/reference/config.md`](../reference/config.md).
 

@@ -36,23 +36,23 @@ Guarantee that an operator can run roki by simply "launching the single `roki` b
 - **Normal shutdown**: on SIGINT / SIGTERM, stop accepting new work, give every active orchestrator session and every active phase subprocess a bounded shutdown window, then exit cleanly.
 - **Help**: `roki --help` and the `--help` of each subcommand list every CLI flag and the configuration key each one corresponds to.
 
-### Orchestrator session A lifecycle integration
+### Orchestrator session lifecycle integration
 
-Per [FR 19: Orchestrator Session](19-orchestrator-session.md) the daemon launches one long-lived `claude --input-format stream-json --output-format stream-json` orchestrator session A per ticket. The daemon's lifecycle responsibility for A is mechanical:
+Per [FR 19: Orchestrator Session](19-orchestrator-session.md) the daemon launches one long-lived `claude --input-format stream-json --output-format stream-json` orchestrator session per ticket. The daemon's lifecycle responsibility for the orchestrator is mechanical:
 
-- **Launch**: A is started on the `Discovered → Pending` transition for an admitted issue, so it is already running when the orchestrator publishes the `Pending → Judging` transition that fires the first `admission_request` event ([FR 19 §Lifecycle](19-orchestrator-session.md)).
-- **Graceful termination**: A is gracefully terminated when the issue lands in any `Inactive(reason=*)` and any A-driven Linear writes for that terminal state have completed; the daemon sends a final `stop`-acknowledgement signal then closes A's stdin and waits for clean exit within the configured shutdown window.
-- **Forced termination**: `Cleaning` (entered on tracker-observed terminal Linear state or assignment loss, per [04-state-machine-and-recovery](04-state-machine-and-recovery.md)) may force-terminate A regardless of in-flight turns — cleanup of worktree / session tempdir takes priority.
-- **Restart non-persistence**: A is not persisted across daemon restarts. On restart-recovery, a fresh A is launched per re-admitted ticket when the issue re-enters `Pending`; in-flight turns and any A-internal scratch state are discarded.
+- **Launch**: the orchestrator is started on the `Discovered → Pending` transition for an admitted issue, so it is already running when the orchestrator publishes the `Pending → Judging` transition that fires the first `admission_request` event ([FR 19 §Lifecycle](19-orchestrator-session.md)).
+- **Graceful termination**: the orchestrator is gracefully terminated when the issue lands in any `Inactive(reason=*)` and any orchestrator-driven Linear writes for that terminal state have completed; the daemon sends a final `stop`-acknowledgement signal then closes the orchestrator's stdin and waits for clean exit within the configured shutdown window.
+- **Forced termination**: `Cleaning` (entered on tracker-observed terminal Linear state or assignment loss, per [04-state-machine-and-recovery](04-state-machine-and-recovery.md)) may force-terminate the orchestrator regardless of in-flight turns — cleanup of worktree / session tempdir takes priority.
+- **Restart non-persistence**: the orchestrator is not persisted across daemon restarts. On restart-recovery, a fresh the orchestrator is launched per re-admitted ticket when the issue re-enters `Pending`; in-flight turns and any orchestrator-internal scratch state are discarded.
 
-The contract for A's tool surface, response schema, event catalog, configuration namespace, and failure modes lives in [FR 19: Orchestrator Session](19-orchestrator-session.md); this FR does not restate it.
+The contract for the orchestrator's tool surface, response schema, event catalog, configuration namespace, and failure modes lives in [FR 19: Orchestrator Session](19-orchestrator-session.md); this FR does not restate it.
 
 ## Capabilities
 
 - **CLI flags**: the canonical list of flags lives in [`docs/reference/cli.md`](../reference/cli.md). Flags override configuration-file values, and `--help` displays every flag together with the corresponding configuration key.
 - **Structured logging foundation**: per-issue / per-worker / per-repo fields are attached to every event through the tracing pipeline (see [13-observability-logs](13-observability-logs.md) for details).
 - **Dependency check**: at startup, verify the existence of `wt` / `ghq` / the configured `claude` binary; refuse to start if any is missing.
-- **Signal handling**: graceful shutdown (stop new admission → signal each active orchestrator session and each active phase subprocess to exit → wait within the configured window → exit). A's contract is owned by [FR 19: Orchestrator Session](19-orchestrator-session.md); phase subprocesses are owned by [07-worker-execution](07-worker-execution.md).
+- **Signal handling**: graceful shutdown (stop new admission → signal each active orchestrator session and each active phase subprocess to exit → wait within the configured window → exit). The orchestrator's contract is owned by [FR 19: Orchestrator Session](19-orchestrator-session.md); phase subprocesses are owned by [07-worker-execution](07-worker-execution.md).
 
 ## Boundaries
 

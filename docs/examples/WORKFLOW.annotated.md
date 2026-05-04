@@ -12,7 +12,7 @@
 #
 # Template-block conventions:
 #   - "## <block_name>" headings mark block boundaries
-#   - One required block: prompt_template_orchestrator (system prompt for A)
+#   - One required block: prompt_template_orchestrator (system prompt for the orchestrator)
 #   - Zero or more optional blocks: prompt_template_<phase> (per-phase override
 #       for phase subprocesses; see docs/fr/18-worker-skill-workflow.md
 #       §Phase override)
@@ -266,7 +266,7 @@ declaring both is a configuration error rejected at startup or retained as the
 previous policy at hot reload (per req:roki-mvp:6.7).
 
 Same Liquid variables apply, plus the per-phase context envelope (issue id,
-feature name, repo, additional_context from A). The block below is a thin
+feature name, repo, additional_context from the orchestrator). The block below is a thin
 example illustrating the override pattern; in practice operators are likely
 to keep the default `roki-finalize-review` skill and only override the prose
 or section emphasis when their workspace has unusual conventions.
@@ -287,7 +287,7 @@ session and the artefacts in the worktree.
 - The `kiro-validate-impl` GO verdict (with mechanical and spec stages both
   green).
 - Any `kiro-verify-completion` VERIFIED stamps from `ci_fix`.
-- `additional_context` (from A) — failing per-criterion entries from a prior
+- `additional_context` (from the orchestrator) — failing per-criterion entries from a prior
   retry, if any.
 - Worktree contents.
 

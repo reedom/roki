@@ -42,7 +42,7 @@ Fields automatically attached to every event via spans.
 | Webhook receipt | Tracker webhook received | [03-linear-integration](../fr/03-linear-integration.md) | roki-mvp Req 11.1 |
 | Backoff decision | 429 backoff applied | [03-linear-integration](../fr/03-linear-integration.md) | roki-mvp Req 3.4, Req 11.1 |
 | Stall decision | Stall detected (per-phase or orchestrator) | [07-worker-execution](../fr/07-worker-execution.md), [19-orchestrator-session](../fr/19-orchestrator-session.md) | roki-mvp Req 5.3, Req 5.7, Req 11.1 |
-| Retry attempt | Retry with attempt counter (ticket-level, between `phase_nonclean → run_phase` cycles A drives) | [07-worker-execution](../fr/07-worker-execution.md) | roki-mvp Req 5.10, Req 11.1 |
+| Retry attempt | Retry with attempt counter (ticket-level, between `phase_nonclean → run_phase` cycles the orchestrator drives) | [07-worker-execution](../fr/07-worker-execution.md) | roki-mvp Req 5.10, Req 11.1 |
 | State-machine transition | Per-issue state transition (prev / next / trigger source / `Inactive.reason` when transitioning to `Inactive`); `reason` may be any of the discriminator values including the three orchestrator-dead values `orchestrator_crash`, `orchestrator_unparseable`, `orchestrator_budget_exhausted` | [04-state-machine-and-recovery](../fr/04-state-machine-and-recovery.md) | roki-mvp Req 8.1, Req 8.2, Req 11.1, Req 12.3 |
 | Subprocess stderr line | One stderr line of orchestrator / phase / sweep subprocess = one warn event tagged with the subprocess role and (for phases) the phase name | [13-observability-logs](../fr/13-observability-logs.md) | roki-mvp Req 11.5 |
 
@@ -69,7 +69,7 @@ The prior linear-updater subagent's `dispatch` / `outcome` events are removed al
 
 Enabled by the `--debug` CLI flag or a config block ([cli.md](cli.md)).
 
-- Append **every line** of each subprocess's (orchestrator session A and every phase subprocess) stdout/stderr to a per-issue file (under the debug-log directory).
+- Append **every line** of each subprocess's (orchestrator session and every phase subprocess) stdout/stderr to a per-issue file (under the debug-log directory).
 - Tag each line with an **RFC 3339 nanosecond timestamp + stream tag** (stdout/stderr).
 - On write failure, log the offending path at warn severity and continue without stopping the subprocess.
 - Used by: [13-observability-logs](../fr/13-observability-logs.md)

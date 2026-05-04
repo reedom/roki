@@ -20,22 +20,22 @@ Let phase subprocesses walk into a "prepared workspace". Concentrating worktree 
 
 ## User-visible Behavior
 
-- **Right after the orchestrator session A returns `judge=act` in its `admission_decision`** (with a single allowlisted `repo` populated):
+- **Right after the orchestrator session returns `judge=act` in its `admission_decision`** (with a single allowlisted `repo` populated):
   - The daemon resolves the repo's local clone with `ghq list -p`.
   - Creates a worktree with `wt` (branch name = the Linear issue identifier verbatim).
   - Creates a per-issue session tempdir under the platform's standard user cache root (directory name = the Linear issue identifier).
-  - The resulting worktree path + session tempdir are passed to each phase subprocess via the daemon-controlled context envelope (per [07-worker-execution](07-worker-execution.md), [12-extension-surface](12-extension-surface.md)). A itself never receives worktree paths — A is filesystem-read-only and never produces code changes.
+  - The resulting worktree path + session tempdir are passed to each phase subprocess via the daemon-controlled context envelope (per [07-worker-execution](07-worker-execution.md), [12-extension-surface](12-extension-surface.md)). The orchestrator itself never receives worktree paths — the orchestrator is filesystem-read-only and never produces code changes.
 - **Cleanup triggers** (conditions to enter the `Cleaning` state):
   - The Linear issue transitioned to a terminal state (Done / Canceled / etc.), or
   - The Linear issue was reassigned to someone else.
   - The state is entered **only when the tracker observes** one of these. A clean subprocess exit alone does not cause this transition.
 - **Cleanup behavior**:
-  - If a phase subprocess or the orchestrator session A is still running, terminate it first.
+  - If a phase subprocess or the orchestrator session is still running, terminate it first.
   - For every repo in the allowlist, enumerate worktrees and `wt remove` those whose branch name equals the Linear issue identifier verbatim.
   - Delete the session tempdir.
   - **Do not delete the branch.**
 - **On TerminalFailure**: keep the worktree, the branch, and the session tempdir all intact (so the operator can inspect them).
-- **On filesystem error**: mark the issue as failed, log the offending path, and refuse additional work until the operator intervenes (the daemon emits a `daemon_directive` event of `kind=fs_poison` to A, which writes the matching Linear label + comment via Linear MCP — see [14-operator-notifications](14-operator-notifications.md)).
+- **On filesystem error**: mark the issue as failed, log the offending path, and refuse additional work until the operator intervenes (the daemon emits a `daemon_directive` event of `kind=fs_poison` to the orchestrator, which writes the matching Linear label + comment via Linear MCP — see [14-operator-notifications](14-operator-notifications.md)).
 
 ## Capabilities
 
@@ -47,7 +47,7 @@ Let phase subprocesses walk into a "prepared workspace". Concentrating worktree 
 ## Boundaries
 
 - **Branch deletion is not done** (it is the responsibility of phase subprocesses / the operator).
-- **Container / VM isolation** is out of scope (we depend on Claude Code's `workspace-write` sandbox for phase subprocesses plus path safety; A always runs read-only).
+- **Container / VM isolation** is out of scope (we depend on Claude Code's `workspace-write` sandbox for phase subprocesses plus path safety; the orchestrator always runs read-only).
 - **Editing code inside the worktree** is a phase subprocess responsibility; the daemon never touches it.
 - **Multi-host / worktrees on remote machines** are out of scope.
 

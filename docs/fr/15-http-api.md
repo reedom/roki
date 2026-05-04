@@ -20,7 +20,7 @@ refs:
 
 # FR 15: HTTP API
 
-> An optional axum HTTP server. Three endpoints: `GET /api/v1/state` / `GET /api/v1/<issue>` / `POST /api/v1/refresh`. Default off, loopback only, symphony-compatible schema, with HTML escape + ANSI strip on agent / Linear-derived strings. A read-only projection that does not duplicate the in-memory state owned by `roki-mvp`.
+> An optional axum HTTP server. Three endpoints: `GET /api/v1/state` / `GET /api/v1/<issue>` / `POST /api/v1/refresh`. Default off, loopback only, symphony-compatible schema, with HTML escape + ANSI strip on agent / Linear-derived strings. The orchestrator read-only projection that does not duplicate the in-memory state owned by `roki-mvp`.
 
 ## Purpose
 
