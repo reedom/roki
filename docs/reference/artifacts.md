@@ -13,8 +13,8 @@ The **canonical reference** for the paths and required elements of the **public 
 
 | Artifact | Path | Writer | Reader | Purpose | Used by | Requirements |
 |---|---|---|---|---|---|---|
-| `requirements.md` | `<workspace_root>/<repo>/<issue>/.kiro/specs/<issue>/requirements.md` | `materialize_spec` phase subprocess (per [18-worker-skill-workflow](../fr/18-worker-skill-workflow.md) phase catalog), driven by `kiro-discovery` | orchestrator session A (structural validation per [19-orchestrator-session](../fr/19-orchestrator-session.md) §Artifact validation) / operator / future spec-sync | Per-issue acceptance criteria in EARS form | [18-worker-skill-workflow](../fr/18-worker-skill-workflow.md), [19-orchestrator-session](../fr/19-orchestrator-session.md) | roki-mvp Req 5.6 |
-| `review.md` | `<workspace_root>/<repo>/<issue>/.kiro/specs/<issue>/review.md` | `finalize_review` phase subprocess (per [18-worker-skill-workflow](../fr/18-worker-skill-workflow.md) phase catalog), synthesizing from prior-phase verdicts (per-task `kiro-review` APPROVED set, `kiro-validate-impl` GO, `kiro-verify-completion` VERIFIED stamps, worktree artefacts) before A's `action=stop` | orchestrator session A (structural validation per [19-orchestrator-session](../fr/19-orchestrator-session.md) §Artifact validation) / operator | Per-criterion pass/fail + code references | [18-worker-skill-workflow](../fr/18-worker-skill-workflow.md), [19-orchestrator-session](../fr/19-orchestrator-session.md) | roki-mvp Req 5.6 |
+| `requirements.md` | `<workspace_root>/<repo>/<issue>/.kiro/specs/<issue>/requirements.md` | `materialize_spec` phase subprocess (per [18-worker-skill-workflow](../fr/18-worker-skill-workflow.md) phase catalog), driven by `kiro-discovery` | the orchestrator session (structural validation per [19-orchestrator-session](../fr/19-orchestrator-session.md) §Artifact validation) / operator / future spec-sync | Per-issue acceptance criteria in EARS form | [18-worker-skill-workflow](../fr/18-worker-skill-workflow.md), [19-orchestrator-session](../fr/19-orchestrator-session.md) | roki-mvp Req 5.6 |
+| `review.md` | `<workspace_root>/<repo>/<issue>/.kiro/specs/<issue>/review.md` | `finalize_review` phase subprocess (per [18-worker-skill-workflow](../fr/18-worker-skill-workflow.md) phase catalog), synthesizing from prior-phase verdicts (per-task `kiro-review` APPROVED set, `kiro-validate-impl` GO, `kiro-verify-completion` VERIFIED stamps, worktree artefacts) before the orchestrator's `action=stop` | the orchestrator session (structural validation per [19-orchestrator-session](../fr/19-orchestrator-session.md) §Artifact validation) / operator | Per-criterion pass/fail + code references | [18-worker-skill-workflow](../fr/18-worker-skill-workflow.md), [19-orchestrator-session](../fr/19-orchestrator-session.md) | roki-mvp Req 5.6 |
 
 ## Required elements of `requirements.md`
 
@@ -23,7 +23,7 @@ The **canonical reference** for the paths and required elements of the **public 
 - **Encoding sanity**: encoding is sane
 - **EARS shape**: at least one EARS trigger keyword (`WHEN` / `IF` / `WHILE` / `WHERE` / `SHALL`) appears at an acceptance-criteria position
 
-Validation is performed by orchestrator session A (`Read` + `Bash` `grep -E`) after the `materialize_spec` phase clean-exits, per [fr:19-orchestrator-session §Artifact validation](../fr/19-orchestrator-session.md). It is **structural only** (no LLM substantive judgment) — substantive judgment of "are these criteria the right ones for this ticket" lives inside `kiro-discovery`.
+Validation is performed by the orchestrator session (`Read` + `Bash` `grep -E`) after the `materialize_spec` phase clean-exits, per [fr:19-orchestrator-session §Artifact validation](../fr/19-orchestrator-session.md). It is **structural only** (no LLM substantive judgment) — substantive judgment of "are these criteria the right ones for this ticket" lives inside `kiro-discovery`.
 
 ## Required elements of `review.md`
 
@@ -34,14 +34,14 @@ Validation is performed by orchestrator session A (`Read` + `Bash` `grep -E`) af
 | `status` of each per-criterion entry | `pass` or `fail` | Verdict for the individual criterion |
 | `code_references` of each per-criterion entry (only when status=`pass`) | One or more workspace-relative file paths (optional line range) | The code positions that justify a `pass` (must be on-disk reachable at validation time) |
 
-Validation is performed by orchestrator session A (`Read` + `Bash` `test -f` for reachability) after the `finalize_review` phase clean-exits, per [fr:19-orchestrator-session §Artifact validation](../fr/19-orchestrator-session.md). A's structural failure categories (used to populate `additional_context` on the retry path):
+Validation is performed by the orchestrator session (`Read` + `Bash` `test -f` for reachability) after the `finalize_review` phase clean-exits, per [fr:19-orchestrator-session §Artifact validation](../fr/19-orchestrator-session.md). The orchestrator's structural failure categories (used to populate `additional_context` on the retry path):
 
 | Category | Condition |
 |---|---|
 | `fail-missing` | Artifact not present |
 | `fail-schema` | Did not parse against the schema described above (missing overall status / missing per-criterion entries / criterion id not in `requirements.md`) |
 | `fail-evidence` | A code reference for a `pass` entry is not reachable on disk |
-| `fail-missing-spec` | `requirements.md` is missing at validation time (rare — caught by A before nominating `finalize_review`) |
+| `fail-missing-spec` | `requirements.md` is missing at validation time (rare — caught by the orchestrator before nominating `finalize_review`) |
 
 ## When adding a new artifact
 

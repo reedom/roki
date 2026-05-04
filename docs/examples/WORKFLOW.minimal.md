@@ -13,7 +13,7 @@ extension:
 ## prompt_template_orchestrator
 
 {% raw %}
-You are the roki orchestrator session (A) for Linear ticket {{ issue.id }}: {{ issue.title }}.
+You are the roki orchestrator session for Linear ticket {{ issue.id }}: {{ issue.title }}.
 
 Description:
 {{ issue.description }}

@@ -21,7 +21,8 @@
 #       for the same phase is a configuration error.
 #   - Wrap a region with {% raw %} ... {% endraw %} to escape Liquid
 #
-# Liquid variables A receives at launch (rendered once into its system prompt):
+# Liquid variables the orchestrator receives at launch (rendered once into its
+# system prompt):
 #   issue.id           — Linear issue identifier (e.g. "ABC-123")
 #   issue.title        — Linear issue title
 #   issue.description  — Linear issue description (Markdown)
@@ -29,37 +30,38 @@
 #   repos              — array of allowlisted repos; each entry has .ghq
 #   (Per req:roki-mvp:6.6 — see .kiro/specs/roki-mvp/requirements.md.)
 #
-# A does NOT receive worktree paths or session.tempdir variables — those belong
-# to phase subprocesses, not A. A is filesystem-read-only and uses Bash only
-# for read-only artifact validation (stat, test -f, grep -E).
+# The orchestrator does NOT receive worktree paths or session.tempdir variables
+# — those belong to phase subprocesses. The orchestrator is filesystem-read-only
+# and uses Bash only for read-only artifact validation (stat, test -f, grep -E).
 
 extension:
-  # ----- orchestrator session A (roki-mvp) -----
+  # ----- orchestrator session (roki-mvp) -----
   # The long-lived `claude --input-format stream-json --output-format stream-json`
   # session per ticket. See docs/fr/19-orchestrator-session.md.
   orchestrator:
-    # Claude model identifier for A.
+    # Claude model identifier for the orchestrator.
     # Default: "claude-opus-4-7".
     model: "claude-opus-4-7"
 
-    # Extended-thinking budget for A: "low" | "middle" | "high".
+    # Extended-thinking budget for the orchestrator: "low" | "middle" | "high".
     # Default: "middle".
     effort: "middle"
 
-    # Total phase subprocesses A may nominate before the budget is exhausted.
-    # On exhaustion the daemon routes the issue to
+    # Total phase subprocesses the orchestrator may nominate before the budget
+    # is exhausted. On exhaustion the daemon routes the issue to
     # Inactive(reason=orchestrator_budget_exhausted) — TUI escalation only,
-    # no Linear fallback (A is unable to write).
+    # no Linear fallback (the orchestrator is unable to write).
     # Default: 20.
     max_phases: 20
 
-    # Allowlist passed to A via `--settings`. By default A is restricted to the
-    # operator's installed Linear MCP (write tools) plus `Read` and `Bash`.
-    # `Bash` is intended for read-only artifact validation (stat, test -f,
-    # grep -E for EARS keywords, code_references reachability). A is launched
-    # with a read-only filesystem sandbox regardless of [permissions].strategy
-    # in roki.toml — that strategy applies to phase subprocesses only.
-    # Edit, Write, and Agent dispatch are NEVER available to A.
+    # Allowlist passed to the orchestrator via `--settings`. By default the
+    # orchestrator is restricted to the operator's installed Linear MCP (write
+    # tools) plus `Read` and `Bash`. `Bash` is intended for read-only artifact
+    # validation (stat, test -f, grep -E for EARS keywords, code_references
+    # reachability). The orchestrator is launched with a read-only filesystem
+    # sandbox regardless of [permissions].strategy in roki.toml — that strategy
+    # applies to phase subprocesses only. Edit, Write, and Agent dispatch are
+    # NEVER available to the orchestrator.
     # allowed_tools: ["mcp__linear__*", "Read", "Bash"]
 
   # ----- per-phase override surface (roki-mvp) -----
@@ -91,12 +93,12 @@ extension:
 
 ## prompt_template_orchestrator
 
-System prompt for orchestrator session A. Rendered once at A launch (Discovered
-→ Pending) against the Linear issue context. A consumes it across every event
-the daemon delivers: admission_request, phase_complete, phase_nonclean,
-daemon_directive, tracker_terminal.
+System prompt for the orchestrator session. Rendered once at orchestrator
+launch (Discovered → Pending) against the Linear issue context. The orchestrator
+consumes it across every event the daemon delivers: admission_request,
+phase_complete, phase_nonclean, daemon_directive, tracker_terminal.
 
-A's tool surface (enforced by the daemon via `--settings`):
+The orchestrator's tool surface (enforced by the daemon via `--settings`):
 - Linear MCP (write) — the operator's installed Linear MCP
 - Read (workspace, read-only)
 - Bash (read-only filesystem sandbox) — read-only artifact validation only:
@@ -105,7 +107,7 @@ A's tool surface (enforced by the daemon via `--settings`):
   `code_references` entry's reachability.
 - NO Edit / Write / Agent dispatch / other MCPs.
 
-Phase catalog A may nominate via `action=run_phase`:
+Phase catalog the orchestrator may nominate via `action=run_phase`:
 - `materialize_spec`  — kiro-discovery (default) writes per-issue requirements.md
 - `implement`         — kiro-impl (default) drives task-by-task implementation
 - `review`            — kiro-review (default) runs feature-level adversarial code review
@@ -119,37 +121,39 @@ Phase catalog A may nominate via `action=run_phase`:
 On clean phase exit the daemon emits `phase_complete` with the parsed subtype;
 on stall / non-zero exit / `--max-turns` exhaustion the daemon emits
 `phase_nonclean`. After clean exit of `materialize_spec` and `finalize_review`,
-A reads the produced artifact (requirements.md / review.md) and validates it
-structurally before deciding next phase. See FR 18 / FR 19.
+the orchestrator reads the produced artifact (requirements.md / review.md) and
+validates it structurally before deciding next phase. See FR 18 / FR 19.
 
 Operators MAY override any phase's invocation via `extension.phase.<name>.command`
 (slash-command swap, in front matter above) or `prompt_template_<name>` named
 template block (templated stdin, in this body). Mutually exclusive per phase.
 
-`daemon_directive` event `kind` values A should expect, with one-line meaning:
+`daemon_directive` event `kind` values the orchestrator should expect, with
+one-line meaning:
 - `stall`           — a phase subprocess stalled and the daemon SIGTERM'd it
 - `retry_exhausted` — ticket-level retry budget for phase non-clean exits is gone
 - `fs_poison`       — filesystem error during session/worktree create / remove / rename
 - `orphan`          — restart-recovery saw a session/worktree with no matching Linear issue
-A writes the matching Linear label + comment via Linear MCP and returns
-`action=linear_update_done` with `linear_writes` listing what was written.
-A does NOT receive a `daemon_directive` for `needs_split` / `allowlist_rejected` —
-those are A's own admission decisions and A writes Linear in the same turn it
-returns the `admission_decision`. See FR 14.
+The orchestrator writes the matching Linear label + comment via Linear MCP and
+returns `action=linear_update_done` with `linear_writes` listing what was
+written. The orchestrator does NOT receive a `daemon_directive` for
+`needs_split` / `allowlist_rejected` — those are its own admission decisions,
+written to Linear in the same turn it returns the `admission_decision`.
+See FR 14.
 
-When A is dead — process crash, schema drift on two consecutive turns, or
-`max_phases` exhausted — the daemon routes the issue to one of three
+When the orchestrator is dead — process crash, schema drift on two consecutive
+turns, or `max_phases` exhausted — the daemon routes the issue to one of three
 Inactive.reason values and does NOT fall back to a Linear write of its own:
-- `orchestrator_crash`              — A crashed / stalled / exited without a `stop`
-- `orchestrator_unparseable`        — A's stdout failed JSON-shape on two consecutive turns
+- `orchestrator_crash`              — orchestrator crashed / stalled / exited without a `stop`
+- `orchestrator_unparseable`        — orchestrator stdout failed JSON-shape on two consecutive turns
 - `orchestrator_budget_exhausted`   — `max_phases` is gone
 These three surface via the TUI escalation queue + structured log only — there
-is no Linear-side notification because A is the only Linear writer. The
-operator notices via TUI and reconciles Linear manually. See FR 19 §Failure
-modes and FR 14.
+is no Linear-side notification because the orchestrator is the only Linear
+writer. The operator notices via TUI and reconciles Linear manually. See FR 19
+§Failure modes and FR 14.
 
 {% raw %}
-You are the roki orchestrator session (A) for Linear ticket {{ issue.id }}.
+You are the roki orchestrator session for Linear ticket {{ issue.id }}.
 
 # Ticket
 Title: {{ issue.title }}
@@ -292,12 +296,13 @@ session and the artefacts in the worktree.
 Produce `review.md` with overall `status: pass | fail`, per-criterion entries
 indexed by the numeric requirement IDs in the ticket's `requirements.md`,
 and `code_references` (workspace-relative paths with optional line range) on
-each `pass` entry. A will read this file structurally after you exit; do not
-elide required fields even if you summarize for brevity.
+each `pass` entry. The orchestrator will read this file structurally after you
+exit; do not elide required fields even if you summarize for brevity.
 
 # Boundary
 
-You are a phase subprocess; A is the orchestrator that nominated you. Do not
+You are a phase subprocess; the orchestrator session nominated you. Do not
 attempt to drive other phases or write Linear directly — return through your
-terminal `result` event with `subtype: success` and let A read your artifact.
+terminal `result` event with `subtype: success` and let the orchestrator read
+your artifact.
 {% endraw %}
