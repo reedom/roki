@@ -41,9 +41,9 @@ The daemon emits a `daemon_directive` event to the orchestrator whenever a daemo
 | Filesystem error poisoned an issue | `daemon_directive` (`kind=fs_poison`) | [04-state-machine-and-recovery](04-state-machine-and-recovery.md) |
 | Restart-recovery saw orphaned residue | `daemon_directive` (`kind=orphan`) | [04-state-machine-and-recovery](04-state-machine-and-recovery.md), Req 10.3 |
 
-The `needs_split` and `allowlist_rejected` admission rejections are **not** routed through `daemon_directive` — the orchestrator returns those `admission_decision` directives and writes the matching Linear label + comment in the same turn (per [fr:19-orchestrator-session](19-orchestrator-session.md)).
+The operator-facing pre-phase stops (`outcome ∈ {needs_split, allowlist_rejected, spec_incomplete, needs_operator}`) are **not** routed through `daemon_directive` — the orchestrator returns `action=stop` with the matching `outcome` and writes the corresponding Linear label + comment in the same turn (per [fr:19-orchestrator-session §Response schema](19-orchestrator-session.md)). `spec_incomplete` covers SPEC_DRIVEN target spec doc validation failure (per [fr:19-orchestrator-session §Artifact validation](19-orchestrator-session.md)); `needs_operator` covers NEEDS_CLASSIFY classify Path A / C / D / E (per [fr:18-worker-skill-workflow §Phase catalog](18-worker-skill-workflow.md)).
 
-Events that an agent (the orchestrator or a phase subprocess) is expected to self-report through Linear (normal phase completions, agent-recoverable errors the phase agent surfaces in the ticket itself, the orchestrator's artifact-validation retry-budget exhaustion which the orchestrator surfaces directly via Linear MCP before its terminal `action=stop`) **do not** trigger a `daemon_directive`.
+Events that an agent (the orchestrator or a phase subprocess) is expected to self-report through Linear (normal phase completions, agent-recoverable errors the phase agent surfaces in the ticket itself, the orchestrator's `review.md` validation retry-budget exhaustion which the orchestrator surfaces directly via Linear MCP before its terminal `action=stop`) **do not** trigger a `daemon_directive`.
 
 ### When the orchestrator is dead (no Linear-side notification)
 

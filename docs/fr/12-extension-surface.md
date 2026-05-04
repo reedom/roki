@@ -34,7 +34,7 @@ The exact signatures of each surface, the invariants that must not be bypassed, 
 ### Invariants common to all surfaces
 
 - **Read-only by default**: `OrchestratorRead` does not mutate state.
-- **No vetoable transitions**: state-machine transitions are observable read-only; the prior `Judging → Active` and `Active → Inactive` veto windows are removed alongside the gates.
+- **No vetoable transitions**: state-machine transitions are observable read-only; the prior `Judging → Active` and `Active → Inactive` veto windows are removed alongside the gates and the `Judging` state itself ([04-state-machine-and-recovery](04-state-machine-and-recovery.md)).
 - **No bypass of the cadence cap / backoff**: nudges via `TrackerRefresh` honor the Linear rate limit.
 - **Failure isolation**: a subscriber's unhandled error does not stop other subscribers or the orchestrator core.
 - **Additive serialization**: adding a new key to `additional_context` is OK; removing or retyping an existing key is breaking.
