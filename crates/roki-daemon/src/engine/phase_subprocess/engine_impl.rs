@@ -27,19 +27,29 @@
 
 use async_trait::async_trait;
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use crate::engine::orchestrator_session::action_parser::PhaseName;
+use crate::logging::DebugSinkFactory;
 use crate::orchestrator::core::{EngineError, PhaseEngine, PhaseRunOutcome};
 use crate::orchestrator::state::{IssueId, Mode};
 
 /// Placeholder [`PhaseEngine`] surfaced by [`crate::runtime::run_with_shutdown`]
 /// until Task 10.1.5 wires the admission pipe + production phase pipeline.
+///
+/// Holds the optional [`DebugSinkFactory`] composed by the runtime so the
+/// production phase pipeline (Task 10.1.5) can route per-issue debug capture
+/// without re-walking `RuntimeComponents`. The placeholder itself never
+/// spawns, so the factory is unused until 10.1.5 lands.
 #[derive(Debug, Default)]
-pub struct PendingPhaseEngine;
+pub struct PendingPhaseEngine {
+    #[allow(dead_code)]
+    debug_sink_factory: Option<Arc<DebugSinkFactory>>,
+}
 
 impl PendingPhaseEngine {
-    pub fn new() -> Self {
-        Self
+    pub fn new(debug_sink_factory: Option<Arc<DebugSinkFactory>>) -> Self {
+        Self { debug_sink_factory }
     }
 }
 

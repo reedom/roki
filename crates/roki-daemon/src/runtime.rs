@@ -310,6 +310,13 @@ pub(crate) struct RuntimeComponents {
     pub orchestrator_session_adapter: Arc<OrchestratorSessionAdapter>,
     /// Bounded phase-subprocess adapter (one launch per `action=run_phase`).
     pub phase_subprocess_adapter: Arc<PhaseSubprocessAdapter>,
+    /// Optional per-issue debug-sink factory composed when the operator
+    /// passes `--debug` or sets `[debug].dir` (Req 11.6, 11.7). When
+    /// `Some`, the engine adapters' launch contexts materialize a
+    /// per-issue [`crate::logging::PerIssueDebugSink`] for every spawn so
+    /// stdout / stderr lines are appended to `<dir>/<issue>.log`. `None`
+    /// disables the per-issue capture.
+    pub debug_sink_factory: Option<Arc<crate::logging::DebugSinkFactory>>,
 }
 
 /// Step 1-11 of the daemon bootstrap. Step 12 (the `tokio::select!` wind-down)
@@ -380,6 +387,7 @@ async fn bootstrap(
             })?;
 
     let permission_resolver = build_permission_resolver(&config);
+    let debug_sink_factory = compose_debug_sink_factory(&args, &config);
     let components = assemble_runtime_components(RuntimeAssemblyInputs {
         claude_binary: claude_binary.clone(),
         wt_path: wt_path.clone(),
@@ -387,6 +395,7 @@ async fn bootstrap(
         workflow_policy,
         repos_allowlist: config.repos.clone(),
         permission_resolver,
+        debug_sink_factory,
     })?;
 
     // ---- Step 8 (continued): compose the orchestrator actor map around
@@ -590,13 +599,17 @@ impl ProductionOrchestratorSeams {
                 components.orchestrator_session_adapter.clone(),
                 components.session_manager.clone(),
                 components.workflow_policy.orchestrator.allowed_tools.clone(),
+                components.debug_sink_factory.clone(),
             ));
 
         // Phase pipeline placeholder: see `PendingPhaseEngine` doc-comment.
         // The adapter handle is retained on `RuntimeComponents` so 10.1.5
         // can wire the production phase pipeline without re-resolving the
-        // claude binary.
-        let phase_engine: Arc<dyn PhaseEngine> = Arc::new(PendingPhaseEngine::new());
+        // claude binary. The factory is forwarded so the placeholder's
+        // 10.1.5 successor can route per-issue debug capture without
+        // re-walking `RuntimeComponents`.
+        let phase_engine: Arc<dyn PhaseEngine> =
+            Arc::new(PendingPhaseEngine::new(components.debug_sink_factory.clone()));
 
         let worktree: Arc<dyn WorktreeOps> = components.worktree_manager.clone();
         let session_dirs: Arc<dyn SessionDirOps> = components.session_manager.clone();
@@ -1025,6 +1038,12 @@ struct RuntimeAssemblyInputs {
     workflow_policy: WorkflowPolicy,
     repos_allowlist: Vec<crate::config::RepoEntry>,
     permission_resolver: PermissionResolver,
+    /// Optional per-issue debug-sink factory composed in `bootstrap` from
+    /// `RunArgs.debug` and `Config.debug.dir` (Req 11.6, 11.7). When
+    /// `Some`, the production engine adapters' launch contexts attach a
+    /// per-issue `PerIssueDebugSink` so stdout / stderr lines are captured
+    /// to `<dir>/<issue>.log`.
+    debug_sink_factory: Option<Arc<crate::logging::DebugSinkFactory>>,
 }
 
 /// Construct the engine adapters + managers from the resolved external
@@ -1045,6 +1064,7 @@ fn assemble_runtime_components(
         workflow_policy,
         repos_allowlist,
         permission_resolver,
+        debug_sink_factory,
     } = inputs;
 
     // Refuse early when the operator has not declared a phase-subprocess
@@ -1089,7 +1109,35 @@ fn assemble_runtime_components(
         permission_resolver: Arc::new(permission_resolver),
         orchestrator_session_adapter,
         phase_subprocess_adapter,
+        debug_sink_factory,
     })
+}
+
+/// Compose the optional [`crate::logging::DebugSinkFactory`] from the
+/// merged CLI + config view (Req 11.6, 11.7).
+///
+/// The factory is built when EITHER `--debug` is set OR `[debug].dir` is
+/// populated. Resolution order for the directory:
+///
+/// 1. `[debug].dir` — operator-declared path; honored verbatim.
+/// 2. `--debug` without a configured dir — fall back to the per-process
+///    session-manager root joined with `debug/`. The session root sits
+///    under the platform user cache directory, so the fallback never
+///    lands at a privileged location and survives multiple `roki run`
+///    invocations on the same workstation.
+///
+/// When neither slot is set, returns `None` so the engine adapters keep
+/// the existing no-capture behavior.
+fn compose_debug_sink_factory(
+    args: &RunArgs,
+    config: &Config,
+) -> Option<Arc<crate::logging::DebugSinkFactory>> {
+    let dir = match (&config.debug.dir, args.debug) {
+        (Some(path), _) => path.clone(),
+        (None, true) => SessionManager::new().root().join("debug"),
+        (None, false) => return None,
+    };
+    Some(Arc::new(crate::logging::DebugSinkFactory::new(dir)))
 }
 
 /// Build the operator-controlled phase-subprocess [`PermissionResolver`] from
@@ -2090,6 +2138,7 @@ strategy = "settings-allowlist"
             workflow_policy: fixture_workflow_policy(),
             repos_allowlist: vec![],
             permission_resolver: fixture_resolver(),
+            debug_sink_factory: None,
         }
     }
 
@@ -2139,6 +2188,132 @@ strategy = "settings-allowlist"
             rendered.contains("permission_resolver"),
             "refusal must name the offending component: {rendered}",
         );
+    }
+
+    // ----- Debug sink factory composition (Task 10.6) -----
+
+    fn config_with_debug_dir(dir: Option<&Path>) -> Config {
+        let workflow_dir = tempfile::TempDir::new().unwrap();
+        let workflow = workflow_dir.path().join("WORKFLOW.md");
+        std::fs::write(&workflow, "stub").unwrap();
+        let mut body = format!(
+            r#"
+[linear]
+api_token = {{ env = "X" }}
+webhook_secret = {{ env = "Y" }}
+assignee = "me"
+
+[workflow]
+path = "{}"
+
+[permissions]
+strategy = "settings-allowlist"
+"#,
+            workflow.display()
+        );
+        if let Some(path) = dir {
+            body.push_str(&format!("\n[debug]\ndir = \"{}\"\n", path.display()));
+        }
+        // Anchor the workflow tempdir for the test caller — we leak the
+        // dir handle deliberately so the workflow file survives the
+        // `Config::load_from_str` call without the caller managing
+        // tempfiles. The test process exits shortly after either way.
+        std::mem::forget(workflow_dir);
+        Config::load_from_str(&body).unwrap()
+    }
+
+    fn args_with_debug(debug: bool) -> RunArgs {
+        RunArgs {
+            config: None,
+            bind: None,
+            port: None,
+            dangerously_skip_permissions: false,
+            debug,
+        }
+    }
+
+    #[test]
+    fn compose_debug_sink_factory_returns_none_when_neither_flag_nor_dir_set() {
+        let cfg = config_with_debug_dir(None);
+        let factory = compose_debug_sink_factory(&args_with_debug(false), &cfg);
+        assert!(factory.is_none());
+    }
+
+    #[test]
+    fn compose_debug_sink_factory_uses_config_dir_when_present() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let cfg = config_with_debug_dir(Some(dir.path()));
+        let factory = compose_debug_sink_factory(&args_with_debug(false), &cfg)
+            .expect("factory built when [debug].dir is set");
+
+        // Materialize a sink and write a line to confirm the factory points
+        // at the configured directory.
+        let mut sink = factory.for_issue("ENG-42");
+        sink.append(
+            crate::logging::StreamTag::Stdout,
+            &crate::logging::RoleTag::Orchestrator,
+            "wired",
+        );
+        let target = dir.path().join("ENG-42.log");
+        assert!(
+            target.exists(),
+            "factory must point at <[debug].dir>/<issue>.log; got {target:?}"
+        );
+    }
+
+    #[test]
+    fn compose_debug_sink_factory_falls_back_to_session_root_when_only_flag_set() {
+        let cfg = config_with_debug_dir(None);
+        let factory = compose_debug_sink_factory(&args_with_debug(true), &cfg)
+            .expect("factory built when --debug is set");
+
+        // Verify the factory writes under the documented fallback root.
+        let session_root = SessionManager::new().root().to_path_buf();
+        let mut sink = factory.for_issue("ENG-fallback");
+        sink.append(
+            crate::logging::StreamTag::Stdout,
+            &crate::logging::RoleTag::Orchestrator,
+            "wired",
+        );
+        let target = session_root.join("debug").join("ENG-fallback.log");
+        assert!(
+            target.exists(),
+            "fallback must land under <session_root>/debug/<issue>.log; got {target:?}"
+        );
+        // Cleanup so subsequent runs do not see a stale file.
+        let _ = std::fs::remove_file(&target);
+    }
+
+    #[test]
+    fn compose_debug_sink_factory_prefers_config_dir_over_flag_fallback() {
+        // If both `[debug].dir` and `--debug` are set, the operator-declared
+        // directory wins so an explicitly-mounted volume is honored.
+        let dir = tempfile::TempDir::new().unwrap();
+        let cfg = config_with_debug_dir(Some(dir.path()));
+        let factory = compose_debug_sink_factory(&args_with_debug(true), &cfg)
+            .expect("factory built when both flag and dir are set");
+
+        let mut sink = factory.for_issue("ENG-both");
+        sink.append(
+            crate::logging::StreamTag::Stdout,
+            &crate::logging::RoleTag::Orchestrator,
+            "wired",
+        );
+        assert!(dir.path().join("ENG-both.log").exists());
+    }
+
+    #[test]
+    fn assemble_runtime_components_threads_debug_sink_factory() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let mut inputs = fixture_inputs(dir.path());
+        let debug_dir = tempfile::TempDir::new().unwrap();
+        let factory = Arc::new(crate::logging::DebugSinkFactory::new(debug_dir.path()));
+        inputs.debug_sink_factory = Some(factory.clone());
+        let components = assemble_runtime_components(inputs).expect("assembly succeeds");
+        let attached = components
+            .debug_sink_factory
+            .expect("RuntimeComponents must carry the factory the bootstrap supplied");
+        assert!(Arc::ptr_eq(&attached, &factory));
     }
 
     #[test]

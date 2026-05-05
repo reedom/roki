@@ -546,7 +546,7 @@ refs:
   - _Requirements: 1.4_
   - _Boundary: runtime_
 
-- [ ] 10.6 Wire `--debug` + `[debug].dir` into engine adapters via DebugSinkFactory
+- [x] 10.6 Wire `--debug` + `[debug].dir` into engine adapters via DebugSinkFactory
   - `runtime::bootstrap` reads `RunArgs.debug` + `[debug]` config but never threads the per-issue debug sink into the engine launch contexts. `OrchestratorEngineImpl::launch` and `PhaseSubprocessAdapter::launch` (or its caller) hardcode `debug_sink: None`.
   - Add a `DebugSinkFactory` runtime-level type (or extend the existing `logging::PerIssueDebugSink` surface) that, given an `IssueId`, returns a sink writing to `<debug_dir>/<issue>.log` per Req 11.5/11.7. Plumb the factory through `RuntimeComponents` (or a sibling holder) into both engine adapters' launch contexts.
   - On per-issue debug file open / append failure, log the failure with the offending path and continue running the subprocess (per existing Task 1.4 contract).
