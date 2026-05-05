@@ -67,8 +67,8 @@ use crate::orchestrator::tracker_bridge::{DedupIndex, ObserveOutcome, Terminatio
 use crate::permissions::{PermissionConfigError, PermissionResolver};
 use crate::session::SessionManager;
 use crate::shutdown::{
-    self, AwaitOutcome, SHUTDOWN_WINDOW, ShutdownSignal, await_workers_with_window,
-    install_signal_handlers,
+    self, AwaitOutcome, SHUTDOWN_WINDOW, ShutdownSignal, ShutdownTrigger,
+    await_workers_with_window, install_signal_handlers,
 };
 use crate::tracker::linear::{LinearClient, LinearError, LinearPoller};
 use crate::tracker::model::{LinearStateName, LinearUserId, NormalizedIssue};
@@ -184,8 +184,21 @@ pub async fn run(args: RunArgs) -> Result<(), RuntimeError> {
 }
 
 /// Test-friendly variant that accepts an injected [`EnvReader`].
+///
+/// Production callers route through [`run`]. The bootstrap step now
+/// returns `(Bootstrapped, ShutdownTrigger)` so the OS-signal-handler
+/// install lives at this layer rather than inside `bootstrap`. The
+/// `runtime::testing::bootstrap_for_test` seam (Task 10.5) skips the
+/// signal-handler install and hands the trigger back to the test instead,
+/// so e2e tests can wind the daemon down without delivering SIGINT to the
+/// test harness process.
 pub async fn run_with_env(args: RunArgs, env: &dyn EnvReader) -> Result<(), RuntimeError> {
-    let bootstrap = bootstrap(args, env).await?;
+    let (bootstrap, shutdown_trigger) = bootstrap(args, env).await?;
+    // Production-only: install OS signal handlers wired to the trigger the
+    // bootstrap returned. The handler task fires the trigger on the first
+    // SIGINT/SIGTERM. The returned `JoinHandle` is held until `serve()`
+    // returns so the task is not aborted prematurely.
+    let _signal_task = install_signal_handlers(shutdown_trigger);
     serve(bootstrap).await
 }
 
@@ -200,7 +213,6 @@ struct Bootstrapped {
     webhook_state: Arc<WebhookState>,
     issue_rx: mpsc::Receiver<NormalizedIssue>,
     _logging_guard: crate::logging::LoggingGuard,
-    _signal_task: tokio::task::JoinHandle<()>,
     /// Engine adapters + managers assembled from the loaded `WorkflowPolicy`,
     /// resolved external binaries, and config-derived permission strategy.
     /// Held so subsequent composition steps (Tasks 10.1.2-10.1.6) consume a
@@ -303,7 +315,18 @@ pub(crate) struct RuntimeComponents {
 /// Step 1-11 of the daemon bootstrap. Step 12 (the `tokio::select!` wind-down)
 /// is the caller's responsibility — production routes through [`serve`];
 /// tests skip the await loop and call [`Bootstrapped`] field-by-field.
-async fn bootstrap(args: RunArgs, env: &dyn EnvReader) -> Result<Bootstrapped, RuntimeError> {
+///
+/// The bootstrap constructs the paired `(ShutdownSignal, ShutdownTrigger)`
+/// and returns the trigger to the caller rather than installing OS signal
+/// handlers itself. Production `run_with_env` immediately wires the
+/// trigger to the SIGINT/SIGTERM handlers via [`install_signal_handlers`];
+/// the `runtime::testing::bootstrap_for_test` seam (Task 10.5) skips that
+/// step and lets the caller fire the trigger directly so e2e tests can
+/// wind down without delivering OS signals to the test harness process.
+async fn bootstrap(
+    args: RunArgs,
+    env: &dyn EnvReader,
+) -> Result<(Bootstrapped, ShutdownTrigger), RuntimeError> {
     // ---- Step 1: load config (CLI override > file > documented defaults).
     let config_path = resolve_config_path(args.config.as_deref())?;
     let mut config = Config::load_from_path(&config_path)?;
@@ -330,11 +353,13 @@ async fn bootstrap(args: RunArgs, env: &dyn EnvReader) -> Result<Bootstrapped, R
     // ---- Step 5: admit_states (already non-empty post-load; the loader
     // refuses an empty resolved set per Req 2.10).
 
-    // ---- Step 6: install signal handlers wired to a shared ShutdownSignal.
+    // ---- Step 6: construct the shared shutdown channel. The trigger is
+    // returned to the caller — production `run_with_env` wires it to the
+    // OS signal handlers via [`install_signal_handlers`]; the
+    // `runtime::testing::bootstrap_for_test` seam keeps the trigger so
+    // tests fire shutdown directly. Either way, every
+    // `ShutdownSignal::wait()` subscriber wakes when the trigger fires.
     let (shutdown_signal, shutdown_trigger) = shutdown::new();
-    // The signal handler task owns the trigger — when SIGINT/SIGTERM fires,
-    // every `ShutdownSignal::wait()` subscriber wakes.
-    let signal_task = install_signal_handlers(shutdown_trigger);
 
     // ---- Step 7: claude binary discovery; refuse on missing `wt`/`ghq`.
     let claude_binary = ClaudeBinary::discover(None)?;
@@ -472,24 +497,26 @@ async fn bootstrap(args: RunArgs, env: &dyn EnvReader) -> Result<Bootstrapped, R
     // DedupIndex tests cover that path independently.
     let dedup = Arc::new(DedupIndex::new());
 
-    Ok(Bootstrapped {
-        shutdown_signal,
-        listener,
-        bind_addr,
-        webhook_state,
-        issue_rx,
-        _logging_guard: logging_guard,
-        _signal_task: signal_task,
-        components,
-        orchestrator: composition.orchestrator,
-        inbox: composition.inbox,
-        read_handle: composition.read_handle,
-        escalations: composition.escalations,
-        linear_client,
-        judge,
-        tracker_handle,
-        dedup,
-    })
+    Ok((
+        Bootstrapped {
+            shutdown_signal,
+            listener,
+            bind_addr,
+            webhook_state,
+            issue_rx,
+            _logging_guard: logging_guard,
+            components,
+            orchestrator: composition.orchestrator,
+            inbox: composition.inbox,
+            read_handle: composition.read_handle,
+            escalations: composition.escalations,
+            linear_client,
+            judge,
+            tracker_handle,
+            dedup,
+        },
+        shutdown_trigger,
+    ))
 }
 
 // ---------------------------------------------------------------------------
@@ -1466,10 +1493,13 @@ pub mod testing {
     use crate::tracker::refresh::TrackerRefresh;
 
     use super::{
-        AdmissionSink, OrchestratorComposition, OrchestratorInbox, OrchestratorSeams,
-        RecoverySeedSink, RuntimeError, compose_orchestrator, drive_recovery_seed,
-        route_observation, spawn_workspace_poller,
+        AdmissionSink, Bootstrapped, OrchestratorComposition, OrchestratorInbox,
+        OrchestratorSeams, RecoverySeedSink, RuntimeError, bootstrap, compose_orchestrator,
+        drive_recovery_seed, route_observation, serve, spawn_workspace_poller,
     };
+    use crate::cli::RunArgs;
+    use crate::config::EnvReader;
+    use crate::shutdown::ShutdownTrigger;
     use crate::orchestrator::core::ActorMessage;
     use crate::orchestrator::tracker_bridge::{DedupIndex, ObserveOutcome};
     use crate::shutdown::AwaitOutcome;
@@ -1827,6 +1857,50 @@ pub mod testing {
         drop(inbox);
         let handles = orchestrator.drain_actors();
         super::await_actor_handles_with_window(handles, window).await
+    }
+
+    // -----------------------------------------------------------------------
+    // Shutdown-trigger test seam (Task 10.5)
+    // -----------------------------------------------------------------------
+
+    /// Opaque wrapper around the runtime-private `Bootstrapped` so the
+    /// test seam can hand a fully composed runtime back to integration
+    /// tests without exposing the struct's field shape. The wrapper
+    /// only forwards to the production `serve()` step, preserving
+    /// production semantics in test composition.
+    pub struct BootstrappedForTest {
+        inner: Bootstrapped,
+    }
+
+    impl BootstrappedForTest {
+        /// Drive the production `serve()` step against the wrapped
+        /// `Bootstrapped`. Returns `Ok(())` once shutdown completes
+        /// inside `SHUTDOWN_WINDOW`, exactly mirroring `run_with_env`'s
+        /// post-bootstrap behavior — but without any OS signal handler
+        /// installed, so the only path to shutdown is firing the
+        /// `ShutdownTrigger` returned alongside this wrapper from
+        /// [`bootstrap_for_test`].
+        pub async fn serve(self) -> Result<(), RuntimeError> {
+            serve(self.inner).await
+        }
+    }
+
+    /// Compose the runtime via the production `bootstrap` step but skip
+    /// the OS signal handler install. Returns the composed runtime
+    /// (wrapped in [`BootstrappedForTest`]) plus the matching
+    /// [`ShutdownTrigger`] so e2e tests can fire shutdown directly on
+    /// the trigger instead of delivering SIGINT/SIGTERM to the test
+    /// harness process.
+    ///
+    /// Production code paths must continue to use [`super::run`] /
+    /// [`super::run_with_env`], which install the signal handlers via
+    /// [`super::install_signal_handlers`] before driving `serve()`.
+    pub async fn bootstrap_for_test(
+        args: RunArgs,
+        env: &dyn EnvReader,
+    ) -> Result<(BootstrappedForTest, ShutdownTrigger), RuntimeError> {
+        let (inner, trigger) = bootstrap(args, env).await?;
+        Ok((BootstrappedForTest { inner }, trigger))
     }
 }
 

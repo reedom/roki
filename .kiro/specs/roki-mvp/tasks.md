@@ -538,7 +538,7 @@ refs:
   - _Requirements: 2.13, 3.4_
   - _Boundary: runtime, config (if config-slot path), tracker/linear (if endpoint accessor needed)_
 
-- [ ] 10.5 Expose shutdown trigger via runtime::testing seam
+- [x] 10.5 Expose shutdown trigger via runtime::testing seam
   - `runtime::bootstrap` constructs `(ShutdownSignal, ShutdownTrigger)` and immediately consumes the trigger inside `install_signal_handlers`. Add a `runtime::testing::run_with_env_and_trigger` (or equivalent shape — `bootstrap_for_test` returning the `Bootstrapped` struct + a clonable `ShutdownTrigger`) so e2e tests can fire shutdown without sending SIGINT to the test harness process.
   - Production path is unchanged; the seam replaces the `install_signal_handlers` call only when the test entry is used.
   - Observable completion: integration test composes the runtime via the new seam, fires the trigger, and asserts `serve()` returns Ok within `SHUTDOWN_WINDOW + 1s` without sending any OS signals.
