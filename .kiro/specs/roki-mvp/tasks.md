@@ -720,7 +720,7 @@ refs:
   - _Requirements: 12.3_
   - _Boundary: runtime_
 
-- [ ] 13.7 (P) Write e2e_orchestrator_unparseable test
+- [x] 13.7 (P) Write e2e_orchestrator_unparseable test
   - Drive two consecutive schema-drift turns (after one daemon-side reprompt) → daemon routes to `Inactive(orchestrator_unparseable)`; raw stdout captured in the log.
   - Observable completion: `cargo test e2e_orchestrator_unparseable` passes; the structured log contains the raw drift payload.
   - _Depends: 10.1, 6.5_
