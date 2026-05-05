@@ -736,7 +736,7 @@ refs:
   - _Requirements: 5.5, 12.3_
   - _Boundary: runtime_
 
-- [ ] 13.9 (P) Write e2e_assignment_loss test
+- [x] 13.9 (P) Write e2e_assignment_loss test
   - Drive a webhook reporting assignment moved away mid-`implement` → orchestrator + phase terminated → `Cleaning` without retry-budget consumption → allowlist-iteration cleanup removes the worktree (branch == issue id verbatim) → session tempdir removed.
   - Observable completion: `cargo test e2e_assignment_loss` passes; the resulting transition log shows `Active → Cleaning` without entering `Backoff`; the cleaned worktree is gone but the branch is retained.
   - _Depends: 10.1, 8.6_

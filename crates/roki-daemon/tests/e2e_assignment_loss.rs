@@ -19,12 +19,14 @@ use common::{run_phase_action, OrchHarness};
 use roki_daemon::engine::orchestrator_session::action_parser::PhaseName;
 use roki_daemon::orchestrator::core::{ActorMessage, OrchestratorActionEvent};
 use roki_daemon::orchestrator::escalation::EscalationKind;
-use roki_daemon::orchestrator::state::{IssueId, Mode};
+use roki_daemon::orchestrator::state::{IssueId, Mode, WorkerState};
 use roki_daemon::tracker::model::RepoId;
 
 #[tokio::test]
 async fn assignment_lost_mid_flight_drives_cleaning_without_retry_consumption() {
     let h = OrchHarness::new();
+    // Subscribe BEFORE sending any messages so every transition is observed.
+    let mut transitions = h.subscribe();
     // The orchestrator nominates one implement; while it runs the tracker
     // observes assignment loss and the actor preempts to Cleaning.
     h.engine
@@ -82,4 +84,39 @@ async fn assignment_lost_mid_flight_drives_cleaning_without_retry_consumption() 
         snap.iter().all(|e| e.kind != EscalationKind::RetryExhausted),
         "assignment-lost must not consume retry budget: {snap:?}",
     );
+
+    // Drain the transition stream and assert no Backoff transitions
+    // occurred (per requirements 3.10 / 4.9: tracker-driven assignment loss
+    // preempts to Cleaning without consuming retry budget — the retry
+    // window state Backoff must never be entered on this path). Also
+    // assert that Cleaning was reached, with the trigger explicitly
+    // tagged AssignmentLost (the daemon-side cause of the preempt).
+    let mut observed = Vec::new();
+    while let Ok(event) = transitions.try_recv() {
+        if event.issue == issue {
+            observed.push(event);
+        }
+    }
+    assert!(
+        !observed
+            .iter()
+            .any(|e| matches!(e.next, WorkerState::Backoff)
+                || matches!(e.previous, WorkerState::Backoff)),
+        "assignment-lost must not route through Backoff: {observed:?}",
+    );
+    let cleaning_via_assignment_lost = observed.iter().any(|e| {
+        matches!(e.next, WorkerState::Cleaning)
+            && e.trigger
+                == roki_daemon::orchestrator::state::TransitionTrigger::AssignmentLost
+    });
+    assert!(
+        cleaning_via_assignment_lost,
+        "expected a Cleaning transition triggered by AssignmentLost, got {observed:?}",
+    );
+
+    // Branch retention is structurally guaranteed by the WorktreeOps seam:
+    // its `cleanup` contract returns the removed worktree paths only and
+    // exposes no branch-deletion path (see WorktreeOps trait in
+    // orchestrator/core.rs). The cleanup_calls assertion above therefore
+    // also witnesses that no branch removal was requested.
 }
