@@ -555,6 +555,25 @@ refs:
   - _Requirements: 1.5, 11.2, 11.3, 11.4, 11.6, 11.7_
   - _Boundary: runtime, engine/orchestrator_session, engine/phase_subprocess (debug-sink threading only; no behavior change to subprocess launch otherwise)_
 
+- [ ] 10.7 Wire real PhaseSubprocessAdapter as PhaseEngine + mid-phase SIGTERM
+  - Replace `Arc::new(PendingPhaseEngine::new(...))` at `crates/roki-daemon/src/runtime.rs:611` with the real `PhaseSubprocessAdapter` (already constructed and held on `RuntimeComponents.phase_subprocess_adapter`). Add a `PhaseEngine` impl on the adapter (or a thin `PhaseSubprocessEngineImpl` adapter analogous to `OrchestratorEngineImpl`) so orchestrator core's `phase_engine.run_phase(...)` reaches real subprocess launch.
+  - On the spawned `tokio::process::Child` for phase subprocesses (`engine/claude.rs::ClaudeSpawn::spawn` or wherever the phase Child is built), set `kill_on_drop(true)` AND/OR implement `Drop` on the phase handle that issues SIGTERM via `Child::start_kill` before returning. This closes the mid-phase abort SIGTERM gap recorded in Implementation Notes.
+  - Wire the `DebugSinkFactory` from 10.6 through the new engine impl into the phase Child's stdout/stderr pumps (the orchestrator-session adapter already does this; mirror that wiring).
+  - Pass through `additional_context`, `mode`, `worktree_path`, and `permission_strategy` from `PhaseEngine::run_phase` parameters into the actual subprocess argv per `engine/phase_subprocess/adapter.rs` existing logic.
+  - Observable completion: integration test composes `runtime::run_with_shutdown` via the test seam, drives an admit-passing issue through one phase end-to-end against a `fake_claude` binary, and asserts (a) `phase_engine.run_phase` is the real adapter (not `PendingPhaseEngine`), (b) the phase Child receives the documented argv, (c) on mid-phase abort the Child receives SIGTERM (process exits with signal-15 status or `kill_on_drop` triggers).
+  - _Depends: 6.1, 6.2, 6.3, 6.4, 6.5, 10.1.1, 10.1.6_
+  - _Requirements: 1.4, 6.7, 7.1, 7.3_
+  - _Boundary: runtime, engine/phase_subprocess_
+
+- [ ] 10.8 Enqueue EscalationEntry on orchestrator ProcessExit
+  - Patch `crates/roki-daemon/src/orchestrator/core.rs:614-627` `OrchestratorActionEvent::ProcessExit` handler so a non-zero exit without a prior terminal `action=stop` enqueues an `EscalationEntry { kind: EscalationKind::OrchestratorCrash, issue, ... }` BEFORE calling `transition_to_inactive(...OrchestratorCrash, OrchestratorDead)`.
+  - OR equivalently: have the orchestrator-session runtime composition emit BOTH `OrchestratorActionEvent::ProcessExit` AND `ActorMessage::DaemonEscalation { OrchestratorCrash }` from a single non-zero exit signal so the existing `handle_daemon_escalation` enqueue path at `core.rs:982-991` fires. Pick one approach and document the rationale.
+  - The 13.6 seam test already drives both signals through `OrchHarness` to model contract-level coverage; production path must satisfy the same contract.
+  - Observable completion: integration test forces a non-zero orchestrator session exit without `action=stop` against the real adapter, asserts (a) `Inactive(OrchestratorCrash)` reached, (b) `OrchestratorRead` snapshot's escalation queue contains the entry for that issue, (c) no Linear write side effects.
+  - _Depends: 8.5, 10.7_
+  - _Requirements: 12.3_
+  - _Boundary: orchestrator/core or runtime (depending on chosen approach)_
+
 - [ ] 11. Reference docs of record (technical contracts consumed by code + tests)
 
 - [x] 11.1 (P) Author docs/reference/cli.md
