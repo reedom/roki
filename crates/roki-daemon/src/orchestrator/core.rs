@@ -599,12 +599,14 @@ async fn drain_actions(state: &mut ActorState, deps: &OrchestratorDeps) {
                 state.state,
                 WorkerState::Pending | WorkerState::Active | WorkerState::Backoff
             ) {
-                transition_to_inactive(
+                route_orchestrator_dead(
                     state,
                     deps,
+                    EscalationKind::OrchestratorCrash,
                     InactiveReason::OrchestratorCrash,
-                    TransitionTrigger::OrchestratorDead,
-                );
+                    json!({ "exit_success": false, "channel_closed": true }),
+                )
+                .await;
             }
             return;
         };
@@ -615,31 +617,66 @@ async fn drain_actions(state: &mut ActorState, deps: &OrchestratorDeps) {
                     return;
                 }
             }
-            OrchestratorActionEvent::ProcessExit { success: _ } => {
+            OrchestratorActionEvent::ProcessExit { success } => {
                 if matches!(
                     state.state,
                     WorkerState::Pending | WorkerState::Active | WorkerState::Backoff
                 ) {
-                    transition_to_inactive(
+                    route_orchestrator_dead(
                         state,
                         deps,
+                        EscalationKind::OrchestratorCrash,
                         InactiveReason::OrchestratorCrash,
-                        TransitionTrigger::OrchestratorDead,
-                    );
+                        json!({ "exit_success": success }),
+                    )
+                    .await;
                 }
                 return;
             }
             OrchestratorActionEvent::TerminalDrift => {
-                transition_to_inactive(
+                route_orchestrator_dead(
                     state,
                     deps,
+                    EscalationKind::OrchestratorUnparseable,
                     InactiveReason::OrchestratorUnparseable,
-                    TransitionTrigger::OrchestratorDead,
-                );
+                    json!({ "reason": "terminal_drift" }),
+                )
+                .await;
                 return;
             }
         }
     }
+}
+
+/// Route an orchestrator-dead failure: enqueue the escalation entry on the
+/// queue FIRST so `OrchestratorRead` snapshots reflect the failure even when
+/// the actor exits before any other observer runs, then transition the
+/// actor to the matching `Inactive` reason via `OrchestratorDead`.
+///
+/// Mirrors the enqueue-then-transition pattern in `handle_daemon_escalation`
+/// (Req 12.3) so the production path satisfies the same contract the 13.6 /
+/// 13.7 seam tests model. No `daemon_directive` is dispatched here: the
+/// orchestrator session is already dead by definition.
+async fn route_orchestrator_dead(
+    state: &mut ActorState,
+    deps: &OrchestratorDeps,
+    kind: EscalationKind,
+    reason: InactiveReason,
+    fields: Value,
+) {
+    let correlation_id = format!("{}-{}", kind.wire(), state.issue);
+    deps.escalations
+        .enqueue(EscalationEntry {
+            issue: state.issue.clone(),
+            repo: state.repo().map(|r| r.0.clone()),
+            kind,
+            correlation_id,
+            timestamp: OffsetDateTime::now_utc(),
+            structured_fields: fields,
+        })
+        .await;
+
+    transition_to_inactive(state, deps, reason, TransitionTrigger::OrchestratorDead);
 }
 
 /// Returns `false` when the action terminates orchestration (`action=stop`).
