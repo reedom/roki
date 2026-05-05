@@ -704,7 +704,7 @@ refs:
   - _Requirements: 4.4, 4.11, 5.11, 7.2_
   - _Boundary: runtime_
 
-- [ ] 13.5 (P) Write e2e_phase_nonclean_retry test
+- [x] 13.5 (P) Write e2e_phase_nonclean_retry test
   - Drive a phase non-clean exit on `implement`: first → `Active → Backoff → Active`; second non-clean exhausts `max_attempts = 2` → daemon emits `daemon_directive(retry_exhausted)` to the orchestrator → orchestrator emits `action=stop outcome=failure` → daemon maps to `Inactive(retry_exhausted)`.
   - Observable completion: `cargo test e2e_phase_nonclean_retry` passes; replays consume zero `extension.orchestrator.max_phases` slots; backoff between attempts respects the configured curve.
   - _Depends: 10.1, 6.9_
