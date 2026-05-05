@@ -19,11 +19,12 @@ Downstream specs (currently observability) read / nudge / inject context / names
 
 ## User-visible Behavior
 
-### Five kinds of surface
+### Six kinds of surface
 
 | Kind | Role |
 |---|---|
-| **Read** (`OrchestratorRead` trait) | Read-only snapshot of per-issue state + single-issue lookup + escalation queue |
+| **Read** (`OrchestratorRead` trait) | Read-only snapshot of per-issue state + single-issue lookup by `IssueId` + escalation queue |
+| **Observe** (`TransitionSubscriber` via `SubscriberHooks::subscribe`) | Read-only subscription to per-issue state-machine transitions; non-vetoable; the subscriber's `on_transition` is sync and non-blocking; panics are caught and isolated (the prior vetoable kiro-spec / kiro-review gate hooks are removed) |
 | **Nudge** (`TrackerRefresh` trait) | Request a poll while respecting the cadence cap and 429 backoff |
 | **Inject** (engine adapter `additional_context`) | Inject machine-extractable additional context into the phase subprocess's prompt envelope (the orchestrator populates this on `action=run_phase` directives, including the artifact-validation retry path) |
 | **Phase override** (`extension.phase.<name>.command` / `prompt_template_<phase>` block) | Per-phase swap of the catalog default skill (slash-command override) or full prompt (templated stdin); mutually exclusive forms ([FR 18 §Phase override](18-worker-skill-workflow.md)) |

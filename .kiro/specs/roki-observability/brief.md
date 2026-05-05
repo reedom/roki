@@ -13,25 +13,24 @@ refs:
 
 ## Current State
 - roki-mvp has structured logs via tracing, but no programmatic surface for state.
-- Symphony has both a JSON HTTP API (`/api/v1/state`, `/api/v1/<issue>`, `POST /api/v1/refresh`) and an optional terminal / web dashboard. roki should adopt a similar two-layer split.
 - TUI is roadmapped from monorail but never built.
 
 ## Desired Outcome
 - An optional HTTP server (axum) exposing roki's in-memory orchestrator state as JSON over loopback.
 - A ratatui TUI client that consumes the JSON API and renders: active worker list, per-issue state + last event, escalation queue, token usage, rate-limit snapshots.
 - The daemon and TUI are separate processes (TUI optional, can be run on demand or kept open).
-- API schema is symphony-compatible so future dashboard alternates (web UI) can interop.
+- API schema versioned under `/api/v1/` and defined in a single shared crate so external dashboards (future web UI) interop without per-tool variants.
 
 ## Approach
-Add an axum HTTP server module to the daemon, gated by `server.port` (off by default, loopback bind). Endpoints mirror symphony's: `GET /api/v1/state`, `GET /api/v1/<issue>`, `POST /api/v1/refresh`. Build a separate ratatui binary (`roki-tui`) that reads from this API with a refresh loop. TUI provides: live state view, basic interactions (acknowledge escalation, request refresh). No state-mutating actions in v1.
+Add an axum HTTP server module to the daemon, gated by `server.port` (off by default, loopback bind). Endpoints: `GET /api/v1/state`, `GET /api/v1/<issue>`, `POST /api/v1/refresh`. Build a separate ratatui binary (`roki-tui`) that reads from this API with a refresh loop. TUI provides: live state view, basic interactions (acknowledge escalation, request refresh). No state-mutating actions in v1.
 
 ## Scope
 - **In**:
   - axum HTTP server module in roki daemon
   - Endpoints: `GET /api/v1/state`, `GET /api/v1/<issue>`, `POST /api/v1/refresh`
-  - JSON schema mirroring symphony's
+  - Versioned JSON schema (`/api/v1/`) defined in a single shared crate
   - Loopback-only default bind, configurable
-  - HTML / ANSI escaping for any agent-derived strings (symphony hardened this in PRs #22, #23 -- do it from day one)
+  - HTML / ANSI escaping for any agent-derived strings from day one
   - `roki-tui` ratatui binary: live state view, escalation acknowledgement, refresh button
   - macOS + Linux terminal compatibility (iTerm2 / Ghostty / WezTerm / Alacritty primary)
 
@@ -60,7 +59,7 @@ Add an axum HTTP server module to the daemon, gated by `server.port` (off by def
 - **Adjacent**: none.
 
 ## Constraints
-- API schema parity with symphony so external dashboards can interop without per-tool variants.
+- JSON schema versioned under `/api/v1/` and centralized in a single shared crate so external dashboards interop on a stable contract.
 - All agent-derived strings must be HTML-escaped + ANSI-stripped before rendering.
 - Default bind must be loopback only; document the exposure risk if the user changes it.
 - TUI must degrade gracefully on Terminal.app (informational warning about RGB color limits).

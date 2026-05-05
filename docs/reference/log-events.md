@@ -64,6 +64,12 @@ The prior linear-updater subagent's `dispatch` / `outcome` events are removed al
 
 | Event | Summary | Used by | Requirements |
 |---|---|---|---|
+| API disabled | Info-level startup event when `extension.server.port` is unset; no socket is bound | [15-http-api](../fr/15-http-api.md) | roki-observability Req 1.1 |
+| API listening | Info-level startup event naming the bind address and port before the daemon reports ready | [15-http-api](../fr/15-http-api.md) | roki-observability Req 1.2 |
+| Non-loopback bind | Warn-level startup event when `extension.server.bind` resolves outside `127.0.0.0/8` and `::1/128`; names the bind host and the absence of authentication | [15-http-api](../fr/15-http-api.md) | roki-observability Req 1.5, Req 7.2 |
+| Bind failure | Error-level event when the configured port fails to bind; names the offending port and the underlying OS error; the daemon continues without the API and does not retry in v1 | [15-http-api](../fr/15-http-api.md) | roki-observability Req 1.3 |
+| Server config rejected | Error-level event on `extension.server.*` startup or hot-reload validation failure; names the offending key. On hot-reload the previous policy remains in effect and the daemon does not exit | [15-http-api](../fr/15-http-api.md) | roki-observability Req 15.3, Req 15.3a |
+| Server config deferred | Info-level event on hot-reload of valid `extension.server.port` / `extension.server.bind` changes; the listening socket is NOT rebound at runtime in v1 — the change applies on next daemon restart | [15-http-api](../fr/15-http-api.md) | roki-observability Req 1.6 |
 | HTTP request | method / path / response status / request duration / client address / per-request correlation identifier | [15-http-api](../fr/15-http-api.md) | roki-observability Req 14.1 |
 | Refresh request | Client address + coalescing decision | [15-http-api](../fr/15-http-api.md) | roki-observability Req 4.5 |
 

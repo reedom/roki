@@ -90,7 +90,7 @@ Daemon-only failures (stall, retry exhaustion, fs poison, multi-repo rejection) 
 
 ## Specs (dependency order)
 - [x] roki-mvp -- symphony-parity vertical slice: Rust skeleton + Linear poll + orchestrator session + phase subprocess lifecycle + workspace + run loop + orchestrator-driven artifact validation (`requirements.md` after `materialize_spec`, `review.md` after `finalize_review`). Single repo per ticket; multi-repo tickets are rejected by the orchestrator's admission decision with a `needs-split` Linear label and comment posted via Linear MCP. Dependencies: none
-- [x] roki-observability -- optional HTTP API (axum) + ratatui TUI client; symphony /api/v1/state schema. Dependencies: roki-mvp
+- [x] roki-observability -- optional HTTP API (axum) + ratatui TUI client; versioned JSON schema under `/api/v1/` centralized in a shared `roki-api-types` crate. Dependencies: roki-mvp
 - ~~roki-spec-gate~~ -- removed from roki scope; absorbed into roki-mvp as orchestrator-driven artifact validation. The historical spec under `.kiro/specs/roki-spec-gate/` is removed.
 - ~~roki-review-gate~~ -- removed from roki scope; absorbed into roki-mvp as orchestrator-driven artifact validation. The historical spec under `.kiro/specs/roki-review-gate/` is removed.
 - ~~roki-distill-postmerge~~ -- removed from roki scope; flow-document distill / archive sweep is now handled in CI, not by the daemon. The historical spec under `.kiro/specs/roki-distill-postmerge/` is retained for reference but is not active.
