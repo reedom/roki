@@ -688,7 +688,7 @@ refs:
   - _Requirements: 4.3, 5.6, 5.11_
   - _Boundary: runtime_
 
-- [ ] 13.3 (P) Write e2e_needs_classify_path_b test
+- [x] 13.3 (P) Write e2e_needs_classify_path_b test
   - NEEDS_CLASSIFY Path B end-to-end: `classify` returns `Path B` → `implement` (direct mode, daemon-internal `prompt_template_implement_direct` rendered with the ticket body's numbered acceptance criteria as `additional_context`) → `review` → `validate` → `open_pr` → `finalize_review` → `outcome=success`.
   - Observable completion: `cargo test e2e_needs_classify_path_b` passes; the rendered direct-mode prompt contains the verbatim `additional_context` in the documented section.
   - _Depends: 10.1, 11.6_
