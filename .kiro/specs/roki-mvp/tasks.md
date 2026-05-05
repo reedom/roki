@@ -496,7 +496,7 @@ refs:
   - _Requirements: 3.3, 3.4, 13.3_
   - _Boundary: runtime_
 
-- [ ] 10.1.5 Pipe webhook + poll observations through PreAdmissionJudge into orchestrator inbox
+- [x] 10.1.5 Pipe webhook + poll observations through PreAdmissionJudge into orchestrator inbox
   - Funnel the existing `POST /linear/webhook` receiver (Task 10.3 / 3.2) and the poller observation stream (10.1.4) through `PreAdmissionJudge` (Task 3.4). Route `Admit { issue, mode }` into the orchestrator inbox (10.1.2); route `AssignmentLost` / `RokiReadyRemoved` into the dedicated channels consumed by the dedup index (Task 3.6).
   - Pre-admission failures emit `tracker.pre_admission.skipped` log events with the failed condition and drop without inbox delivery.
   - Race-safe: concurrent webhook + poll observation of the same issue must result in at most one orchestrator launch and at most one in-flight phase subprocess (Task 3.6 invariant).

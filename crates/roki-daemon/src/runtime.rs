@@ -34,7 +34,7 @@ use std::sync::{Arc, RwLock};
 use thiserror::Error;
 use tokio::net::TcpListener as TokioTcpListener;
 use tokio::sync::mpsc;
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 use crate::cli::RunArgs;
 use crate::config::{
@@ -62,6 +62,7 @@ use crate::orchestrator::recovery::{
     DiscoveredIssue, RecoveryDecision, RecoveryError, RecoveryReconciler,
 };
 use crate::orchestrator::state::{InactiveReason, IssueId, Mode, WorkerState};
+use crate::orchestrator::tracker_bridge::{DedupIndex, ObserveOutcome, TerminationReason};
 use crate::permissions::{PermissionConfigError, PermissionResolver};
 use crate::session::SessionManager;
 use crate::shutdown::{
@@ -237,6 +238,14 @@ struct Bootstrapped {
     /// await the poller within `SHUTDOWN_WINDOW`, and observability can
     /// clone the refresh `Arc<dyn TrackerRefresh>` without rewiring.
     tracker_handle: TrackerHandle,
+    /// Per-issue dedup index that absorbs duplicate webhook + poll
+    /// observations and decides whether each new observation should launch
+    /// a fresh orchestrator session, refresh the in-flight snapshot, drop
+    /// silently, or terminate the in-flight session. Constructed empty at
+    /// bootstrap; observations land via the admission pipe (10.1.5).
+    /// Held so 10.1.6 (shutdown) and observability can read snapshots.
+    #[allow(dead_code)]
+    dedup: Arc<DedupIndex>,
 }
 
 /// Workspace-level tracker handle composed by step 9 of the daemon
@@ -453,6 +462,13 @@ async fn bootstrap(args: RunArgs, env: &dyn EnvReader) -> Result<Bootstrapped, R
         "roki daemon bootstrap complete"
     );
 
+    // ---- Step 11 (admission pipe anchor): construct the per-issue dedup
+    // index now so it is held on `Bootstrapped` for downstream wiring +
+    // observability. The recovery seed (Task 10.1.3) does not touch the
+    // dedup index — per-issue snapshot rehydration is a follow-up; the
+    // DedupIndex tests cover that path independently.
+    let dedup = Arc::new(DedupIndex::new());
+
     Ok(Bootstrapped {
         shutdown_signal,
         listener,
@@ -469,6 +485,7 @@ async fn bootstrap(args: RunArgs, env: &dyn EnvReader) -> Result<Bootstrapped, R
         linear_client,
         judge,
         tracker_handle,
+        dedup,
     })
 }
 
@@ -829,6 +846,145 @@ async fn dispatch_decision<S>(
     }
 }
 
+// ---------------------------------------------------------------------------
+// Admission pipe (Task 10.1.5)
+// ---------------------------------------------------------------------------
+//
+// Webhook + poll observations are funnelled through the workspace-level mpsc
+// (`issue_rx`). Each observation runs through `PreAdmissionJudge::evaluate`
+// (which already emits `tracker.pre_admission.skipped` on Skip), then through
+// `DedupIndex::observe` to decide whether to launch a fresh actor, refresh
+// the in-flight snapshot, drop silently, or terminate the in-flight session.
+//
+// Concurrency: `DedupIndex` serialises observations through an internal
+// `RwLock`, so two concurrent observations of the same issue cannot both
+// produce `LaunchFresh`; the second sees the in-flight entry seeded by the
+// first and returns `UpdateInPlace`.
+
+/// Sink the admission pipe routes `ActorMessage`s through. The production
+/// implementation is [`OrchestratorInbox`]; tests inject a recording sink to
+/// observe the routed message sequence without spawning per-issue actors.
+#[async_trait::async_trait]
+pub(crate) trait AdmissionSink: Send + Sync {
+    async fn send(
+        &self,
+        issue: IssueId,
+        message: ActorMessage,
+    ) -> Result<(), ActorMessage>;
+}
+
+#[async_trait::async_trait]
+impl AdmissionSink for OrchestratorInbox {
+    async fn send(
+        &self,
+        issue: IssueId,
+        message: ActorMessage,
+    ) -> Result<(), ActorMessage> {
+        OrchestratorInbox::send(self, issue, message).await
+    }
+}
+
+/// Drive one normalized observation through the pre-admission judge + dedup
+/// index, then route the resulting [`ObserveOutcome`] through `sink`. Pure
+/// (apart from logging) so the production loop and the integration-test seam
+/// share identical routing logic.
+///
+/// Returns the [`ObserveOutcome`] the dedup index produced so callers (tests)
+/// can assert on the decision branch without observing side effects.
+pub(crate) async fn route_observation<S>(
+    issue: NormalizedIssue,
+    judge: &PreAdmissionJudge,
+    dedup: &DedupIndex,
+    sink: &S,
+) -> ObserveOutcome
+where
+    S: AdmissionSink + ?Sized,
+{
+    let issue_id = issue.issue.clone();
+    let decision = judge.evaluate(&issue);
+    let outcome = dedup.observe(issue, decision).await;
+    match &outcome {
+        ObserveOutcome::LaunchFresh { issue: normalized, mode } => {
+            if let Err(returned) = sink
+                .send(
+                    normalized.issue.clone(),
+                    ActorMessage::TrackerAdmit {
+                        mode: *mode,
+                        repo: None,
+                    },
+                )
+                .await
+            {
+                warn!(
+                    target: "tracker.admission_pipe.actor_inbox_closed",
+                    issue = %normalized.issue,
+                    "actor inbox closed; dropping {:?}",
+                    returned,
+                );
+            }
+        }
+        ObserveOutcome::UpdateInPlace => {
+            debug!(
+                target: "tracker.pre_admission.update_in_place",
+                issue = %issue_id,
+                "duplicate observation refreshed in-flight snapshot"
+            );
+        }
+        ObserveOutcome::Drop => {
+            // The info-severity `tracker.pre_admission.skipped` log already
+            // fired inside `judge.evaluate`; surface a debug-severity event
+            // so the routing branch is visible without re-emitting the
+            // skipped reason at info level.
+            debug!(
+                target: "tracker.pre_admission.drop",
+                issue = %issue_id,
+                "pre-admission failed; dropping observation"
+            );
+        }
+        ObserveOutcome::TerminateInFlight { reason } => {
+            let message = match reason {
+                TerminationReason::AssignmentLost => ActorMessage::TrackerAssignmentLost,
+                TerminationReason::RokiReadyRemoved => ActorMessage::TrackerRokiReadyRemoved,
+            };
+            if let Err(returned) = sink.send(issue_id.clone(), message).await {
+                warn!(
+                    target: "tracker.admission_pipe.actor_inbox_closed",
+                    issue = %issue_id,
+                    "actor inbox closed; dropping {:?}",
+                    returned,
+                );
+            }
+        }
+    }
+    outcome
+}
+
+/// Spawned task body: loop on the workspace-level `issue_rx` channel, route
+/// every observation through [`route_observation`], and exit cleanly on
+/// shutdown or sender closure.
+async fn admission_pipe(
+    mut issue_rx: mpsc::Receiver<NormalizedIssue>,
+    judge: Arc<PreAdmissionJudge>,
+    dedup: Arc<DedupIndex>,
+    inbox: OrchestratorInbox,
+    shutdown_signal: ShutdownSignal,
+) {
+    loop {
+        tokio::select! {
+            _ = shutdown_signal.wait() => return,
+            msg = issue_rx.recv() => {
+                let Some(issue) = msg else {
+                    // Both webhook + poller dropped their senders; the
+                    // workspace-level mpsc is closed and no more
+                    // observations can arrive.
+                    return;
+                };
+                route_observation(issue, judge.as_ref(), dedup.as_ref(), &inbox).await;
+            }
+        }
+    }
+}
+
 /// Inputs to [`assemble_runtime_components`]. Kept as a typed bundle so the
 /// factory shape stays additive as Tasks 10.1.2-10.1.6 introduce more
 /// pre-resolved dependencies (orchestrator inbox, recovery seed, etc.).
@@ -935,8 +1091,11 @@ async fn serve(bootstrap: Bootstrapped) -> Result<(), RuntimeError> {
         listener,
         bind_addr,
         webhook_state,
-        mut issue_rx,
+        issue_rx,
         tracker_handle,
+        judge,
+        inbox,
+        dedup,
         ..
     } = bootstrap;
 
@@ -958,25 +1117,14 @@ async fn serve(bootstrap: Bootstrapped) -> Result<(), RuntimeError> {
         }
     };
 
-    let shutdown_for_drain = shutdown_signal.clone();
-    let drain = async move {
-        // Until the admission pipe is wired in (Task 10.1.5), drain the
-        // workspace-level mpsc so neither the webhook receiver nor the
-        // poller back-pressure their producers.
-        loop {
-            tokio::select! {
-                _ = shutdown_for_drain.wait() => return,
-                msg = issue_rx.recv() => {
-                    if msg.is_none() {
-                        return;
-                    }
-                }
-            }
-        }
-    };
-
     let server_handle = tokio::spawn(server);
-    let drain_handle = tokio::spawn(drain);
+    let admission_handle = tokio::spawn(admission_pipe(
+        issue_rx,
+        judge,
+        dedup,
+        inbox,
+        shutdown_signal.clone(),
+    ));
     let TrackerHandle {
         refresh: _refresh,
         poller_join,
@@ -987,7 +1135,7 @@ async fn serve(bootstrap: Bootstrapped) -> Result<(), RuntimeError> {
     let outcome = await_workers_with_window(
         [
             ("webhook-server".to_owned(), join_to_unit(server_handle)),
-            ("issue-drain".to_owned(), join_to_unit(drain_handle)),
+            ("admission-pipe".to_owned(), join_to_unit(admission_handle)),
             ("linear-poller".to_owned(), join_to_unit(poller_join)),
         ],
         SHUTDOWN_WINDOW,
@@ -1190,9 +1338,12 @@ pub mod testing {
     use crate::tracker::refresh::TrackerRefresh;
 
     use super::{
-        OrchestratorComposition, OrchestratorInbox, OrchestratorSeams, RecoverySeedSink,
-        RuntimeError, compose_orchestrator, drive_recovery_seed, spawn_workspace_poller,
+        AdmissionSink, OrchestratorComposition, OrchestratorInbox, OrchestratorSeams,
+        RecoverySeedSink, RuntimeError, compose_orchestrator, drive_recovery_seed,
+        route_observation, spawn_workspace_poller,
     };
+    use crate::orchestrator::core::ActorMessage;
+    use crate::orchestrator::tracker_bridge::{DedupIndex, ObserveOutcome};
 
     /// Caller-supplied seams for [`compose_for_test`]. Tests inject
     /// recording stubs (see `tests/common/mod.rs`) under each `Arc<dyn ...>`
@@ -1430,6 +1581,101 @@ pub mod testing {
             escalations,
             noops,
         })
+    }
+
+    // -----------------------------------------------------------------------
+    // Admission-pipe test seam (Task 10.1.5)
+    // -----------------------------------------------------------------------
+
+    /// One recorded inbox observation: `(issue, message)`. The message is
+    /// stored as a typed `ActorMessage` so tests can pattern-match the
+    /// routed variant without parsing log output.
+    pub type RecordedInboxMessage = (IssueId, ActorMessage);
+
+    /// Recording inbox used by the admission-pipe integration tests. Captures
+    /// every `ActorMessage` the pipe routes for an issue without spawning a
+    /// per-issue actor, so tests can assert on the routed-message sequence
+    /// (per-actor side effects are exercised by the orchestrator core's own
+    /// integration tests).
+    #[derive(Debug, Default)]
+    pub struct RecordingInbox {
+        messages: AsyncMutex<Vec<RecordedInboxMessage>>,
+    }
+
+    impl RecordingInbox {
+        pub fn new() -> Arc<Self> {
+            Arc::new(Self::default())
+        }
+
+        /// Snapshot of every routed message so far.
+        pub async fn snapshot(&self) -> Vec<RecordedInboxMessage> {
+            self.messages
+                .lock()
+                .await
+                .iter()
+                .map(|(id, msg)| (id.clone(), clone_actor_message(msg)))
+                .collect()
+        }
+
+        /// Count the number of `TrackerAdmit` messages routed for `issue`.
+        pub async fn admit_count_for(&self, issue: &IssueId) -> usize {
+            self.messages
+                .lock()
+                .await
+                .iter()
+                .filter(|(id, msg)| {
+                    id == issue && matches!(msg, ActorMessage::TrackerAdmit { .. })
+                })
+                .count()
+        }
+    }
+
+    fn clone_actor_message(message: &ActorMessage) -> ActorMessage {
+        // `ActorMessage` deliberately does not implement Clone (variants
+        // carry per-message payloads that are not safely duplicable). The
+        // recording inbox only stores the variants the admission pipe can
+        // route — `TrackerAdmit` / `TrackerAssignmentLost` /
+        // `TrackerRokiReadyRemoved` — so we can hand-roll a Clone for those.
+        match message {
+            ActorMessage::TrackerAdmit { mode, repo } => {
+                ActorMessage::TrackerAdmit {
+                    mode: *mode,
+                    repo: repo.clone(),
+                }
+            }
+            ActorMessage::TrackerAssignmentLost => ActorMessage::TrackerAssignmentLost,
+            ActorMessage::TrackerRokiReadyRemoved => ActorMessage::TrackerRokiReadyRemoved,
+            // The admission pipe never routes the remaining variants; if
+            // a test extension surfaces one, surface a panic so the broken
+            // assumption is loud rather than silently mis-recorded.
+            other => panic!(
+                "RecordingInbox does not record non-admission ActorMessage variant: {other:?}"
+            ),
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl AdmissionSink for RecordingInbox {
+        async fn send(
+            &self,
+            issue: IssueId,
+            message: ActorMessage,
+        ) -> Result<(), ActorMessage> {
+            self.messages.lock().await.push((issue, message));
+            Ok(())
+        }
+    }
+
+    /// Compose-and-drive a single admission-pipe observation through the
+    /// production routing logic. Returns the `ObserveOutcome` so tests can
+    /// assert on the dedup-decision branch without observing the inbox.
+    pub async fn drive_admission_for_test(
+        issue: NormalizedIssue,
+        judge: &PreAdmissionJudge,
+        dedup: &DedupIndex,
+        sink: &RecordingInbox,
+    ) -> ObserveOutcome {
+        route_observation(issue, judge, dedup, sink).await
     }
 }
 
