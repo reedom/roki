@@ -696,7 +696,7 @@ refs:
   - _Requirements: 4.4, 5.6_
   - _Boundary: runtime_
 
-- [ ] 13.4 (P) Write e2e_needs_classify_path_a test
+- [x] 13.4 (P) Write e2e_needs_classify_path_a test
   - NEEDS_CLASSIFY Path A end-to-end: `classify` returns `Path A` → orchestrator writes Linear comment + label via Linear MCP in the same turn → `action=stop outcome=needs_operator` → daemon maps to `Inactive(needs_operator)`; worktree + session preserved.
   - Observable completion: `cargo test e2e_needs_classify_path_a` passes; the daemon does NOT issue a Linear write itself; the issue's worktree and session tempdir are retained.
   - _Depends: 10.1_
