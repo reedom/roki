@@ -12,7 +12,7 @@ refs:
 
 ## Overview
 
-**Purpose**: Two artifacts: (1) an optional axum HTTP server module compiled into the `roki` daemon binary, gated by `WORKFLOW.md` `server.port` and bound to loopback by default; (2) a separate `roki-tui` ratatui binary in the same Cargo workspace that consumes the HTTP API on a refresh loop. The API is a read-only projection of orchestrator in-memory state plus one mutating endpoint (`POST /api/v1/refresh`) that nudges the tracker poller — no cancel, retry, or reschedule. The JSON schema mirrors symphony's so future web UIs and external dashboards interop without per-tool variants.
+**Purpose**: Two artifacts: (1) an optional axum HTTP server module compiled into the `roki` daemon binary, gated by `WORKFLOW.md` `server.port` and bound to loopback by default; (2) a separate `roki-tui` ratatui binary in the same Cargo workspace that consumes the HTTP API on a refresh loop. The API is a read-only projection of orchestrator in-memory state plus one mutating endpoint (`POST /api/v1/refresh`) that nudges the tracker poller — no cancel, retry, or reschedule. The JSON schema is versioned under `/api/v1/` and centralized in a single shared crate so server, TUI, and any future external dashboard consume one stable contract.
 
 **Users**: Solo developer or small team operator running roki as a daemon. Future web-UI authors and external dashboards are downstream consumers of the same JSON schema.
 
@@ -20,7 +20,7 @@ refs:
 
 ### Goals
 - Optional axum HTTP server module gated by `WORKFLOW.md` `server.port` (off by default), loopback-only by default.
-- Three endpoints: `GET /api/v1/state`, `GET /api/v1/<issue>`, `POST /api/v1/refresh` — symphony-compatible JSON shape.
+- Three endpoints: `GET /api/v1/state`, `GET /api/v1/<issue>`, `POST /api/v1/refresh` — stable JSON shape under the `/api/v1/` prefix.
 - Day-one HTML escaping plus ANSI stripping of every agent-derived and Linear-derived string field, on both API and TUI sides (defense in depth).
 - A `roki-tui` ratatui binary that renders active workers, per-issue state, last lifecycle event, escalation queue, token usage, rate-limit snapshots; supports local escalation acknowledgement and a manual refresh action.
 - Single shared `roki-api-types` crate so server and TUI cannot drift on schema.
@@ -38,10 +38,18 @@ refs:
 
 ### This Spec Owns
 - The `roki_api_types` shared crate: every `serde` type that crosses the HTTP boundary in either direction (snapshots, per-issue details, refresh acknowledgements, error envelopes), plus the projection contract from roki-mvp's in-memory state into those types.
-- The `server/` module inside the daemon: axum router setup, axum `Server` binding, HTML-escape and ANSI-strip layer for every outbound string field, request-scoped tracing layer, in-memory request counter, refresh-debounce coordinator, projection assembler.
-- The `roki-tui` binary: ratatui app loop, terminal setup and teardown, refresh loop against the API, key-binding map, local-only escalation acknowledgement state, terminal-capability detection and graceful degradation, status-bar error reporting.
-- The `server.*` extension block in the `WorkflowPolicy` schema (under the existing `extension.*` reserved namespace).
+- The `server/` module inside the daemon (under `crates/roki-daemon/src/server/`): axum router setup, axum `Server` binding, HTML-escape and ANSI-strip layer for every outbound string field, request-scoped tracing layer, in-memory request counter, refresh-debounce coordinator, projection assembler, mapper from roki-mvp's existing `EscalationEntry` to the API shape.
+- The `roki-tui` binary (under `crates/roki-tui/`): ratatui app loop, terminal setup and teardown, refresh loop against the API, key-binding map, local-only escalation acknowledgement state, terminal-capability detection and graceful degradation, status-bar error reporting.
+- The `server.*` extension block parsed from the existing `WorkflowPolicy::raw_unknowns` blob (the `extension.server.*` namespace is already reserved by roki-mvp's `WorkflowPolicy`; this spec only adds parsing, not schema registration).
 - Documentation updates to `SPEC.md` and `WORKFLOW.example.md` covering the API surface, the `server.*` config block, and the loopback-bind security note.
+
+### Preconditions (additive extensions to roki-mvp's already-published surface)
+The current `OrchestratorRead`/`IssueState` projection in `crates/roki-daemon/src/orchestrator/read.rs` is too thin for Req 2.2 / Req 3.1. This spec extends it additively (no shape changes to existing fields) before the projection assembler can fulfill the API contract. These extensions live in roki-mvp's source but exist solely to support roki-observability and are listed as task-0.x preconditions in tasks.md:
+- Extend `IssueState` (and `ActorSnapshot`) with optional `repo` (informational only — one ticket maps to at most one repo per `roki-mvp` design.md `Multi-repo tickets (rejected by the orchestrator with outcome=needs_split)`), `workspace_path`, `permission_strategy`, `last_event` (a new `TransitionEventSummary`), `last_event_at`, `last_error`, `correlation_id`.
+- Rename roki-mvp's internal `read::SnapshotResponse` to `OrchestratorSnapshot` to free the name for `roki_api_types::SnapshotResponse`.
+- Document the `SubscriberHooks::subscribe` "register before serving" call sequence.
+
+> **No `issue_by_repo_issue`**: the existing `OrchestratorRead::issue(id: &IssueId)` is sufficient. roki-mvp's 1-ticket-1-repo invariant means `IssueId` alone is unique; the per-issue endpoint takes `<issue>` only and resolves through `issue(id)`. No `repo` query parameter is supported.
 
 ### Out of Boundary
 - Any change to roki-mvp's orchestrator state machine, the `WorkerState` enum, the `TransitionEvent` shape, the `WorkflowLoader` schema beyond adding a reserved extension key, or the per-issue worker lifecycle. The HTTP server module reads through stable interfaces and never writes back into orchestrator state.
@@ -50,18 +58,18 @@ refs:
 - Any agent-side tool registration. The HTTP API is operator-facing; the agent does not see it.
 
 ### Allowed Dependencies
-- roki-mvp's published interfaces: the `Orchestrator::subscribe` API for transition events; an in-memory state read API (added if not already present in roki-mvp; see Revalidation Triggers); the tracker adapter's existing refresh-nudge API (or a thin wrapper added in roki-mvp if not already present).
+- roki-mvp's published extension surface (per `roki-mvp` Req 13.1 / 13.3 and `fr:12-extension-surface`): `TransitionSubscriber` registration via `SubscriberHooks::subscribe` (in `crates/roki-daemon/src/orchestrator/hooks.rs`) for transition events; the read-only `OrchestratorRead` trait (`snapshot()` / `issue()` / `escalation_queue()`) for in-memory state and escalation-queue projection; the `TrackerRefresh` trait (`nudge()`, cadence-cap and 429-backoff aware) for out-of-cycle poll requests. The `OrchestratorRead` projection (`IssueState`) is extended additively with new optional fields via the precondition tasks; the trait method set is unchanged. All dependencies are stable, published in roki-mvp, and consumed read-only / nudge-only by this spec.
 - axum 0.7+ and tower for HTTP routing and middleware. axum is already a roki-mvp dependency for the Linear webhook receiver, which keeps the dependency footprint flat.
 - ratatui plus crossterm for the TUI; reqwest for the TUI's HTTP client (already in the workspace for Linear); serde and serde_json for shared types.
 - A minimal HTML-escape crate (e.g. `html-escape`) and an ANSI-stripping crate (e.g. `strip-ansi-escapes`) consumed in the server module and the TUI for defense in depth.
 
 ### Revalidation Triggers
-- Any change to roki-mvp's `WorkerState`, `TransitionEvent`, or `NormalizedIssue` shape — the projection in `roki_api_types` must be updated and the symphony-compatibility note in SPEC.md re-checked.
+- Any change to roki-mvp's `WorkerState`, `TransitionEvent`, or `NormalizedIssue` shape — the projection in `roki_api_types` must be updated and the field documentation in SPEC.md re-checked.
 - Any change to the `Orchestrator::subscribe` contract or to the orchestrator's in-memory state read interface — the `server` module's projection assembler must be re-verified.
 - Any change to roki-mvp's tracker refresh-nudge interface — the `POST /api/v1/refresh` handler must be re-checked.
 - Any new agent-derived or Linear-derived string field added to roki-mvp's state — the API serialization must apply the escape/strip layer to it on day one.
 - Adding a new mutating endpoint or changing the loopback-only default — both require revisiting the security note in `SPEC.md` and `WORKFLOW.example.md` plus an explicit acceptance criterion in this spec.
-- Adding authn/authz in a future spec — the symphony-compatibility note must be updated and the loopback-only default re-evaluated.
+- Adding authn/authz in a future spec — the loopback-only default must be re-evaluated and the security note in `SPEC.md` updated.
 
 ## Architecture
 
@@ -76,6 +84,7 @@ graph TB
         Cli[CLI shell]
         Workflow[WorkflowLoader]
         Orchestrator[Orchestrator core]
+        EscQ[Orchestrator escalation queue owned by roki-mvp]
         EventBus[Transition event bus]
         Tracker[Tracker adapter]
 
@@ -84,6 +93,7 @@ graph TB
             Snapshot[Snapshot assembler]
             Escape[Escape and strip layer]
             EventCache[Recent event cache]
+            EscView[EscalationQueueView mapper]
             RefreshDebounce[Refresh debounce]
             Subscriber[TransitionSubscriber adapter]
         end
@@ -92,11 +102,14 @@ graph TB
     Cli --> Workflow
     Workflow --> Server
     Orchestrator --> EventBus
+    Orchestrator --> EscQ
     EventBus --> Subscriber
     Subscriber --> EventCache
     Server --> Snapshot
     Snapshot --> Orchestrator
     Snapshot --> EventCache
+    Snapshot --> EscView
+    EscView --> EscQ
     Snapshot --> Escape
     Router --> RefreshDebounce
     RefreshDebounce --> Tracker
@@ -132,8 +145,22 @@ graph TB
 ```
 SPEC.md                                  # Updated with /api/v1/* contract and server.* config block
 WORKFLOW.example.md                      # Updated with example server.* block and exposure note
-Cargo.toml                               # Workspace; gains roki-api-types and roki-tui members
+Cargo.toml                               # Workspace already exists (resolver = "3"); gains roki-api-types and roki-tui members
 crates/
+├── roki-daemon/                         # Existing daemon crate (roki-mvp owned)
+│   ├── Cargo.toml                       # Gains path dep on roki-api-types
+│   └── src/
+│       ├── main.rs                      # Modified: conditionally spawn server::ServerModule::run
+│       └── server/                      # NEW module added by this spec
+│           ├── mod.rs                   # ServerModule entrypoint, optional spawn, axum::Server bind
+│           ├── router.rs                # Route table for /api/v1/state, /api/v1/<issue>, /api/v1/refresh
+│           ├── projection.rs            # Project orchestrator state into roki_api_types shapes
+│           ├── escape.rs                # HTML-escape plus ANSI-strip helper, used by projection
+│           ├── event_cache.rs           # Per-issue ring buffer of recent lifecycle events; subscriber writes here
+│           ├── escalation_queue_view.rs # Mapper from roki-mvp's EscalationEntry to roki_api_types::EscalationEntry
+│           ├── refresh.rs               # Refresh debounce coordinator, calls tracker nudge
+│           ├── logging.rs               # tracing layer + HttpRequestCounter
+│           └── config.rs                # Parse server.* block from WorkflowPolicy::raw_unknowns
 ├── roki-api-types/
 │   ├── Cargo.toml
 │   └── src/
@@ -152,24 +179,17 @@ crates/
         ├── input.rs                     # Key handling, debounce, escalation acknowledgement
         ├── terminal_caps.rs             # Terminal-capability detection and palette fallback
         └── sanitize.rs                  # ANSI-strip and control-character filter (defense in depth)
-src/                                     # Existing daemon crate (roki-mvp owned)
-├── server/                              # NEW module added by this spec
-│   ├── mod.rs                           # ServerModule entrypoint, optional spawn, axum::Server bind
-│   ├── router.rs                        # Route table for /api/v1/state, /api/v1/<issue>, /api/v1/refresh
-│   ├── projection.rs                    # Project orchestrator state into roki_api_types shapes
-│   ├── escape.rs                        # HTML-escape plus ANSI-strip helper, used by projection
-│   ├── event_cache.rs                   # Per-issue ring buffer of recent lifecycle events; subscriber writes here
-│   ├── refresh.rs                       # Refresh debounce coordinator, calls tracker nudge
-│   ├── logging.rs                       # tracing layer for HTTP requests with redaction reuse
-│   └── config.rs                        # Parse server.* block from WorkflowPolicy.extension
 ```
 
 ### Modified Files
-- `Cargo.toml` (workspace root) — promote the daemon crate to a workspace and add `crates/roki-api-types` and `crates/roki-tui` as workspace members; the daemon crate gains a path dependency on `roki-api-types`.
-- `src/main.rs` — at startup, after `WorkflowLoader` reports a valid policy, conditionally spawn `server::ServerModule::run` when `policy.server.port` is set.
-- `src/orchestrator/hooks.rs` — no change to the trait; the server module registers an `Arc<dyn TransitionSubscriber>` like any other subscriber.
-- `src/workflow/schema.rs` — register the `server.*` keys under the existing `extension.*` reserved namespace as additive optional fields.
-- `SPEC.md` — add a section documenting the `/api/v1/*` contract, the `server.*` config block, the loopback-only default, and the symphony-compatibility note.
+- `Cargo.toml` (workspace root) — append `crates/roki-api-types` and `crates/roki-tui` to existing `[workspace] members` (the workspace already exists with `resolver = "3"` and `crates/roki-daemon`, `crates/roki-doctools`).
+- `crates/roki-daemon/Cargo.toml` — add path dependency on `roki-api-types`.
+- `crates/roki-daemon/src/main.rs` — at startup, after the workflow watcher reports a valid policy, conditionally spawn `server::ServerModule::run` when `policy.extension.server.port` is set.
+- `crates/roki-daemon/src/orchestrator/hooks.rs` — no change to the trait; the server module registers an `Arc<dyn TransitionSubscriber>` via `SubscriberHooks::subscribe` like any other subscriber.
+- `crates/roki-daemon/src/orchestrator/read.rs` — additive only (precondition 0.x): extend `IssueState` / `ActorSnapshot` with optional projection fields; rename internal `SnapshotResponse` to `OrchestratorSnapshot`.
+- `crates/roki-daemon/src/orchestrator/state.rs` — additive only (precondition 0.x): introduce `TransitionEventSummary` (or place adjacent in `read.rs`).
+- `crates/roki-daemon/src/workflow/schema.rs` — no schema-level change required; `extension.server.*` is already a reserved namespace round-tripped through `WorkflowPolicy::raw_unknowns`. The server module parses from that blob directly.
+- `SPEC.md` — add a section documenting the `/api/v1/*` contract (field-by-field response shapes, status codes, error envelope, version-stability rules), the `server.*` config block, and the loopback-only default.
 - `WORKFLOW.example.md` — add a commented-out example `server.*` block with the exposure warning.
 
 > Splitting `projection.rs` (snapshot assembly) from `escape.rs` (sanitization) keeps the escape/strip pass reusable from the per-issue endpoint.
@@ -197,7 +217,7 @@ sequenceDiagram
     Router-->>Client: 200 application json
 ```
 
-> The snapshot assembler reads the orchestrator state and the per-issue event cache under one logical read; readers see a single coherent moment. The cache is not the source of truth; it is a bounded ring fed by the transition subscriber so the snapshot does not have to walk full history each request.
+> The snapshot assembler performs three sub-reads in a fixed order — orchestrator state map, per-issue event cache, escalation queue — and stamps `snapshot_at` after the third sub-read completes. Readers may observe entries whose `state`, last lifecycle event, and `EscalationEntry` reflect adjacent moments rather than one instant; the bound between the earliest and the latest sub-read is the snapshot drift bound (≤50ms under nominal load on a developer-class machine, documented in `SPEC.md`). The cache is not the source of truth; it is a bounded ring fed by the transition subscriber so the snapshot does not have to walk full history each request.
 
 ### Refresh-nudge handling
 
@@ -264,7 +284,7 @@ sequenceDiagram
 | 2.1, 2.2, 2.3, 2.4, 2.5, 2.6 | `GET /api/v1/state` snapshot | Router, Projection, EventCache, EscapeStrip | `SnapshotResponse` | State request flow |
 | 3.1, 3.2, 3.3, 3.4, 3.5, 3.6 | `GET /api/v1/<issue>` per-issue detail | Router, Projection, EventCache, EscapeStrip | `IssueDetailResponse` | State request flow (per-issue variant) |
 | 4.1, 4.2, 4.3, 4.4, 4.5 | `POST /api/v1/refresh` | Router, RefreshDebounce, Tracker (read of refresh nudge) | `RefreshAccepted` | Refresh-nudge flow |
-| 5.1, 5.2, 5.3, 5.4, 5.5 | Symphony-compatible schema | roki_api_types crate | Field-name and shape constraints | n/a |
+| 5.1, 5.2, 5.3, 5.4, 5.5 | Stable versioned JSON schema in shared crate | roki_api_types crate, ServerModule, TuiApiClient | `API_VERSION`, response `api_version` field, `/api/v1/` URL prefix | n/a |
 | 6.1, 6.2, 6.3, 6.4, 6.5 | Escape and strip on every agent or Linear string | EscapeStrip (server side), TUI sanitize (defense in depth) | escape and strip helpers | State request flow |
 | 7.1, 7.2, 7.3, 7.4 | Loopback default and exposure documentation | ServerConfig, ServerModule, SPEC.md, WORKFLOW.example.md | bind-host validation | n/a |
 | 8.1, 8.2, 8.3, 8.4, 8.5, 8.6 | `roki-tui` binary basic UX | TuiApp, ApiClient, Render, Input | clap CLI, refresh loop | TUI refresh loop |
@@ -286,8 +306,9 @@ sequenceDiagram
 | Router | Server/HTTP | axum router; routes for state, per-issue, refresh; default headers | 2.1, 2.5, 3.1, 3.5, 4.1 | axum (P0), Projection (P0), RefreshCoordinator (P0) | API |
 | Projection | Server/projection | Map orchestrator state and event cache into `roki_api_types` shapes | 2.1, 2.2, 2.3, 2.6, 3.1, 3.3, 3.4, 5.1, 5.2, 5.4, 13.2, 13.3, 13.4 | Orchestrator (P0), EventCache (P0), EscapeStrip (P0) | Service, State |
 | EscapeStrip | Server/projection | HTML-escape plus ANSI-strip every agent-derived and Linear-derived string field | 2.4, 3.4, 6.1, 6.2, 6.3, 6.5 | html-escape (P0), strip-ansi-escapes (P0) | Service |
-| EventCache | Server/projection | Bounded per-issue ring buffer fed by TransitionSubscriber for recent-event log | 2.2, 3.1, 3.6, 13.1 | Orchestrator EventBus (P0) | State |
-| TransitionSubscriberAdapter | Server/projection | Implements `TransitionSubscriber`; writes events to EventCache; never vetoes | 13.1, 13.2, 13.5 | Orchestrator (P0), EventCache (P0) | Event |
+| EventCache | Server/projection | Bounded per-issue ring buffer fed by TransitionSubscriber; supplies the per-issue detail endpoint's recent-event log only | 2.2, 3.1, 3.6, 13.1 | Orchestrator EventBus (P0) | State |
+| EscalationQueueView | Server/projection | Pure mapper from roki-mvp's `orchestrator::escalation::EscalationEntry` (read via `OrchestratorRead::escalation_queue()`) to `roki_api_types::EscalationEntry`; maps `EscalationKind` to the snake_case `failure_reason` discriminator from `fr:14-operator-notifications`. No state of its own — roki-mvp owns the queue | 2.1, 13.1, 13.2 | OrchestratorRead (P0) | Service |
+| TransitionSubscriberAdapter | Server/projection | Implements `TransitionSubscriber::on_transition` (sync, non-blocking, no `.await`, no veto method on the trait); writes one entry to EventCache per event; on terminal-state transition schedules a 2-second grace-window drop via `tokio::spawn + tokio::time::sleep`. Does NOT write to the escalation queue: roki-mvp's orchestrator already maintains its own escalation queue and the observability spec only reads through `OrchestratorRead::escalation_queue()` | 13.1, 13.2, 13.5 | Orchestrator (P0), EventCache (P0) | Event |
 | RefreshCoordinator | Server/refresh | Debounce refresh requests, coalesce within minimum interval, call tracker nudge | 4.1, 4.2, 4.3, 4.4, 4.5 | Tracker (P0) | Service |
 | HttpLogging | Server/logging | tracing layer that emits per-request structured events with redaction reuse and increments per-endpoint counter | 14.1, 14.2, 14.3, 14.5 | tracing (P0) | Service |
 | TuiApp | TUI | App loop, state holder, refresh-loop coordinator, key router | 8.2, 8.3, 8.4, 8.5, 9.1, 9.3, 10.1, 10.2 | ApiClient (P0), Render (P0), Input (P0), tokio (P0) | Service, State |
@@ -297,7 +318,7 @@ sequenceDiagram
 | TerminalCaps | TUI | Detect 24-bit RGB support, fall back palette, emit one-time notice | 11.1, 11.2, 11.3, 11.4, 11.5 | crossterm (P0) | State |
 | TuiSanitize | TUI | ANSI-strip plus control-char filter for every string used in render | 6.4 | strip-ansi-escapes (P0) | Service |
 | WorkflowSchemaExt | Workflow integration | Register `server.*` keys as additive under `extension.*` | 1.6, 15.1, 15.2, 15.3, 15.4 | WorkflowLoader / Schema (P0) | State |
-| SpecRootUpdate | Documentation | Update `SPEC.md` and `WORKFLOW.example.md` with API contract, config block, exposure note, symphony-compat note | 5.4, 7.3, 15.5 | n/a | n/a |
+| SpecRootUpdate | Documentation | Update `SPEC.md` and `WORKFLOW.example.md` with API contract (field-by-field), config block, exposure note | 5.4, 7.3, 15.5 | n/a | n/a |
 
 ### Shared API types
 
@@ -309,10 +330,10 @@ sequenceDiagram
 | Requirements | 5.1, 5.2, 5.3, 5.4, 5.5, 12.1, 12.2, 12.3, 12.4, 12.5 |
 
 **Responsibilities & Constraints**
-- All structs derive `Serialize` and `Deserialize`; field names selected to match symphony's documented `/api/v1/state` and per-issue contract.
-- Where roki-specific fields are required (multi-repo `(repo, issue)` keying), they live under names that do not collide with symphony's fields.
+- All structs derive `Serialize` and `Deserialize`; field names follow the roki naming conventions documented in `SPEC.md` (snake_case, stable across patch versions, additions are additive only).
+- One ticket maps to at most one repo (per `roki-mvp` design.md `Multi-repo tickets (rejected by the orchestrator with outcome=needs_split)`). Per-issue shapes carry `issue: String` as the unique identifier and `repo: String` as an informational field showing which repo the worktree was created in. JSON consumers key on `issue` alone; `repo` is for display only.
 - The crate must not depend on roki-mvp internals; the projection direction is daemon-internal-state -> ApiTypes, not the reverse.
-- API version constant `API_VERSION: &str = "v1"` exposed at the crate root for the daemon and TUI to assert.
+- API version constant `API_VERSION: &str = "v1"` exposed at the crate root for the daemon and TUI to assert; every response body's `api_version` field equals this constant.
 
 **Contracts**: Service [ ] / API [ ] / Event [ ] / Batch [ ] / State [x]
 
@@ -337,6 +358,7 @@ pub struct WorkerSummary {
     pub repo: String,
     pub issue: String,
     pub state: String,                       // ProjectionState string; documented fallback for unknown
+    pub inactive_reason: Option<String>,     // Set when state == "inactive"; mirrors fr:04 Inactive(reason=...) discriminator
     pub last_event: Option<RecentEventSummary>,
     pub last_event_at: Option<chrono::DateTime<chrono::Utc>>,
     pub correlation_id: Option<String>,
@@ -348,11 +370,38 @@ pub struct IssueDetailResponse {
     pub repo: String,
     pub issue: String,
     pub state: String,
+    pub inactive_reason: Option<String>,     // Set when state == "inactive"; mirrors fr:04 Inactive(reason=...) discriminator
     pub recent_events: Vec<RecentEventEntry>,
     pub last_error: Option<String>,
     pub permission_strategy: String,
     pub workspace_path: String,
     pub truncated: bool,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct ServerBlock {
+    pub bind: String,
+    pub port: u16,
+    pub request_counters: BTreeMap<String, u64>,        // satisfies Req 14.5
+    pub min_refresh_interval_seconds: u64,              // TUI reads this for client-side debounce (Req 10.4)
+    pub max_event_log_per_issue: u64,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct RecentEventSummary {
+    pub kind: String,                                   // snake_case TransitionTrigger discriminator
+    pub message: Option<String>,                        // escaped/stripped preview
+    pub at: chrono::DateTime<chrono::Utc>,
+    pub correlation_id: Option<String>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct EscalationEntry {
+    pub repo: String,
+    pub issue: String,
+    pub failure_reason: String,              // fr:04 Inactive.reason discriminator value (e.g. "orchestrator_crash")
+    pub raised_at: chrono::DateTime<chrono::Utc>,
+    pub correlation_id: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -365,7 +414,7 @@ pub struct RefreshAccepted {
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct ApiError {
     pub api_version: String,
-    pub code: String,                        // e.g. "NOT_FOUND", "AMBIGUOUS_REPO", "UNHEALTHY"
+    pub code: String,                        // e.g. "NOT_FOUND", "UNHEALTHY", "INTERNAL"
     pub message: String,
     pub details: Option<serde_json::Value>,
 }
@@ -407,16 +456,24 @@ pub struct ServerModule {
     orchestrator: Arc<dyn OrchestratorRead>,
     tracker: Arc<dyn TrackerRefresh>,
     event_cache: Arc<EventCache>,
+    request_counter: Arc<HttpRequestCounter>,
+    subscriber_hooks: Arc<SubscriberHooks>,
 }
 
 impl ServerModule {
     pub async fn run(self, shutdown: ShutdownSignal) -> Result<(), ServerError>;
 }
 
+// roki-mvp surface (already published; see crates/roki-daemon/src/orchestrator/{read,hooks}.rs)
 pub trait OrchestratorRead: Send + Sync {
-    fn snapshot(&self) -> OrchestratorSnapshot;
-    fn issue(&self, repo: &str, issue: &str) -> Option<IssueRead>;
-    fn subscribe(&self, sub: Arc<dyn TransitionSubscriber>) -> SubscriptionHandle;
+    fn snapshot(&self) -> OrchestratorSnapshot;                                          // renamed from internal SnapshotResponse (precondition 0.x)
+    fn issue(&self, id: &IssueId) -> Option<IssueState>;                                 // existing; sufficient because 1 ticket = 1 repo
+    fn escalation_queue(&self) -> Vec<EscalationEntry>;                                  // existing
+}
+
+// Subscribe lives on a separate type, not on OrchestratorRead.
+impl SubscriberHooks {
+    pub fn subscribe(&self, sub: Arc<dyn TransitionSubscriber>) -> SubscriptionHandle;   // existing
 }
 
 pub trait TrackerRefresh: Send + Sync {
@@ -445,6 +502,7 @@ pub trait TrackerRefresh: Send + Sync {
 - Validate `port` (1..=65535), `bind` (parse as `IpAddr`; default to `127.0.0.1`), `min_refresh_interval_seconds` (>= 1, with documented default), `max_event_log_per_issue` (>= 1, with documented default).
 - Classify `bind` as loopback (`127.0.0.0/8`, `::1/128`) versus non-loopback so the warn-level log can fire correctly.
 - Surface validation errors as a typed enum that names the offending key.
+- **Hot-reload semantics** (per `fr:02-configuration` and Req 15.3a): when invoked from a hot-reload of `WORKFLOW.md`, validation failure must not crash the daemon — the previously loaded `WorkflowPolicy` (and the running `ServerModule`, if any) remain in effect, the offending key is logged at error level, and the loader retains the last-known-good policy. v1 does not perform runtime re-bind: changes to `port` / `bind` apply only on next daemon restart.
 
 **Contracts**: Service [ ] / API [ ] / Event [ ] / Batch [ ] / State [x]
 
@@ -476,10 +534,11 @@ pub enum ServerConfigError {
 | Requirements | 2.1, 2.2, 2.3, 2.6, 3.1, 3.3, 3.4, 5.1, 5.2, 5.4, 13.2, 13.3, 13.4 |
 
 **Responsibilities & Constraints**
-- Read the orchestrator state under one logical read (whatever lock or snapshot the orchestrator exposes via `OrchestratorRead::snapshot`) and read the per-issue event cache once per issue in the same pass.
-- Map roki-mvp's `WorkerState` to the documented `ProjectionState` strings (`"discovered"`, `"queued"`, `"active"`, `"awaiting_review"`, `"backoff"`, `"stalled"`, `"terminal_success"`, `"terminal_failure"`); any unknown variant maps to `"unknown"` with the original variant name preserved in `details`.
+- Perform the snapshot read in a fixed three-step order: (1) call `OrchestratorRead::snapshot()` (which itself acquires the orchestrator state-map `RwLock` read guard, clones the per-issue projection, then snapshots the escalation queue), (2) read the per-issue event cache once per issue, (3) record `snapshot_at = Utc::now()` after the third sub-read returns. The order is fixed so the bound between the earliest and the latest sub-read is deterministic; the bound is the snapshot drift bound (≤50ms under nominal load on a developer-class machine, documented in `SPEC.md`). The bound is asserted by an integration test that drives concurrent transitions during snapshot assembly.
+- Map roki-mvp's `WorkerState` (`Pending`, `Active`, `Backoff`, `Inactive`, `Cleaning` per `fr:04-state-machine-and-recovery`) to the documented `ProjectionState` strings: `Pending → "pending"`, `Active → "active"`, `Backoff → "backoff"`, `Inactive(_) → "inactive"`, `Cleaning → "cleaning"`. Any future variant maps to `"unknown"` with the original variant name preserved in the response `details` field.
+- When `WorkerState == Inactive(reason)`, populate `WorkerSummary.inactive_reason` and `IssueDetailResponse.inactive_reason` with the raw discriminator string (snake_case, matching the `EscalationEntry.failure_reason` value); `None` for every other state.
 - Apply `EscapeStrip::apply` to every string field carrying agent-derived or Linear-derived content (issue title, description, last-event message, last-error string, label values, tool-result preview).
-- For per-issue detail with multi-repo ambiguity, return `ApiError { code: "AMBIGUOUS_REPO", ... }` with a 400 status when no `repo` query parameter is supplied and more than one repo matches.
+- For per-issue detail, look up the unique entry via `OrchestratorRead::issue(id)`. There is no multi-repo disambiguation — one ticket maps to at most one repo per `roki-mvp` design.md (multi-repo tickets are rejected by the orchestrator with `outcome=needs_split`).
 - Return `ApiError { code: "UNHEALTHY", ... }` with a 503 status if `OrchestratorRead::snapshot` reports the orchestrator is partially initialized.
 
 **Contracts**: Service [x] / API [ ] / Event [ ] / Batch [ ] / State [x]
@@ -499,15 +558,30 @@ pub enum ServerConfigError {
 
 | Field | Detail |
 |-------|--------|
-| Intent | Per-issue bounded ring of recent lifecycle events fed by the orchestrator's transition subscriber so snapshots avoid walking history |
+| Intent | Per-issue bounded ring of recent lifecycle events fed by the orchestrator's transition subscriber so the per-issue detail endpoint avoids walking history. **Scope: detail endpoint only — not used to derive `SnapshotResponse.escalations`.** |
 | Requirements | 2.2, 3.1, 3.6, 13.1 |
 
 **Responsibilities & Constraints**
-- One ring buffer per active `(repo, issue)` keyed by orchestrator key; capacity from `ServerConfig::max_event_log_per_issue`.
-- `TransitionSubscriberAdapter` registers via `OrchestratorRead::subscribe` and writes one entry per `TransitionEvent`. Errors inside the subscriber are logged and isolated; never veto.
-- On worker terminal state, the cache entry is dropped after one snapshot grace window so a final read still surfaces the terminal event.
+- One ring buffer per active `(repo: Option<String>, issue: IssueId)` keyed by orchestrator key; capacity from `ServerConfig::max_event_log_per_issue`.
+- `TransitionSubscriberAdapter` registers via `SubscriberHooks::subscribe` and writes one entry per `TransitionEvent` into EventCache. The trait method `on_transition(&self, event: &TransitionEvent)` is **synchronous and non-blocking** (per `crates/roki-daemon/src/orchestrator/hooks.rs`); the adapter MUST NOT call `.await` and MUST NOT block on locks. The trait does NOT have a `veto` method. The adapter does NOT write to any escalation queue: roki-mvp's orchestrator already maintains its own escalation queue and the observability spec reads through `OrchestratorRead::escalation_queue()` only.
+- The "latest lifecycle event" surfaced via `WorkerSummary.last_event` is the most recent state-machine transition regardless of origin. Phase-subprocess exit envelopes (`phase_complete` / `phase_nonclean` per `fr:18-worker-skill-workflow`) and orchestrator-stdin daemon directives (per `fr:19-orchestrator-session`) are observed only through the resulting `TransitionEvent`; the projection does not subscribe to either source directly.
+- On worker terminal-state transition (`next == Cleaning` or removal), the adapter schedules a 2-second grace-window drop of the cache entry via `tokio::spawn` + `tokio::time::sleep(Duration::from_secs(2))` so that one final snapshot can still surface the terminal event before the entry is purged.
 
 **Contracts**: Service [ ] / API [ ] / Event [x] / Batch [ ] / State [x]
+
+#### EscalationQueueView (mapper, not a queue)
+
+| Field | Detail |
+|-------|--------|
+| Intent | Pure mapper from roki-mvp's existing `orchestrator::escalation::EscalationEntry` to the API's `roki_api_types::EscalationEntry`. The observability spec does NOT own a parallel queue — roki-mvp's orchestrator owns the authoritative queue and exposes it via `OrchestratorRead::escalation_queue() -> Vec<EscalationEntry>`. |
+| Requirements | 2.1, 13.1, 13.2 |
+
+**Responsibilities & Constraints**
+- `to_api_entry(e: &orchestrator::escalation::EscalationEntry) -> roki_api_types::EscalationEntry`: maps `EscalationKind` to the snake_case `failure_reason` discriminator from `fr:14-operator-notifications` (e.g. `orchestrator_crash`, `orchestrator_unparseable`, `orchestrator_budget_exhausted`, `stall`, `retry_exhausted`, `fs_poison`, `orphan`, `allowlist_rejected`, `needs_split`, `spec_incomplete`, `needs_operator`); maps `repo: Option<String>` to `String` by emitting `""` when absent; renames `timestamp` to `raised_at` on the API side; passes through `correlation_id`.
+- If `EscalationKind` lacks a 1:1 mapping for any reason listed in `fr:14`, extend the kind in roki-mvp additively (precondition task) rather than dropping the case silently.
+- No state of its own; idempotent and pure.
+
+**Contracts**: Service [x] / API [ ] / Event [ ] / Batch [ ] / State [ ]
 
 #### RefreshCoordinator
 
@@ -528,7 +602,7 @@ pub enum ServerConfigError {
 | Method | Endpoint | Request | Response | Errors |
 |--------|----------|---------|----------|--------|
 | GET | `/api/v1/state` | none | 200 `SnapshotResponse` (`Content-Type: application/json; charset=utf-8`, `Cache-Control: no-store`) | 503 `ApiError { code: "UNHEALTHY" }` |
-| GET | `/api/v1/<issue>` | optional `repo` query parameter | 200 `IssueDetailResponse` | 400 `ApiError { code: "AMBIGUOUS_REPO" }`, 404 `ApiError { code: "NOT_FOUND" }`, 503 `ApiError { code: "UNHEALTHY" }` |
+| GET | `/api/v1/<issue>` | none | 200 `IssueDetailResponse` | 404 `ApiError { code: "NOT_FOUND" }`, 503 `ApiError { code: "UNHEALTHY" }` |
 | POST | `/api/v1/refresh` | empty body or future `RefreshRequest` (reserved) | 202 `RefreshAccepted` | 503 `ApiError { code: "UNHEALTHY" }` |
 
 > Headers `Content-Type: application/json; charset=utf-8` and `Cache-Control: no-store` are always set on JSON responses. Bodies are not logged in v1.
@@ -544,7 +618,8 @@ pub enum ServerConfigError {
 
 **Responsibilities & Constraints**
 - On startup, parse CLI args (`--url`, `--refresh-interval-ms`), enter raw mode, hide the cursor, run the event loop until quit.
-- Maintain `AppState`: latest `SnapshotResponse`, last error string, set of acknowledged escalation IDs (cleared when an escalation disappears from the snapshot), refresh-in-flight flag, last refresh timestamp.
+- Maintain `AppState`: latest `SnapshotResponse`, last error string, set of acknowledged escalation IDs (cleared when an escalation disappears from the snapshot), refresh-in-flight flag, last refresh timestamp, `effective_min_refresh: Duration`.
+- **Debounce interval source** (Req 10.4): `effective_min_refresh` starts at the documented pre-first-fetch default of `Duration::from_millis(1000)`. After each successful `state()` fetch, the loop updates `effective_min_refresh = Duration::from_secs(snapshot.server.min_refresh_interval_seconds)`. The input layer's `Refresh` debounce reads this value via shared `AppState`; the input layer itself does not own the value.
 - Concurrently run a refresh task that calls `TuiApiClient::state` at the configured cadence and a key-event task that drains crossterm events; merge into `AppState` via channels.
 - On quit, restore the terminal mode, show the cursor, exit zero.
 
@@ -555,7 +630,7 @@ pub enum ServerConfigError {
 | Method | Endpoint | Notes |
 |--------|----------|-------|
 | `state()` | `GET /api/v1/state` | Deserializes into `SnapshotResponse`; on non-2xx returns `ApiError`. |
-| `issue(repo, issue)` | `GET /api/v1/<issue>?repo=<repo>` | Reserved for v1.1 detail view; not required for the primary refresh loop. |
+| `issue(issue)` | `GET /api/v1/<issue>` | Reserved for v1.1 detail view; not required for the primary refresh loop. |
 | `refresh()` | `POST /api/v1/refresh` | Returns `RefreshAccepted`; surfaces tracker-reported earliest fire time in the status bar. |
 
 #### TuiRender
@@ -612,7 +687,7 @@ Implementation note: extend `SPEC.md` with three sections — the `/api/v1/*` JS
 
 The HTTP module has no persistent domain model. The runtime in-memory model adds two aggregates:
 
-- **EventCacheRing**: per-`(repo, issue)` bounded ring of `RecentEventEntry` values produced by the transition subscriber. Capacity is `ServerConfig.max_event_log_per_issue`. Dropped on terminal-state grace expiry.
+- **EventCacheRing**: per-`IssueId` bounded ring of `RecentEventEntry` values produced by the transition subscriber. Capacity is `ServerConfig.max_event_log_per_issue`. Dropped on terminal-state grace expiry.
 - **RefreshDebounceState**: `next_allowed_at: Option<Instant>` plus a pending-nudge handle.
 
 No on-disk state is added by this spec.
@@ -635,7 +710,7 @@ No on-disk state is added by this spec.
 - **Configuration errors** (`server.*` invalid): server does not start; daemon continues; structured error log identifies the offending key.
 - **Bind errors** (port in use, permission denied): server does not start; daemon continues; structured error log identifies the port and underlying OS error.
 - **Projection errors** (orchestrator unhealthy): 503 `UNHEALTHY` to caller; logged.
-- **Routing errors** (not found, ambiguous repo): 404 / 400 with the documented `code`; not logged at error level.
+- **Routing errors** (not found): 404 with the documented `code`; not logged at error level.
 - **Refresh errors** (tracker permanently unable): still 202 with `earliest_fire_at` set to `None` and `coalesced: false`; the tracker is responsible for recovering on its own backoff schedule.
 - **TUI client errors** (non-2xx, network): status bar message; refresh loop continues.
 
@@ -653,8 +728,8 @@ Every API request emits a structured tracing event with method, path, status, du
 - `Projection::build_snapshot` maps a stub orchestrator state plus stub event cache into a `SnapshotResponse` whose every agent-derived string field has been escaped and stripped (verified by injecting `\x1b[31m<b>` test fixtures).
 
 ### Integration Tests
-- End-to-end `GET /api/v1/state` against an axum test server backed by stub `OrchestratorRead` and stub `EventCache`: assert 200, `Content-Type: application/json; charset=utf-8`, `Cache-Control: no-store`, schema field set matches symphony reference fixtures.
-- End-to-end `GET /api/v1/<issue>?repo=<repo>` for an existing issue returns 200 with the expected detail; for a missing issue returns 404 `NOT_FOUND`; for an ambiguous issue without `repo` returns 400 `AMBIGUOUS_REPO`.
+- End-to-end `GET /api/v1/state` against an axum test server backed by stub `OrchestratorRead` and stub `EventCache`: assert 200, `Content-Type: application/json; charset=utf-8`, `Cache-Control: no-store`, response deserializes losslessly into `roki_api_types::SnapshotResponse` and the `api_version` field equals `"v1"`.
+- End-to-end `GET /api/v1/<issue>` for an existing issue returns 200 with the expected detail; for a missing issue returns 404 `NOT_FOUND`. (No multi-repo ambiguity case: 1 ticket = 1 repo per `roki-mvp` design.md.)
 - End-to-end `POST /api/v1/refresh` calls a fake `TrackerRefresh` whose first call succeeds and second call (within the minimum interval) is coalesced; the response bodies match.
 - WORKFLOW.md hot-reload integration: changing `server.port` while the daemon runs does not change the listening port at runtime; a structured log event records the deferred-until-restart decision.
 - TransitionSubscriberAdapter integration: a stub orchestrator emits ten transitions for an issue with a cache cap of five; the resulting `IssueDetailResponse.recent_events` length is five and `truncated` is true.
@@ -667,7 +742,8 @@ Every API request emits a structured tracing event with method, path, status, du
 - TUI quit path: press the documented quit key; observe terminal mode restored and exit code zero.
 
 ### Performance / Load (informational)
-- `GET /api/v1/state` under a stub orchestrator with one hundred active issues completes within the documented snapshot drift bound on a developer-class machine.
+- `GET /api/v1/state` under a stub orchestrator with one hundred active issues completes within the snapshot drift bound (≤50ms) on a developer-class machine; an integration test drives concurrent transitions during snapshot assembly and asserts the bound holds.
+- `roki-tui` reaches first-frame render within the documented startup window of 1 second on a developer-class machine against a loopback daemon.
 - `POST /api/v1/refresh` debounce holds under a 100-rps burst from a stub client for one minute without leaking pending nudge handles.
 
 ## Optional Sections
@@ -675,7 +751,7 @@ Every API request emits a structured tracing event with method, path, status, du
 ### Security Considerations
 
 - **No authn in v1**: the API has no authentication or authorization. Loopback-only is the contract. Binding to a non-loopback interface is opt-in and produces a warn-level startup log.
-- **Untrusted strings**: every agent-derived and Linear-derived string is HTML-escaped and ANSI-stripped on the server side and again ANSI-stripped on the TUI side. Defense in depth on day one because symphony hardened this in PRs #22 and #23.
+- **Untrusted strings**: every agent-derived and Linear-derived string is HTML-escaped and ANSI-stripped on the server side and again ANSI-stripped on the TUI side. Defense in depth on day one.
 - **No body logging**: the HTTP layer logs metadata only (method, path, status, duration, client address). Agent-derived strings never enter the log path through the API.
 - **Secret redaction**: the existing tracing redaction layer continues to apply to API logs.
 - **No SSRF risk on the daemon side**: the API is read-only plus a single tracker-nudge call; the daemon never fetches arbitrary URLs on behalf of clients.
