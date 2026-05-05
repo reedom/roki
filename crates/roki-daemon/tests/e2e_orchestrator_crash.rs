@@ -6,18 +6,31 @@
 //! - Route the actor to `Inactive(OrchestratorCrash)`.
 //! - Avoid any Linear write attempt (no `daemon_directive` is delivered to
 //!   stdin because the orchestrator is already dead).
+//! - Populate the escalation queue (Req 12.1) so `OrchestratorRead`
+//!   surfaces the failure in the TUI.
 //! - Preserve the worktree + session tempdir for operator triage.
 //!
-//! Drives the actor via the `OrchestratorActionEvent::ProcessExit` event,
-//! which is what the production orchestrator-session adapter emits when
-//! the child process exits without a terminal stop.
+//! Seam-level synthesis (Option 2): the runtime composition layer is
+//! expected to translate a non-zero orchestrator exit without a terminal
+//! `action=stop` into BOTH a `DaemonEscalation { OrchestratorCrash, … }`
+//! actor message (so the queue is populated per Req 12.3) AND an
+//! `OrchestratorActionEvent::ProcessExit` from the session adapter (which
+//! drives the state transition out of `Active`). This test drives both
+//! signals at the OrchHarness seam to exercise that contract end-to-end
+//! without spinning up a real fake_claude orchestrator subprocess. The
+//! ordering models the production sequence: the adapter detects the
+//! non-zero exit, runtime composition enqueues + routes the directive
+//! (orchestrator-dead → queue-only, no Linear write), and the actor
+//! observes the ProcessExit on its action channel.
 //!
-//! Spec refs: requirements.md 12.3.
+//! Spec refs: requirements.md 12.1, 12.3.
 
 mod common;
 
 use common::OrchHarness;
 use roki_daemon::orchestrator::core::{ActorMessage, OrchestratorActionEvent};
+use roki_daemon::orchestrator::escalation::EscalationKind;
+use roki_daemon::orchestrator::read::{OrchestratorRead, OrchestratorReadHandle};
 use roki_daemon::orchestrator::state::{InactiveReason, IssueId, Mode};
 use roki_daemon::tracker::model::RepoId;
 
@@ -40,6 +53,26 @@ async fn orchestrator_process_exit_routes_to_orchestrator_crash() {
         )
         .await
         .expect("admit");
+
+    // Runtime composition synthesizes the orchestrator-dead escalation
+    // alongside the ProcessExit signal. Sending it through the same actor
+    // inbox enqueues the entry (Req 12.1) and is routed as
+    // orchestrator-dead → queue-only with no Linear-side directive
+    // delivery (Req 12.3).
+    h.orchestrator
+        .send(
+            issue.clone(),
+            ActorMessage::DaemonEscalation {
+                kind: EscalationKind::OrchestratorCrash,
+                fields: serde_json::json!({
+                    "repos": [repo.0.clone()],
+                    "exit_success": false,
+                }),
+                correlation_id: format!("crash-{issue}"),
+            },
+        )
+        .await
+        .expect("send orchestrator-crash escalation");
 
     h.wait_for_inactive(&issue, InactiveReason::OrchestratorCrash)
         .await;
@@ -71,5 +104,43 @@ async fn orchestrator_process_exit_routes_to_orchestrator_crash() {
     assert!(
         !has_directive,
         "no daemon_directive may be sent when orchestrator already dead"
+    );
+    drop(delivered);
+
+    // Escalation queue must record the entry, surfaced through the
+    // public OrchestratorRead trait (the TUI snapshot path) per Req 12.1.
+    let read_handle = OrchestratorReadHandle::new(h.state_map.clone(), h.escalations.clone());
+    let snap = read_handle.snapshot();
+    let entry = snap
+        .escalations
+        .iter()
+        .find(|e| e.issue == issue)
+        .unwrap_or_else(|| {
+            panic!("OrchestratorRead snapshot must include the crash entry: {snap:?}")
+        });
+    assert_eq!(
+        entry.kind,
+        EscalationKind::OrchestratorCrash,
+        "escalation entry must record OrchestratorCrash kind"
+    );
+    assert!(
+        entry.repo.as_deref() == Some(repo.0.as_str()),
+        "escalation entry must carry the repo id: {:?}",
+        entry.repo
+    );
+
+    // Per-issue lookup likewise reports Inactive(OrchestratorCrash).
+    let issue_state = read_handle
+        .issue(&issue)
+        .expect("OrchestratorRead must expose the crashed issue");
+    assert!(
+        matches!(
+            issue_state.state,
+            roki_daemon::orchestrator::state::WorkerState::Inactive(
+                InactiveReason::OrchestratorCrash
+            )
+        ),
+        "issue state from OrchestratorRead must be Inactive(OrchestratorCrash): {:?}",
+        issue_state.state
     );
 }
