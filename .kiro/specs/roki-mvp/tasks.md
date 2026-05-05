@@ -672,7 +672,7 @@ refs:
 
 - [ ] 13. End-to-end tests
 
-- [ ] 13.1 (P) Write e2e_bootstrap test
+- [x] 13.1 (P) Write e2e_bootstrap test
   - Drive `runtime::run_with_shutdown` end-to-end against a real config, wiremock Linear, `fake_claude` binary, and an HTTP client posting a signed webhook. Assert (a) composition order completes, (b) refusals fire on missing `wt` / `ghq` / `claude`, (c) Linear token + webhook secret resolve and never appear in log output, (d) `--debug` activates the per-issue debug sink, (e) `[judge].model` in config refuses at startup.
   - Observable completion: `cargo test e2e_bootstrap` passes; refusal scenarios assert non-zero exit + actionable error message.
   - _Depends: 10.1, 10.2, 10.3_

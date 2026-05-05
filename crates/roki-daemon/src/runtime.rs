@@ -1931,6 +1931,22 @@ pub mod testing {
         pub async fn serve(self) -> Result<(), RuntimeError> {
             serve(self.inner).await
         }
+
+        /// Test-only accessor: did bootstrap compose a per-issue
+        /// [`crate::logging::DebugSinkFactory`] from the merged
+        /// `RunArgs.debug` + `[debug].dir` view (Req 11.6, 11.7)?
+        ///
+        /// e2e_bootstrap test (d) asserts on this rather than driving a
+        /// full webhook + orchestrator-session round trip, because the
+        /// engine-side file-write contract is already proven by
+        /// `engine_impl::launch_with_debug_sink_factory_writes_per_issue_log_file`
+        /// (Task 10.6). This accessor closes the runtime-composition gap:
+        /// it proves that when `--debug` (or `[debug].dir`) is set, the
+        /// production bootstrap composition path actually wires a factory
+        /// onto `RuntimeComponents`.
+        pub fn has_debug_sink_factory(&self) -> bool {
+            self.inner.components.debug_sink_factory.is_some()
+        }
     }
 
     /// Compose the runtime via the production `bootstrap` step but skip
