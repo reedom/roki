@@ -37,14 +37,24 @@ use tracing::{info, warn};
 
 use crate::cli::RunArgs;
 use crate::config::{
-    AssigneeSpec, Config, ConfigError, EnvReader, ProcessEnv, SecretValue,
+    AssigneeSpec, Config, ConfigError, EnvReader, PermissionStrategy as ConfigPermissionStrategy,
+    ProcessEnv, SecretValue,
 };
 use crate::engine::claude::{ClaudeBinary, ClaudeError};
+use crate::engine::orchestrator_session::adapter::OrchestratorSessionAdapter;
+use crate::engine::phase_subprocess::adapter::PhaseSubprocessAdapter;
+use crate::exec::ghq::RealGhq;
+use crate::exec::wt::RealWt;
+use crate::permissions::{PermissionConfigError, PermissionResolver};
+use crate::session::SessionManager;
 use crate::shutdown::{
     self, SHUTDOWN_WINDOW, ShutdownSignal, await_workers_with_window, install_signal_handlers,
 };
 use crate::tracker::model::NormalizedIssue;
 use crate::tracker::webhook::{WebhookState, router as webhook_router};
+use crate::workflow::schema::WorkflowPolicy;
+use crate::workflow::watcher::{WatcherError, load_policy};
+use crate::worktree_manager::WorktreeManager;
 
 /// Errors surfaced by [`run`]. Each variant carries the step-local context the
 /// operator needs to fix the misconfiguration without consulting docs.
@@ -89,6 +99,23 @@ pub enum RuntimeError {
          for the user-directory resolver to land"
     )]
     AssigneeResolve { selector: String },
+
+    #[error("failed to load workflow policy from `{path}`: {source}")]
+    WorkflowLoad {
+        path: PathBuf,
+        #[source]
+        source: WatcherError,
+    },
+
+    /// Composite refusal surfaced when an engine adapter or manager factory
+    /// returns an error during runtime composition. The `component` field
+    /// names the offending construction step so the operator log entry points
+    /// at exactly one factory.
+    #[error("failed to construct runtime component `{component}`: {message}")]
+    ComponentAssembly {
+        component: &'static str,
+        message: String,
+    },
 }
 
 /// Top-level entry point dispatched by `main.rs`. Drives the documented
@@ -115,8 +142,50 @@ struct Bootstrapped {
     webhook_state: Arc<WebhookState>,
     issue_rx: mpsc::Receiver<NormalizedIssue>,
     _logging_guard: crate::logging::LoggingGuard,
-    _claude_binary: ClaudeBinary,
     _signal_task: tokio::task::JoinHandle<()>,
+    /// Engine adapters + managers assembled from the loaded `WorkflowPolicy`,
+    /// resolved external binaries, and config-derived permission strategy.
+    /// Held so subsequent composition steps (Tasks 10.1.2-10.1.6) consume a
+    /// single anchor.
+    #[allow(dead_code)]
+    components: RuntimeComponents,
+}
+
+/// Assembled engine adapters + managers handed to subsequent composition
+/// steps in `run_with_shutdown`. Construction is gated by
+/// [`assemble_runtime_components`]; any factory error is converted into
+/// [`RuntimeError::ComponentAssembly`] naming the offending component so the
+/// operator log entry on refusal points at exactly one factory.
+///
+/// Future tasks (10.1.2-10.1.6) extend this struct with additional fields
+/// (orchestrator inbox, recovery handle, tracker handle, shutdown wiring).
+/// The current shape is intentionally additive.
+// Fields are consumed by future composition steps (Tasks 10.1.2-10.1.6); the
+// dead-code lint is silenced rather than dropping fields the next task needs.
+#[allow(dead_code)]
+#[derive(Debug, Clone)]
+pub(crate) struct RuntimeComponents {
+    /// Resolved `claude` binary path (config override > PATH search).
+    pub claude_binary: ClaudeBinary,
+    /// Resolved `wt` external binary path.
+    pub wt_path: PathBuf,
+    /// Resolved `ghq` external binary path.
+    pub ghq_path: PathBuf,
+    /// Loaded + validated workflow policy.
+    pub workflow_policy: Arc<WorkflowPolicy>,
+    /// Per-issue session tempdir manager.
+    pub session_manager: Arc<SessionManager>,
+    /// Per-issue worktree lifecycle manager (driven by the resolved `wt` /
+    /// `ghq` adapters and the `[[repos]]` allowlist).
+    pub worktree_manager: Arc<WorktreeManager<RealWt, RealGhq>>,
+    /// Operator-controlled phase-subprocess permission resolver. Already
+    /// gated through [`PermissionResolver::ensure_phase_strategy_present`];
+    /// holders may invoke `resolve_for_phase` without re-checking.
+    pub permission_resolver: Arc<PermissionResolver>,
+    /// Long-lived orchestrator session adapter (one per ticket at runtime).
+    pub orchestrator_session_adapter: Arc<OrchestratorSessionAdapter>,
+    /// Bounded phase-subprocess adapter (one launch per `action=run_phase`).
+    pub phase_subprocess_adapter: Arc<PhaseSubprocessAdapter>,
 }
 
 /// Step 1-11 of the daemon bootstrap. Step 12 (the `tokio::select!` wind-down)
@@ -157,14 +226,31 @@ async fn bootstrap(args: RunArgs, env: &dyn EnvReader) -> Result<Bootstrapped, R
 
     // ---- Step 7: claude binary discovery; refuse on missing `wt`/`ghq`.
     let claude_binary = ClaudeBinary::discover(None)?;
-    ensure_external_binary_on_path("wt")?;
-    ensure_external_binary_on_path("ghq")?;
+    let wt_path = resolve_external_binary("wt")?;
+    let ghq_path = resolve_external_binary("ghq")?;
 
-    // ---- Step 8: workflow load. We validate readability here; the full
-    // workflow parse + schema + adapter wiring (the production-path layer)
-    // is the orchestrator-driver entry point under Task 4.x and is not
-    // exercised by the bootstrap smoke tests.
+    // ---- Step 8: workflow load + engine adapter / manager assembly. Loads,
+    // parses, and validates `WORKFLOW.md` (the readability-only check is
+    // subsumed by the full load below) before constructing the
+    // `RuntimeComponents` anchor consumed by Tasks 10.1.2-10.1.6.
     config.validate_workflow_readable()?;
+    let workflow_policy =
+        load_policy(&config.workflow.path)
+            .await
+            .map_err(|source| RuntimeError::WorkflowLoad {
+                path: config.workflow.path.clone(),
+                source,
+            })?;
+
+    let permission_resolver = build_permission_resolver(&config);
+    let components = assemble_runtime_components(RuntimeAssemblyInputs {
+        claude_binary: claude_binary.clone(),
+        wt_path: wt_path.clone(),
+        ghq_path: ghq_path.clone(),
+        workflow_policy,
+        repos_allowlist: config.repos.clone(),
+        permission_resolver,
+    })?;
 
     // ---- Step 9-10: orchestrator + tracker construction. The smoke-test
     // surface defers the orchestrator/tracker wiring to the production
@@ -192,9 +278,107 @@ async fn bootstrap(args: RunArgs, env: &dyn EnvReader) -> Result<Bootstrapped, R
         webhook_state,
         issue_rx,
         _logging_guard: logging_guard,
-        _claude_binary: claude_binary,
         _signal_task: signal_task,
+        components,
     })
+}
+
+/// Inputs to [`assemble_runtime_components`]. Kept as a typed bundle so the
+/// factory shape stays additive as Tasks 10.1.2-10.1.6 introduce more
+/// pre-resolved dependencies (orchestrator inbox, recovery seed, etc.).
+struct RuntimeAssemblyInputs {
+    claude_binary: ClaudeBinary,
+    wt_path: PathBuf,
+    ghq_path: PathBuf,
+    workflow_policy: WorkflowPolicy,
+    repos_allowlist: Vec<crate::config::RepoEntry>,
+    permission_resolver: PermissionResolver,
+}
+
+/// Construct the engine adapters + managers from the resolved external
+/// binaries, the loaded `WorkflowPolicy`, and the operator-controlled
+/// permission resolver. Each factory call is wrapped so a refusal surfaces as
+/// [`RuntimeError::ComponentAssembly`] naming the offending component.
+///
+/// The function is non-async + side-effect-free aside from `SessionManager`
+/// default-root construction (which only reads the platform cache dir) so it
+/// can be exercised in unit tests without a tokio runtime.
+fn assemble_runtime_components(
+    inputs: RuntimeAssemblyInputs,
+) -> Result<RuntimeComponents, RuntimeError> {
+    let RuntimeAssemblyInputs {
+        claude_binary,
+        wt_path,
+        ghq_path,
+        workflow_policy,
+        repos_allowlist,
+        permission_resolver,
+    } = inputs;
+
+    // Refuse early when the operator has not declared a phase-subprocess
+    // permission strategy (Req 9.5). The `permission_resolver` argument is
+    // already shaped from `Config` in production, but the gate is repeated
+    // here so the test harness can force the missing-strategy path through
+    // [`PermissionResolver::empty`].
+    permission_resolver
+        .ensure_phase_strategy_present()
+        .map_err(|err: PermissionConfigError| RuntimeError::ComponentAssembly {
+            component: "permission_resolver",
+            message: err.to_string(),
+        })?;
+
+    let session_manager = Arc::new(SessionManager::new());
+
+    let worktree_manager = Arc::new(WorktreeManager::new(
+        Arc::new(RealWt::new()),
+        Arc::new(RealGhq::new()),
+        repos_allowlist,
+    ));
+
+    let orchestrator_session_adapter = Arc::new(OrchestratorSessionAdapter::new(
+        claude_binary.clone(),
+        PermissionResolver::resolve_for_orchestrator(
+            &workflow_policy.orchestrator.allowed_tools,
+        ),
+    ));
+
+    let phase_subprocess_adapter = Arc::new(PhaseSubprocessAdapter::new(
+        claude_binary.clone(),
+        permission_resolver.clone(),
+    ));
+
+    Ok(RuntimeComponents {
+        claude_binary,
+        wt_path,
+        ghq_path,
+        workflow_policy: Arc::new(workflow_policy),
+        session_manager,
+        worktree_manager,
+        permission_resolver: Arc::new(permission_resolver),
+        orchestrator_session_adapter,
+        phase_subprocess_adapter,
+    })
+}
+
+/// Build the operator-controlled phase-subprocess [`PermissionResolver`] from
+/// the loaded [`Config`]. The resolver carries the canonical phase allowlist
+/// baseline (Read + Bash + Edit) and the documented `--settings` sentinel
+/// path under the session manager root; per-launch settings rendering is the
+/// adapter's responsibility per `crates/roki-daemon/src/engine/phase_subprocess`.
+fn build_permission_resolver(config: &Config) -> PermissionResolver {
+    // The settings file path is a sentinel anchored under the user cache
+    // directory so the per-launch renderer has a stable target. The file is
+    // not required to exist at boot; the phase adapter writes it per launch.
+    let settings_path = SessionManager::new().root().join("phase-allowlist.json");
+    let phase_allowed_tools = vec!["Read".to_owned(), "Bash".to_owned(), "Edit".to_owned()];
+
+    let base = PermissionResolver::with_settings_path(settings_path, phase_allowed_tools);
+    match config.permissions.strategy {
+        ConfigPermissionStrategy::SettingsAllowlist => base,
+        ConfigPermissionStrategy::DangerouslySkipPermissions => {
+            base.with_dangerously_skip_override(true)
+        }
+    }
 }
 
 /// Step 12: serve the webhook router and await shutdown. Bounds wind-down at
@@ -336,12 +520,27 @@ fn init_logging_with_redaction(
     }
 }
 
+/// Probe-only PATH check for an external binary. Production composition
+/// uses [`resolve_external_binary`] so the resolved path can be threaded
+/// into [`RuntimeComponents`]; this thinner helper is retained because the
+/// `__roki_missing_binary__` regression test asserts the canonical refusal
+/// shape directly.
+#[cfg_attr(not(test), allow(dead_code))]
 fn ensure_external_binary_on_path(name: &'static str) -> Result<(), RuntimeError> {
     if which_path(name).is_some() {
         Ok(())
     } else {
         Err(RuntimeError::ExternalBinaryMissing { name })
     }
+}
+
+/// Resolve an external binary on PATH and return its path. Refuses with the
+/// canonical [`RuntimeError::ExternalBinaryMissing`] when missing — this is
+/// the same refusal surface as [`ensure_external_binary_on_path`]; the
+/// resolved path is propagated into [`RuntimeComponents`] so downstream
+/// composition steps can shell out without re-walking PATH.
+fn resolve_external_binary(name: &'static str) -> Result<PathBuf, RuntimeError> {
+    which_path(name).ok_or(RuntimeError::ExternalBinaryMissing { name })
 }
 
 /// Minimal `which`-style PATH lookup (no extra dep). Honors the executable
@@ -539,6 +738,164 @@ strategy = "settings-allowlist"
             msg.contains("PATH"),
             "missing-binary error must mention PATH remediation: {msg}"
         );
+    }
+
+    // ----- RuntimeComponents assembly (Task 10.1.1) -----
+
+    fn fixture_workflow_policy() -> WorkflowPolicy {
+        // Drive through the public parse + validate path so the policy
+        // mirrors what the production loader would emit for the canonical
+        // four-block workflow shape.
+        let body = "---\n---\n\
+                    ## prompt_template_orchestrator\norch body\n\
+                    \n## prompt_template_implement_direct\nimpl body\n\
+                    \n## prompt_template_validate_direct\nval body\n\
+                    \n## prompt_template_open_pr\nopen body\n";
+        let parsed = crate::workflow::parse::parse_str(body).expect("parse fixture workflow");
+        crate::workflow::schema::validate(parsed).expect("validate fixture workflow")
+    }
+
+    fn fixture_resolver() -> PermissionResolver {
+        PermissionResolver::with_settings_path(
+            PathBuf::from("/tmp/roki-runtime-test-phase-allowlist.json"),
+            vec!["Read".to_owned(), "Bash".to_owned(), "Edit".to_owned()],
+        )
+    }
+
+    fn fake_external_binary(dir: &Path, name: &str) -> PathBuf {
+        let path = dir.join(name);
+        std::fs::write(&path, "#!/bin/sh\nexit 0\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = std::fs::metadata(&path).unwrap().permissions();
+            perms.set_mode(0o755);
+            std::fs::set_permissions(&path, perms).unwrap();
+        }
+        path
+    }
+
+    fn fixture_inputs(dir: &Path) -> RuntimeAssemblyInputs {
+        let claude = fake_external_binary(dir, "claude");
+        let claude_binary = ClaudeBinary::discover(Some(&claude)).expect("fake claude");
+        let wt = fake_external_binary(dir, "wt");
+        let ghq = fake_external_binary(dir, "ghq");
+        RuntimeAssemblyInputs {
+            claude_binary,
+            wt_path: wt,
+            ghq_path: ghq,
+            workflow_policy: fixture_workflow_policy(),
+            repos_allowlist: vec![],
+            permission_resolver: fixture_resolver(),
+        }
+    }
+
+    #[test]
+    fn assemble_runtime_components_yields_non_none_adapters_and_managers() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let inputs = fixture_inputs(dir.path());
+        let components = assemble_runtime_components(inputs).expect("assembly succeeds");
+
+        // Each adapter / manager arrived as a populated Arc handle: every
+        // Arc::strong_count must be at least 1, and the workflow policy must
+        // round-trip the orchestrator allowlist surfaced via the loader.
+        assert!(Arc::strong_count(&components.session_manager) >= 1);
+        assert!(Arc::strong_count(&components.worktree_manager) >= 1);
+        assert!(Arc::strong_count(&components.permission_resolver) >= 1);
+        assert!(Arc::strong_count(&components.orchestrator_session_adapter) >= 1);
+        assert!(Arc::strong_count(&components.phase_subprocess_adapter) >= 1);
+        assert!(Arc::strong_count(&components.workflow_policy) >= 1);
+        assert!(!components.workflow_policy.orchestrator.allowed_tools.is_empty());
+        assert!(components.claude_binary.path().exists());
+        assert!(components.wt_path.exists());
+        assert!(components.ghq_path.exists());
+    }
+
+    #[test]
+    fn assemble_runtime_components_refuses_when_permission_resolver_empty() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let mut inputs = fixture_inputs(dir.path());
+        // Force the permission-resolver factory error path: an `empty`
+        // resolver carries neither a settings strategy nor a dangerous-skip
+        // override, which is the exact missing-strategy refusal documented
+        // in Req 9.5.
+        inputs.permission_resolver = PermissionResolver::empty();
+        let err = assemble_runtime_components(inputs).unwrap_err();
+        match &err {
+            RuntimeError::ComponentAssembly { component, message } => {
+                assert_eq!(*component, "permission_resolver");
+                assert!(
+                    message.contains("permission strategy"),
+                    "remediation must mention permission strategy: {message}",
+                );
+            }
+            other => panic!("expected ComponentAssembly, got {other:?}"),
+        }
+        let rendered = err.to_string();
+        assert!(
+            rendered.contains("permission_resolver"),
+            "refusal must name the offending component: {rendered}",
+        );
+    }
+
+    #[test]
+    fn build_permission_resolver_honors_dangerously_skip_strategy_from_config() {
+        // Workflow body shared across both branches.
+        let dir = tempfile::TempDir::new().unwrap();
+        let workflow = dir.path().join("WORKFLOW.md");
+        std::fs::write(&workflow, "stub").unwrap();
+
+        let body_skip = format!(
+            r#"
+[linear]
+api_token = {{ env = "X" }}
+webhook_secret = {{ env = "Y" }}
+assignee = "me"
+
+[workflow]
+path = "{}"
+
+[permissions]
+strategy = "dangerously-skip"
+"#,
+            workflow.display()
+        );
+        let cfg_skip = Config::load_from_str(&body_skip).unwrap();
+        let resolver_skip = build_permission_resolver(&cfg_skip);
+        // Dangerous-skip override path: the resolver yields the
+        // `--dangerously-skip-permissions` strategy for non-Classify phases.
+        let resolved = resolver_skip
+            .resolve_for_phase(crate::engine::phase_subprocess::catalog::PhaseName::Implement)
+            .unwrap();
+        assert!(matches!(
+            resolved.strategy,
+            crate::permissions::PermissionStrategy::DangerouslySkipPermissions,
+        ));
+
+        let body_allow = format!(
+            r#"
+[linear]
+api_token = {{ env = "X" }}
+webhook_secret = {{ env = "Y" }}
+assignee = "me"
+
+[workflow]
+path = "{}"
+
+[permissions]
+strategy = "settings-allowlist"
+"#,
+            workflow.display()
+        );
+        let cfg_allow = Config::load_from_str(&body_allow).unwrap();
+        let resolver_allow = build_permission_resolver(&cfg_allow);
+        let resolved_allow = resolver_allow
+            .resolve_for_phase(crate::engine::phase_subprocess::catalog::PhaseName::Implement)
+            .unwrap();
+        assert!(matches!(
+            resolved_allow.strategy,
+            crate::permissions::PermissionStrategy::SettingsAllowlist { .. },
+        ));
     }
 }
 

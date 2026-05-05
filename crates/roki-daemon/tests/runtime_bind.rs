@@ -17,9 +17,19 @@ fn env_with_secrets() -> StaticEnv {
         .set("LINEAR_WEBHOOK_SECRET", "webhook_secret_for_bind_test")
 }
 
+/// Minimal valid `WORKFLOW.md` body with the four required template blocks.
+/// Bootstrap step 8 now parses + validates the workflow before bind; the
+/// stub body that worked under the readability-only check is no longer
+/// sufficient.
+const VALID_WORKFLOW_BODY: &str = "---\n---\n\
+    ## prompt_template_orchestrator\norch body\n\n\
+    ## prompt_template_implement_direct\nimpl body\n\n\
+    ## prompt_template_validate_direct\nval body\n\n\
+    ## prompt_template_open_pr\nopen body\n";
+
 fn write_config_with_port(dir: &std::path::Path, host: &str, port: u16) -> PathBuf {
     let workflow = dir.join("WORKFLOW.md");
-    std::fs::write(&workflow, "stub").unwrap();
+    std::fs::write(&workflow, VALID_WORKFLOW_BODY).unwrap();
     let toml = dir.join("roki.toml");
     let body = format!(
         r#"
@@ -82,6 +92,12 @@ async fn port_conflict_refuses_with_offending_address_in_log() {
             );
             return;
         }
+        RuntimeError::ClaudeBinary(_) => {
+            eprintln!(
+                "skipping port-conflict assertion: `claude` not discoverable in test environment"
+            );
+            return;
+        }
         other => panic!("expected BindFailed, got {other:?} (msg: {msg})"),
     }
     assert!(msg.contains(&addr.to_string()), "{msg}");
@@ -123,6 +139,11 @@ async fn cli_port_override_replaces_config_port() {
         RuntimeError::ExternalBinaryMissing { name } => {
             eprintln!(
                 "skipping override assertion: prerequisite binary `{name}` missing on PATH"
+            );
+        }
+        RuntimeError::ClaudeBinary(_) => {
+            eprintln!(
+                "skipping override assertion: `claude` not discoverable in test environment"
             );
         }
         other => panic!("expected BindFailed, got {other:?}"),

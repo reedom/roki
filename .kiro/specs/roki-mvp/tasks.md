@@ -455,13 +455,62 @@ refs:
 
 - [ ] 10. Bootstrap composition
 
-- [ ] 10.1 Wire runtime::run_with_shutdown composition order
+- [ ] 10.1 Wire runtime::run_with_shutdown composition order (umbrella; rolls up sub-tasks 10.1.1–10.1.6)
   - Compose the daemon in the order documented in `design.md > Daemon bootstrap` (steps 1–12): config load → secret resolve + redaction list → `[linear].assignee` resolution → `[linear].admit_states` resolution → signal handlers → external binary discovery → workflow load → `Orchestrator::with_recovery` → start single workspace-level `LinearTracker` → mount `POST /linear/webhook` on a single `axum::Router` → funnel polling + webhook through `PreAdmissionJudge` → `tokio::select!` on shutdown across orchestrator + bridge + server + tracker.
   - Pass the assembled engine adapters (`OrchestratorSessionAdapter`, `PhaseSubprocessAdapter`), `SessionManager`, `WorktreeManager`, `PermissionResolver`, `WorkflowLoader`, and `EscalationQueue` into `Orchestrator::run`. The orchestrator does not receive any agent tool factory — the daemon registers no agent-side tools (Req 7.1).
-  - Observable completion: e2e test (see 13.1) drives the full `runtime::run_with_shutdown` against a `fake_claude` binary, a wiremock Linear, and a signed webhook posted via HTTP and asserts the daemon completes the composition order, accepts a webhook, and exits cleanly on shutdown.
-  - _Depends: every 1.x–9.x task_
-  - _Blocked: composition steps 8-10 deferred — WORKFLOW full parse pipeline, OrchestratorSessionAdapter + PhaseSubprocessAdapter construction, SessionManager + WorktreeManager + PermissionResolver assembly, RecoveryReconciler scan, LinearTracker poller, Orchestrator actor map, and the webhook → PreAdmissionJudge → orchestrator inbox pipe are not wired into runtime::run_with_shutdown. Smoke tests cover steps 1-7 + 11 + 12 only._
+  - Observable completion: marked `[x]` only when 10.1.1–10.1.6 are all `[x]`; the e2e suite (13.1–13.12) drives the full `runtime::run_with_shutdown` against a `fake_claude` binary, a wiremock Linear, and a signed webhook posted via HTTP.
+  - _Depends: 10.1.1, 10.1.2, 10.1.3, 10.1.4, 10.1.5, 10.1.6_
   - _Requirements: 1.1, 7.1, 7.2, 7.3_
+  - _Boundary: runtime_
+
+- [x] 10.1.1 Assemble engine adapters + managers in runtime::run_with_shutdown
+  - In `runtime::run_with_shutdown`, after the existing workflow-load step, construct `SessionManager`, `WorktreeManager`, `PermissionResolver`, `OrchestratorSessionAdapter`, and `PhaseSubprocessAdapter` from the loaded `WorkflowPolicy`, resolved `claude` binary path, resolved `wt` + `ghq` paths, and config-derived permission strategy.
+  - Hand the assembled adapters + managers to the orchestrator factory through a typed `RuntimeComponents` (or equivalent) struct so subsequent composition steps consume a single anchor.
+  - Refuse to start if any adapter / manager factory returns an error; surface the offending component name in the error.
+  - Observable completion: unit test against a fixture config + workflow asserts `RuntimeComponents` contains non-`None` adapters + managers; a second test forces a permission-resolver construction error and asserts startup refusal naming the component.
+  - _Depends: 1.3, 4.2, 4.4, 5.1, 5.4, 5.5, 6.4, 6.7, 7.1, 7.2, 7.3_
+  - _Requirements: 1.1, 7.1_
+  - _Boundary: runtime_
+
+- [ ] 10.1.2 Compose Orchestrator actor map (no recovery seed yet)
+  - Construct the per-issue Orchestrator actor map from the assembled `RuntimeComponents`, plus `EventBus`, `EscalationQueue`, `SubscriberHooks` registry, and the `OrchestratorRead` snapshot projection. Spawn the actor-map supervisor task; expose an `OrchestratorInbox` handle.
+  - Seed the map empty (recovery wiring lands in 10.1.3).
+  - Observable completion: integration test constructs the actor map via `runtime::run_with_shutdown` (with recovery scan stubbed empty), pushes a synthetic `Admit { issue, mode }` into the inbox, and asserts the orchestrator session adapter is invoked exactly once for the issue.
+  - _Depends: 8.1, 8.2, 8.3, 8.4, 10.1.1_
+  - _Requirements: 7.1, 7.3, 13.1, 13.2_
+  - _Boundary: runtime_
+
+- [ ] 10.1.3 Wire RecoveryReconciler scan via Orchestrator::with_recovery
+  - Replace the empty-seed orchestrator construction from 10.1.2 with `Orchestrator::with_recovery(...)`. Drive the 5-cell decision matrix at startup before the actor-map supervisor accepts new tracker events; seed the actor map with `ResumeActive` and `FreshQueued` issues plus `Inactive(orphan)` retentions.
+  - Block the bootstrap progression past this step until the recovery scan completes (or times out per the configured window); on scan failure, refuse to start and log the offending path.
+  - Observable completion: integration test seeds session tempdirs + worktrees on disk for each of the 5 cells against a wiremock Linear, starts the daemon, and asserts the actor map matches the documented daemon state per cell.
+  - _Depends: 9.1, 9.2, 10.1.2_
+  - _Requirements: 8.5, 10.1, 10.2, 10.3, 10.4, 10.5_
+  - _Boundary: runtime_
+
+- [ ] 10.1.4 Start workspace-level LinearTracker poller
+  - Construct + spawn the single workspace-level `LinearTracker` poller using the Linear read-only client, resolved `[linear].assignee`, resolved `[linear].admit_states`, and the configured cadence cap. Wire the 429 backoff state with the existing client backoff.
+  - Expose a `TrackerHandle` carrying the poller's observation stream (`NormalizedIssue` events) and the `TrackerRefresh` nudge endpoint.
+  - Observable completion: integration test against a wiremock Linear asserts (a) the poller emits a `NormalizedIssue` for an admit-states + assignee match within the cadence window, (b) a 429 response suspends polling for the documented backoff window, (c) `TrackerRefresh::nudge` honours throttle / backoff per Task 3.5.
+  - _Depends: 3.1, 3.3, 3.5, 10.1.2_
+  - _Requirements: 3.3, 3.4, 13.3_
+  - _Boundary: runtime_
+
+- [ ] 10.1.5 Pipe webhook + poll observations through PreAdmissionJudge into orchestrator inbox
+  - Funnel the existing `POST /linear/webhook` receiver (Task 10.3 / 3.2) and the poller observation stream (10.1.4) through `PreAdmissionJudge` (Task 3.4). Route `Admit { issue, mode }` into the orchestrator inbox (10.1.2); route `AssignmentLost` / `RokiReadyRemoved` into the dedicated channels consumed by the dedup index (Task 3.6).
+  - Pre-admission failures emit `tracker.pre_admission.skipped` log events with the failed condition and drop without inbox delivery.
+  - Race-safe: concurrent webhook + poll observation of the same issue must result in at most one orchestrator launch and at most one in-flight phase subprocess (Task 3.6 invariant).
+  - Observable completion: integration test posts a signed webhook for an admit-passing issue, asserts the orchestrator actor receives exactly one `Admit`; a second test posts a webhook for a pre-admission-failing issue and asserts the `tracker.pre_admission.skipped` log event without inbox delivery; a third test fires concurrent webhook + poll for the same issue and asserts a single orchestrator launch.
+  - _Depends: 3.2, 3.4, 3.6, 10.1.3, 10.1.4_
+  - _Requirements: 3.1, 3.2, 3.7, 3.8, 3.9, 3.10, 3.11, 3.12, 3.13, 3.14_
+  - _Boundary: runtime_
+
+- [ ] 10.1.6 Wire shutdown across orchestrator + tracker + reconciler + server
+  - Extend the existing `tokio::select!` shutdown loop in `runtime::run_with_shutdown` to await the orchestrator actor map, the tracker poller, the webhook server, and any in-flight reconciler tasks within `SHUTDOWN_WINDOW = 30s` via `await_workers_with_window`.
+  - On shutdown signal: stop accepting new tracker events first (tracker + webhook), then send each live orchestrator session a final `stop`-acknowledgement signal and close its stdin, then SIGTERM in-flight phase subprocesses, then await each within the configured per-subprocess shutdown window.
+  - Observable completion: integration test starts the daemon with a fake long-running phase subprocess, fires a signed webhook for an admit-passing issue, sends SIGTERM mid-phase, and asserts (a) the daemon exits cleanly within the documented window, (b) orchestrator stdin closed, (c) phase subprocess SIGTERMed, (d) tracker + webhook stop accepting new events before orchestrator teardown begins.
+  - _Depends: 1.5, 10.1.1, 10.1.2, 10.1.3, 10.1.4, 10.1.5_
+  - _Requirements: 1.4, 7.1, 7.2, 7.3_
   - _Boundary: runtime_
 
 - [x] 10.2 Implement startup binary discovery refusals
