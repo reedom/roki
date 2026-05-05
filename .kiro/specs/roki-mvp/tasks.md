@@ -529,6 +529,32 @@ refs:
   - _Requirements: 1.1, 2.5_
   - _Boundary: runtime_
 
+- [ ] 10.4 Add configurable Linear endpoint (config slot or test seam)
+  - `runtime::bootstrap` currently hardcodes `LinearClient::new(DEFAULT_LINEAR_ENDPOINT, api_token)`. Add EITHER (a) a `[linear].endpoint` config slot (default `DEFAULT_LINEAR_ENDPOINT`, validated as a non-empty URL) consumed by `bootstrap`, OR (b) a `runtime::testing` seam that injects a pre-built `Arc<LinearClient>` into the production composition path so e2e tests can redirect `viewer()` and `list_issues()` against a wiremock without modifying production paths.
+  - Pick one approach (the config slot is the more durable choice; the test seam is the lower-cost choice). Document the rationale in the commit message.
+  - Update `docs/reference/config.md` if the config-slot path is chosen.
+  - Observable completion: integration test against a wiremock Linear redirects the production `bootstrap` viewer + list_issues lookups to the mock; assertion confirms the daemon resolves `me` against the mock and the recovery scan + poller hit the mock instead of the real Linear endpoint.
+  - _Depends: 1.3, 3.1, 10.1.3, 10.1.4_
+  - _Requirements: 2.13, 3.4_
+  - _Boundary: runtime, config (if config-slot path), tracker/linear (if endpoint accessor needed)_
+
+- [ ] 10.5 Expose shutdown trigger via runtime::testing seam
+  - `runtime::bootstrap` constructs `(ShutdownSignal, ShutdownTrigger)` and immediately consumes the trigger inside `install_signal_handlers`. Add a `runtime::testing::run_with_env_and_trigger` (or equivalent shape — `bootstrap_for_test` returning the `Bootstrapped` struct + a clonable `ShutdownTrigger`) so e2e tests can fire shutdown without sending SIGINT to the test harness process.
+  - Production path is unchanged; the seam replaces the `install_signal_handlers` call only when the test entry is used.
+  - Observable completion: integration test composes the runtime via the new seam, fires the trigger, and asserts `serve()` returns Ok within `SHUTDOWN_WINDOW + 1s` without sending any OS signals.
+  - _Depends: 1.5, 10.1.6_
+  - _Requirements: 1.4_
+  - _Boundary: runtime_
+
+- [ ] 10.6 Wire `--debug` + `[debug].dir` into engine adapters via DebugSinkFactory
+  - `runtime::bootstrap` reads `RunArgs.debug` + `[debug]` config but never threads the per-issue debug sink into the engine launch contexts. `OrchestratorEngineImpl::launch` and `PhaseSubprocessAdapter::launch` (or its caller) hardcode `debug_sink: None`.
+  - Add a `DebugSinkFactory` runtime-level type (or extend the existing `logging::PerIssueDebugSink` surface) that, given an `IssueId`, returns a sink writing to `<debug_dir>/<issue>.log` per Req 11.5/11.7. Plumb the factory through `RuntimeComponents` (or a sibling holder) into both engine adapters' launch contexts.
+  - On per-issue debug file open / append failure, log the failure with the offending path and continue running the subprocess (per existing Task 1.4 contract).
+  - Observable completion: integration test enables `--debug` + a temp `[debug].dir`, drives an admit-passing issue end-to-end, asserts `<debug_dir>/<issue>.log` exists AND contains at least one line in the documented `[STDOUT|STDERR]` + role-tag + RFC 3339 nanosecond timestamp format.
+  - _Depends: 1.4, 10.1.1_
+  - _Requirements: 1.5, 11.2, 11.3, 11.4, 11.6, 11.7_
+  - _Boundary: runtime, engine/orchestrator_session, engine/phase_subprocess (debug-sink threading only; no behavior change to subprocess launch otherwise)_
+
 - [ ] 11. Reference docs of record (technical contracts consumed by code + tests)
 
 - [x] 11.1 (P) Author docs/reference/cli.md
@@ -650,7 +676,7 @@ refs:
   - Drive `runtime::run_with_shutdown` end-to-end against a real config, wiremock Linear, `fake_claude` binary, and an HTTP client posting a signed webhook. Assert (a) composition order completes, (b) refusals fire on missing `wt` / `ghq` / `claude`, (c) Linear token + webhook secret resolve and never appear in log output, (d) `--debug` activates the per-issue debug sink, (e) `[judge].model` in config refuses at startup.
   - Observable completion: `cargo test e2e_bootstrap` passes; refusal scenarios assert non-zero exit + actionable error message.
   - _Depends: 10.1, 10.2, 10.3_
-  - _Blocked: full (a) composition-order assert + (d) `--debug` per-issue sink coverage requires three prerequisite production-side changes that 10.1.1-10.1.6 did not deliver: (1) configurable Linear endpoint or `runtime::testing` seam injecting a pre-built `LinearClient` so `bootstrap`'s `viewer()` can be redirected to a wiremock; (2) `runtime::testing::run_with_env_and_trigger` (or equivalent) so tests can fire shutdown without SIGINT to the test harness; (3) wire `RunArgs.debug` + `[debug].dir` through `runtime::bootstrap` into a `DebugSinkFactory` and thread `for_issue(&issue)` into `OrchestratorLaunchContext.debug_sink` and the phase subprocess launch context — both adapters currently hardcode `debug_sink: None`. Sub-assertions (b)/(c)/(e) covered + tracing-test (c) positive-control strengthening landed in this branch._
+  - _Blocked: full (a) composition-order assert + (d) `--debug` per-issue sink coverage depends on prereq tasks 10.4 (configurable Linear endpoint / test seam), 10.5 (shutdown trigger test seam), 10.6 (DebugSinkFactory wiring through engine adapters). Sub-assertions (b)/(c)/(e) covered + tracing-test (c) positive-control strengthening landed in this branch._
   - _Requirements: 1.1, 1.2, 1.3, 1.4, 11.6, 11.7_
   - _Boundary: runtime_
 
