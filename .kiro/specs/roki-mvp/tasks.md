@@ -455,11 +455,12 @@ refs:
 
 - [ ] 10. Bootstrap composition
 
-- [x] 10.1 Wire runtime::run_with_shutdown composition order
+- [ ] 10.1 Wire runtime::run_with_shutdown composition order
   - Compose the daemon in the order documented in `design.md > Daemon bootstrap` (steps 1–12): config load → secret resolve + redaction list → `[linear].assignee` resolution → `[linear].admit_states` resolution → signal handlers → external binary discovery → workflow load → `Orchestrator::with_recovery` → start single workspace-level `LinearTracker` → mount `POST /linear/webhook` on a single `axum::Router` → funnel polling + webhook through `PreAdmissionJudge` → `tokio::select!` on shutdown across orchestrator + bridge + server + tracker.
   - Pass the assembled engine adapters (`OrchestratorSessionAdapter`, `PhaseSubprocessAdapter`), `SessionManager`, `WorktreeManager`, `PermissionResolver`, `WorkflowLoader`, and `EscalationQueue` into `Orchestrator::run`. The orchestrator does not receive any agent tool factory — the daemon registers no agent-side tools (Req 7.1).
   - Observable completion: e2e test (see 13.1) drives the full `runtime::run_with_shutdown` against a `fake_claude` binary, a wiremock Linear, and a signed webhook posted via HTTP and asserts the daemon completes the composition order, accepts a webhook, and exits cleanly on shutdown.
   - _Depends: every 1.x–9.x task_
+  - _Blocked: composition steps 8-10 deferred — WORKFLOW full parse pipeline, OrchestratorSessionAdapter + PhaseSubprocessAdapter construction, SessionManager + WorktreeManager + PermissionResolver assembly, RecoveryReconciler scan, LinearTracker poller, Orchestrator actor map, and the webhook → PreAdmissionJudge → orchestrator inbox pipe are not wired into runtime::run_with_shutdown. Smoke tests cover steps 1-7 + 11 + 12 only._
   - _Requirements: 1.1, 7.1, 7.2, 7.3_
   - _Boundary: runtime_
 
@@ -596,86 +597,98 @@ refs:
 
 - [ ] 13. End-to-end tests
 
-- [x] 13.1 (P) Write e2e_bootstrap test
+- [ ] 13.1 (P) Write e2e_bootstrap test
   - Drive `runtime::run_with_shutdown` end-to-end against a real config, wiremock Linear, `fake_claude` binary, and an HTTP client posting a signed webhook. Assert (a) composition order completes, (b) refusals fire on missing `wt` / `ghq` / `claude`, (c) Linear token + webhook secret resolve and never appear in log output, (d) `--debug` activates the per-issue debug sink, (e) `[judge].model` in config refuses at startup.
   - Observable completion: `cargo test e2e_bootstrap` passes; refusal scenarios assert non-zero exit + actionable error message.
   - _Depends: 10.1, 10.2, 10.3_
+  - _Blocked: depends on 10.1 runtime composition completion. Current `tests/e2e_bootstrap.rs` covers refusal paths (b/c/e) but cannot exercise (a) full composition order or (d) `--debug` per-issue sink because runtime::run_with_shutdown does not yet wire the orchestrator/tracker/recovery layers._
   - _Requirements: 1.1, 1.2, 1.3, 1.4, 11.6, 11.7_
   - _Boundary: runtime_
 
-- [x] 13.2 (P) Write e2e_spec_driven_happy test
+- [ ] 13.2 (P) Write e2e_spec_driven_happy test
   - SPEC_DRIVEN end-to-end: orchestrator first turn structurally validates the target spec docs (using `Read` + `Bash` in the read-only sandbox), nominates `implement` (`/kiro-impl <target>`) → `review` → `validate` → `open_pr` → `finalize_review` → orchestrator reads `review.md` and validates → `action=stop outcome=success` → daemon maps to `Inactive(awaiting_linear)`.
   - Observable completion: `cargo test e2e_spec_driven_happy` passes; the resulting transition log shows the documented sequence and final `Inactive(awaiting_linear)`.
   - _Depends: 10.1, 11.6, 11.4_
+  - _Blocked: depends on 10.1 runtime composition completion. Current `tests/e2e_spec_driven_happy.rs` drives the OrchHarness stub-engine seam (stub OrchestratorEngine + PhaseEngine + WorktreeOps + SessionDirOps) instead of spawning `runtime::run_with_shutdown` with real fake_claude orchestrator + phase subprocesses._
   - _Requirements: 4.3, 5.6, 5.11_
   - _Boundary: runtime_
 
-- [x] 13.3 (P) Write e2e_needs_classify_path_b test
+- [ ] 13.3 (P) Write e2e_needs_classify_path_b test
   - NEEDS_CLASSIFY Path B end-to-end: `classify` returns `Path B` → `implement` (direct mode, daemon-internal `prompt_template_implement_direct` rendered with the ticket body's numbered acceptance criteria as `additional_context`) → `review` → `validate` → `open_pr` → `finalize_review` → `outcome=success`.
   - Observable completion: `cargo test e2e_needs_classify_path_b` passes; the rendered direct-mode prompt contains the verbatim `additional_context` in the documented section.
   - _Depends: 10.1, 11.6_
+  - _Blocked: depends on 10.1 runtime composition completion. `tests/e2e_needs_classify_path_b.rs` drives the OrchHarness stub-engine seam; verbatim additional_context forwarding is verified at the seam level rather than through real prompt rendering by the engine adapter._
   - _Requirements: 4.4, 5.6_
   - _Boundary: runtime_
 
-- [x] 13.4 (P) Write e2e_needs_classify_path_a test
+- [ ] 13.4 (P) Write e2e_needs_classify_path_a test
   - NEEDS_CLASSIFY Path A end-to-end: `classify` returns `Path A` → orchestrator writes Linear comment + label via Linear MCP in the same turn → `action=stop outcome=needs_operator` → daemon maps to `Inactive(needs_operator)`; worktree + session preserved.
   - Observable completion: `cargo test e2e_needs_classify_path_a` passes; the daemon does NOT issue a Linear write itself; the issue's worktree and session tempdir are retained.
   - _Depends: 10.1_
+  - _Blocked: depends on 10.1 runtime composition completion. `tests/e2e_needs_classify_path_a.rs` drives the OrchHarness stub-engine seam — confirms outcome=needs_operator → Inactive(NeedsOperator) mapping but does not exercise real Linear MCP write paths because no real orchestrator session is spawned._
   - _Requirements: 4.4, 4.11, 5.11, 7.2_
   - _Boundary: runtime_
 
-- [x] 13.5 (P) Write e2e_phase_nonclean_retry test
+- [ ] 13.5 (P) Write e2e_phase_nonclean_retry test
   - Drive a phase non-clean exit on `implement`: first → `Active → Backoff → Active`; second non-clean exhausts `max_attempts = 2` → daemon emits `daemon_directive(retry_exhausted)` to the orchestrator → orchestrator emits `action=stop outcome=failure` → daemon maps to `Inactive(retry_exhausted)`.
   - Observable completion: `cargo test e2e_phase_nonclean_retry` passes; replays consume zero `extension.orchestrator.max_phases` slots; backoff between attempts respects the configured curve.
   - _Depends: 10.1, 6.9_
+  - _Blocked: depends on 10.1 runtime composition completion. `tests/e2e_phase_nonclean_retry.rs` injects `daemon_directive(retry_exhausted)` directly through the OrchHarness seam; does not exercise the real RetryPolicy schedule wired through runtime composition — backoff curve and max_phases isolation are unit-tested separately in src/engine/phase_subprocess/policy.rs._
   - _Requirements: 5.10, 12.2_
   - _Boundary: runtime_
 
-- [x] 13.6 (P) Write e2e_orchestrator_crash test
+- [ ] 13.6 (P) Write e2e_orchestrator_crash test
   - Force the orchestrator session to non-zero-exit without `action=stop` → daemon routes to `Inactive(orchestrator_crash)`; assert no Linear write occurs; an escalation-queue entry is present; worktree + session are preserved.
   - Observable completion: `cargo test e2e_orchestrator_crash` passes; the escalation queue snapshot via `OrchestratorRead` contains the entry; the daemon emits no Linear-related side effects.
   - _Depends: 10.1, 8.5_
+  - _Blocked: depends on 10.1 runtime composition completion. `tests/e2e_orchestrator_crash.rs` drives the OrchHarness stub-engine seam; ProcessExit is synthesized at the seam rather than produced by a real fake_claude orchestrator subprocess._
   - _Requirements: 12.3_
   - _Boundary: runtime_
 
-- [x] 13.7 (P) Write e2e_orchestrator_unparseable test
+- [ ] 13.7 (P) Write e2e_orchestrator_unparseable test
   - Drive two consecutive schema-drift turns (after one daemon-side reprompt) → daemon routes to `Inactive(orchestrator_unparseable)`; raw stdout captured in the log.
   - Observable completion: `cargo test e2e_orchestrator_unparseable` passes; the structured log contains the raw drift payload.
   - _Depends: 10.1, 6.5_
+  - _Blocked: depends on 10.1 runtime composition completion. `tests/e2e_orchestrator_unparseable.rs` drives the OrchHarness stub-engine seam; TerminalDrift is synthesized rather than produced by a real fake_claude orchestrator emitting two consecutive schema-drift turns._
   - _Requirements: 5.4, 12.3_
   - _Boundary: runtime_
 
-- [x] 13.8 (P) Write e2e_orchestrator_budget_exhausted test
+- [ ] 13.8 (P) Write e2e_orchestrator_budget_exhausted test
   - Configure `extension.orchestrator.max_phases = 2`. Drive the orchestrator stub to nominate a third phase → daemon routes to `Inactive(orchestrator_budget_exhausted)`; the additional phase is NOT spawned.
   - Observable completion: `cargo test e2e_orchestrator_budget_exhausted` passes; the assertion on the spawn primitive confirms only two phase subprocesses were created.
   - _Depends: 10.1, 6.5_
+  - _Blocked: depends on 10.1 runtime composition completion. `tests/e2e_orchestrator_budget_exhausted.rs` injects the budget-exhausted directive at the OrchHarness seam; the spawn-primitive count assertion is satisfied trivially because no real phase subprocess is spawned through this path. Real budget enforcement is tested in src/engine/orchestrator_session/budget.rs._
   - _Requirements: 5.5, 12.3_
   - _Boundary: runtime_
 
-- [x] 13.9 (P) Write e2e_assignment_loss test
+- [ ] 13.9 (P) Write e2e_assignment_loss test
   - Drive a webhook reporting assignment moved away mid-`implement` → orchestrator + phase terminated → `Cleaning` without retry-budget consumption → allowlist-iteration cleanup removes the worktree (branch == issue id verbatim) → session tempdir removed.
   - Observable completion: `cargo test e2e_assignment_loss` passes; the resulting transition log shows `Active → Cleaning` without entering `Backoff`; the cleaned worktree is gone but the branch is retained.
   - _Depends: 10.1, 8.6_
+  - _Blocked: depends on 10.1 runtime composition completion. `tests/e2e_assignment_loss.rs` drives the OrchHarness stub-engine seam; webhook-delivered assignment-loss is synthesized as a TrackerAssignmentLost message at the seam rather than posted via signed HTTP through the runtime webhook handler._
   - _Requirements: 3.10, 4.9_
   - _Boundary: runtime_
 
-- [x] 13.10 (P) Write e2e_review_md_validation_retry test
+- [ ] 13.10 (P) Write e2e_review_md_validation_retry test
   - `finalize_review` clean exit but the orchestrator's structural validation of `review.md` reports overall `status = fail` → orchestrator re-nominates `implement` with `additional_context` populated from failing per-criterion entries → eventually `review.md` validation passes → `outcome=success`.
   - Observable completion: `cargo test e2e_review_md_validation_retry` passes; the implement re-nomination's rendered envelope contains the failing per-criterion entries verbatim.
   - _Depends: 10.1, 11.4_
+  - _Blocked: depends on 10.1 runtime composition completion. `tests/e2e_review_md_validation_retry.rs` drives the OrchHarness stub-engine seam; review.md structural validation is simulated by canned orchestrator action emissions rather than orchestrator's actual Read+Bash validation flow against an on-disk review.md._
   - _Requirements: 4.4, 13.4_
   - _Boundary: runtime_
 
-- [x] 13.11 (P) Write e2e_multi_repo_rejection test
+- [ ] 13.11 (P) Write e2e_multi_repo_rejection test
   - Drive the orchestrator stub to detect a classify Path B context naming two repos OR an out-of-allowlist repo → orchestrator emits `outcome=needs_split` or `outcome=allowlist_rejected` with a Linear comment in the same turn → daemon maps to `Inactive(needs_split)` or `Inactive(allowlist_rejected)`.
   - Observable completion: `cargo test e2e_multi_repo_rejection` passes; the daemon does NOT issue a Linear write itself; the worktree is NOT materialized for an out-of-allowlist repo id.
   - _Depends: 10.1, 5.4_
+  - _Blocked: depends on 10.1 runtime composition completion. `tests/e2e_multi_repo_rejection.rs` drives the OrchHarness stub-engine seam; outcome=needs_split / outcome=allowlist_rejected are produced by stub action emissions rather than by a real orchestrator session writing a Linear comment via Linear MCP._
   - _Requirements: 4.5_
   - _Boundary: runtime_
 
-- [x] 13.12 (P) Write e2e_recovery test
+- [ ] 13.12 (P) Write e2e_recovery test
   - Kill the daemon mid-phase (orchestrator + phase both alive); restart; assert the recovery scan reconciles sessions + worktrees + Linear; the resume-active issue gets a fresh orchestrator with `mode` recomputed from the current Linear label set; orphan paths surface via the escalation queue.
   - Observable completion: `cargo test e2e_recovery` passes; no in-flight orchestrator is persisted across restart; the fresh orchestrator's rendered prompt contains the recomputed `mode`.
   - _Depends: 10.1, 9.2_
+  - _Blocked: depends on 10.1 runtime composition completion. `tests/e2e_recovery.rs` drives the RecoveryReconciler directly + assembles an OrchHarness; does not exercise the full daemon kill+restart cycle through `runtime::run_with_shutdown` (no real process restart, no real fresh orchestrator session)._
   - _Requirements: 8.5, 10.1, 10.2_
   - _Boundary: runtime_
