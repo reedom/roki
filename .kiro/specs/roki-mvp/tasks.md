@@ -752,7 +752,7 @@ refs:
   - _Requirements: 4.4, 13.4_
   - _Boundary: runtime_
 
-- [ ] 13.11 (P) Write e2e_multi_repo_rejection test
+- [x] 13.11 (P) Write e2e_multi_repo_rejection test
   - Drive the orchestrator stub to detect a classify Path B context naming two repos OR an out-of-allowlist repo → orchestrator emits `outcome=needs_split` or `outcome=allowlist_rejected` with a Linear comment in the same turn → daemon maps to `Inactive(needs_split)` or `Inactive(allowlist_rejected)`.
   - Observable completion: `cargo test e2e_multi_repo_rejection` passes; the daemon does NOT issue a Linear write itself; the worktree is NOT materialized for an out-of-allowlist repo id.
   - _Depends: 10.1, 5.4_

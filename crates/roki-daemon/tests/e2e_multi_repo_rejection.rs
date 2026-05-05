@@ -59,7 +59,12 @@ async fn outcome_needs_split_lands_in_inactive_needs_split() {
 
     h.wait_for_inactive(&issue, InactiveReason::NeedsSplit).await;
 
-    // Worktree + session retained for operator triage.
+    // Worktree was never materialized: the orchestrator stopped before any
+    // non-classify phase nomination, so the daemon never invoked
+    // `WorktreeOps::ensure`. The daemon also issued no cleanup (worktree +
+    // session are retained for operator triage on a non-`awaiting_linear`
+    // Inactive reason per Requirement 4.11).
+    assert!(h.worktree.ensure_calls.lock().await.is_empty());
     assert!(h.worktree.cleanup_calls.lock().await.is_empty());
     assert!(h.session_dirs.remove_calls.lock().unwrap().is_empty());
 }
@@ -89,6 +94,12 @@ async fn outcome_allowlist_rejected_lands_in_inactive_allowlist_rejected() {
     h.wait_for_inactive(&issue, InactiveReason::AllowlistRejected)
         .await;
 
+    // For an out-of-allowlist repo id the daemon must NOT materialize a
+    // worktree: the orchestrator's `action=stop outcome=allowlist_rejected`
+    // arrives before any `run_phase` non-classify nomination would trigger
+    // `WorktreeOps::ensure`. Worktree + session are also retained for
+    // operator triage (no cleanup invoked).
+    assert!(h.worktree.ensure_calls.lock().await.is_empty());
     assert!(h.worktree.cleanup_calls.lock().await.is_empty());
     assert!(h.session_dirs.remove_calls.lock().unwrap().is_empty());
 }
