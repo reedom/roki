@@ -7,58 +7,79 @@ refs:
   implements:
     - req:roki-mvp:4
   related:
-    - design:roki-mvp
+    - fr:02-configuration
+    - fr:04-state-machine-and-recovery
+    - fr:07-worker-execution
+    - fr:20-rule-and-cycle-engine
+    - fr:21-log-access
 ---
 
 # FR 06: Worktree and Session Lifecycle
 
-> The daemon materializes / cleans up per-issue session tempdirs and git worktrees for the phase subprocesses to walk into.
+> Per-ticket session tempdirs (always present once admitted) and per-ticket git worktrees (lazily materialized when a cycle reaches its first run phase). The daemon owns both directories' creation and deletion. Operators read paths through `roki repo` ([21-log-access](21-log-access.md)); phase subprocesses walk into the resolved path.
 
 ## Purpose
 
-Phase subprocesses walk into a prepared workspace. Concentrating worktree creation, deletion, and path-safety verification in the daemon makes the operator-declared allowlist the single boundary for git side effects.
+Concentrate worktree and session-tempdir lifecycle in the daemon so the operator-declared allowlist (`[[admission.repos]]` in WORKFLOW.toml) is the single boundary for git side effects. Lazy worktree creation avoids materializing a worktree for tickets that admit but never reach a `pre.directive: "run"` (e.g. tickets handled entirely by an admission-time cleanup entry).
 
 ## User-visible Behavior
 
-- **Session tempdir creation**: created on entry to `Pending` (orchestrator-session launch CWD), under the platform's standard user cache root (directory name = the Linear issue identifier). This is the orchestrator's own working directory; it exists before any phase subprocess is nominated.
-- **Worktree creation (idempotent, on any non-`classify` phase nomination)**: when the orchestrator nominates a phase **other than `classify`** for a validated single allowlisted repository, the daemon ensures a worktree exists for the issue before spawning the phase subprocess. The operation is **idempotent**:
-  - On the first such nomination: resolve the repo's local clone with `ghq list -p`, then create a worktree with `wt switch-create` (branch name = the Linear issue identifier verbatim).
-  - On every subsequent non-`classify` nomination: verify the worktree's continued presence with `wt list` (or equivalent) without invoking `wt switch-create` again. The verify step keeps the operation O(1) on the steady-state path while still tolerating operator-side `wt remove` between nominations.
-  - The worktree path is exposed to every phase subprocess that needs it (every phase except `classify`) via the daemon-controlled per-phase context envelope (per [07-worker-execution](07-worker-execution.md), [12-extension-surface](12-extension-surface.md)).
-  - The `classify` phase MUST NOT receive a worktree path: `classify` runs against ticket context and the project-level spec dir alone, before any allowlisted repo has been resolved (in NEEDS_CLASSIFY mode the repo is resolved from the `classify` phase's Path-B output; in SPEC_DRIVEN mode from the project-level spec dir, but `classify` does not run in SPEC_DRIVEN). Spawning a worktree before `classify` would presume a repo identity the orchestrator has not yet committed to.
-  - The orchestrator itself never receives worktree paths — the orchestrator is filesystem-read-only and never produces code changes.
-- **Cleanup triggers** (conditions to enter the `Cleaning` state):
-  - The Linear issue transitioned to a terminal state (Done / Canceled / etc.), or
-  - The Linear issue was reassigned to someone else.
-  - The state is entered **only when the tracker observes** one of these. A clean subprocess exit alone does not cause this transition.
-- **Cleanup behavior**:
-  - If a phase subprocess or the orchestrator session is still running, terminate it first.
-  - For every repo in the allowlist, enumerate worktrees and `wt remove` those whose branch name equals the Linear issue identifier verbatim.
-  - Delete the session tempdir.
-  - **Do not delete the branch.**
-- **On TerminalFailure**: keep the worktree, the branch, and the session tempdir all intact (so the operator can inspect them).
-- **On filesystem error**: mark the issue as failed, log the offending path, and refuse additional work until the operator intervenes (the daemon emits a `daemon_directive` event of `kind=fs_poison` to the orchestrator, which writes the matching Linear label + comment via Linear MCP — see [14-operator-notifications](14-operator-notifications.md)).
+### Session tempdir
+
+- **Created at admission**: when the admission filter ([04-state-machine-and-recovery §Admission filter](04-state-machine-and-recovery.md)) accepts a ticket, the daemon creates `<session_root>/<ticket-id>/` (where `<session_root>` is `roki.toml [paths].session_root`). This directory is the per-iter capture root ([21-log-access §Storage layout](21-log-access.md)). It exists before any cycle starts so even pre-run inspection has somewhere to write logs.
+- **Deleted on**: cleanup-cycle completion, admission-filter eviction (after any in-flight cycle terminates), and orphan reconciliation at cold start.
+
+### Worktree
+
+- **Created lazily**: when a cycle's pre returns `directive: "run"` and the worktree does not yet exist, the daemon creates it before spawning the run subprocess. The pre response payload includes a `repo` field that names the ghq repo for this ticket. The daemon validates `repo` against the admission-resolved repo and rejects mismatches as a `schema_drift` failure.
+- **Tooling**: the daemon resolves the repo's local clone with `ghq list -p` and creates a worktree with `wt switch-create` (branch name = the Linear issue identifier verbatim). Idempotent on subsequent `directive: "run"` invocations: the daemon verifies the worktree's continued presence with `wt list` (or equivalent) without re-running `wt switch-create`. If the operator removed the worktree out-of-band between iterations, the daemon recreates it.
+- **Path exposure**: phase subprocesses obtain the path via `roki repo` ([21-log-access §`roki repo`](21-log-access.md)). The daemon does not inject the worktree path into the cli line implicitly; operators write `cd "$(roki repo)"` (or equivalent) inside their command.
+- **Reused across cycles**: the same worktree persists across cycles for the same ticket. New cycles inherit whatever git state the previous cycle left.
+- **Branch name**: equals the Linear issue identifier verbatim. The daemon does not parse, transform, or namespace it.
+
+### Cleanup
+
+The daemon deletes the worktree + session tempdir under three conditions:
+
+1. **Cleanup cycle completion** (`cycle.kind == "cleanup"`): after the cycle's terminal directive is observed, the daemon enumerates worktrees in the allowlist whose branch name matches the issue identifier and runs `wt remove`, then `rm -rf` on the session tempdir. The branch itself is **not** deleted.
+2. **Admission-filter eviction** (assignee revoked, repo allowlist match lost): the in-flight cycle (if any) runs to natural end first; afterward the daemon evicts and deletes as in (1).
+3. **Orphan reconcile at cold start** ([04-state-machine-and-recovery §Cold start](04-state-machine-and-recovery.md)): residue not corresponding to any admission-passing Linear ticket is auto-deleted with a `reason: orphan` log entry.
+
+There is no `Cleaning` state in the diff cache anymore. Cleanup is a cycle kind, not a state.
+
+### Failure mode retention
+
+When `[[on_failure]]` does not match a daemon-detected failure, the worktree and session tempdir are **retained** for forensics. Operators that want them cleaned up after a failure write a `[[cleanup]]` entry that triggers on whatever signal they choose (e.g. a Linear comment / label produced inside the failure-handler cycle's run / post phase).
+
+When the daemon itself encounters a filesystem error during create or remove, it logs the offending path with `error_kind: fs_poison` and routes the event through `[[on_failure]] when.kind = "process_crash"` if the error happened during a phase launch (because the launch failed), or as a structured event + escalation entry if the error happened during cleanup. The previous `daemon_directive (kind=fs_poison)` event is removed.
+
+### Multi-repo
+
+One ticket → one repo by construction. The admission step resolves it; the worktree is for that repo only. Multi-repo concerns are operator-side: a pre that detects the work spans repos can return `directive: "end"` with whatever Linear write or label change it cares to make.
 
 ## Capabilities
 
-- **Driven through `wt` + `ghq`**: worktrees are created with `wt switch-create` and removed with `wt remove`. The local location of each repo is resolved with `ghq list -p`.
-- **Path safety**: any path that escapes the root after sanitization, that contains path traversal, or that conflicts with another worker's path is rejected. Paths that resolve outside the root after canonicalization (escapes via symlink / hardlink) are also rejected.
-- **Discovery primitive**: cleanup and restart-time recovery ([04-state-machine-and-recovery](04-state-machine-and-recovery.md)) both rely on the same "branch name = Linear issue identifier" scan.
-- **Per-issue keying**: both the session tempdir and the worktree branch name are keyed by the Linear issue identifier alone. Repos may differ.
+- **Lazy worktree creation**: avoids unnecessary git operations for tickets whose first cycle ends at pre.
+- **`wt` + `ghq` driven**: `ghq list -p` to resolve the local clone path, `wt switch-create` to materialize, `wt list` to verify, `wt remove` to delete.
+- **Path safety**: any path that escapes the root after canonicalization (symlink / hardlink) or that conflicts with another ticket's path is rejected.
+- **Discovery primitive**: cleanup and cold-start reconciliation both rely on "branch name = Linear issue identifier".
+- **Per-issue keying**: both the session tempdir name and the worktree branch name are the Linear issue identifier alone. Repos may differ between tickets.
+- **Operator access via `roki repo`**: phase subprocesses do not need to know the path layout; `roki repo` returns the right directory based on environment context.
 
 ## Boundaries
 
-- **Branch deletion is not done** (it is the responsibility of phase subprocesses / the operator).
-- **Container / VM isolation** is out of scope (we depend on Claude Code's `workspace-write` sandbox for phase subprocesses plus path safety; the orchestrator always runs read-only).
-- **Editing code inside the worktree** is a phase subprocess responsibility; the daemon never touches it.
+- **Branch deletion is not done**: the daemon `wt remove`s the worktree but leaves the branch. Operators / phase subprocesses delete branches if they want.
+- **Container / VM isolation** is out of scope; the daemon depends on whatever sandbox the operator's cli line provides.
+- **Editing code inside the worktree** is a phase subprocess responsibility; the daemon never touches the tree.
 - **Multi-host / worktrees on remote machines** are out of scope.
+- **Eager worktree creation** (creating the worktree at admission time) is rejected: tickets that never reach a `pre.directive: "run"` would otherwise materialize unused worktrees.
 
 ## Traceability
 
-- **Roadmap**: `roadmap.md` > Scope > In > "Daemon-driven multi-repo worktree materialization via wt + ghq"
+- **Roadmap**: `roadmap.md` > Scope > In > "Daemon-driven multi-repo worktree materialization via wt + ghq".
 - **Requirements**:
-  - `roki-mvp Req 4.3`, `Req 4.6` - `Req 4.9`: worktree creation / path safety / cleanup / TerminalFailure retention / filesystem errors
+  - `roki-mvp Req 4.3`, `Req 4.6` – `Req 4.9`: worktree creation, path safety, cleanup, terminal-failure retention, filesystem errors.
 - **Design**:
-  - `.kiro/specs/roki-mvp/design-worktree-workspace.md`
-  - `Workspace Manager` section of `.kiro/specs/roki-mvp/design.md`
-- **Related FR**: 04-state-machine-and-recovery, 07-worker-execution, 14-operator-notifications
+  - `.kiro/specs/roki-mvp/design-worktree-workspace.md` (pending rewrite).
+  - `Workspace Manager` section of `.kiro/specs/roki-mvp/design.md` (pending rewrite).
+- **Related FR**: [02-configuration](02-configuration.md), [04-state-machine-and-recovery](04-state-machine-and-recovery.md), [07-worker-execution](07-worker-execution.md), [20-rule-and-cycle-engine](20-rule-and-cycle-engine.md), [21-log-access](21-log-access.md).

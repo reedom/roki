@@ -2,126 +2,111 @@
 refs:
   id: fr:14-operator-notifications
   kind: fr
-  title: "Daemon-Only Failure Surfacing"
+  title: "Failure Surfacing"
   spec: roki-mvp
   implements:
     - req:roki-mvp:12
     - req:roki-mvp:5.10
   related:
-    - fr:19-orchestrator-session
     - fr:04-state-machine-and-recovery
     - fr:07-worker-execution
     - fr:13-observability-logs
     - fr:15-http-api
     - fr:16-roki-tui
+    - fr:20-rule-and-cycle-engine
 ---
 
-# FR 14: Daemon-Only Failure Surfacing
+# FR 14: Failure Surfacing
 
-> Surface every daemon-only failure (the kind no agent has self-reported to Linear) through the long-lived orchestrator session when the orchestrator is alive, and through the in-memory escalation queue (consumed by the optional TUI / HTTP API) in every case. The daemon process itself never writes Linear; when the orchestrator is dead there is no Linear-side notification — TUI + structured log is the only surface.
+> Daemon-detected internal failures route through `[[on_failure]]` first-match in WORKFLOW.toml. The matched entry runs as a failure-handler cycle whose run / post phases can write Linear (or any other channel) using whatever cli line the operator authored. When `[[on_failure]]` does not match, the failure surfaces only through the structured event log and an in-memory escalation queue consumed by the TUI / HTTP API. The daemon process itself never writes Linear under any circumstance.
 
 ## Purpose
 
-Some failures are visible only to the daemon: a phase subprocess stalled and was killed, a phase non-clean-exit retry budget was exhausted, a filesystem error poisoned a worktree, restart-recovery found an orphan, the orchestrator itself crashed / schema-drifted persistently / exhausted `max_phases`. The phase agent gets no chance to write Linear in those cases, and the daemon holds no Linear write path.
-
-When the orchestrator is alive, the daemon sends a `daemon_directive` event on its stdin; the orchestrator writes the Linear label + comment via the operator's Linear MCP and returns `action=linear_update_done` (see [fr:19-orchestrator-session > Event catalog](19-orchestrator-session.md)). When the orchestrator is dead — `orchestrator_crash`, `orchestrator_unparseable`, `orchestrator_budget_exhausted` — there is no Linear-side fallback; the failure surfaces via structured log + TUI escalation queue only.
-
-Failure events are also enqueued in the in-memory **escalation queue**, visible through the optional HTTP API ([15-http-api](15-http-api.md)) and the TUI ([16-roki-tui](16-roki-tui.md)) regardless of the orchestrator's Linear write outcome.
+The previous design routed daemon-only failures through a `daemon_directive` event into a long-lived orchestrator session, which would then write Linear via the operator's Linear MCP. With the cycle engine ([20-rule-and-cycle-engine](20-rule-and-cycle-engine.md)) the orchestrator session concept is gone: there is no long-lived AI to receive a `daemon_directive` between cycles. Failure surfacing is now operator-authored: the daemon fires a failure-handler cycle (`cycle.kind = "failure"`) whose pre / run / post can do whatever the operator wants — including a Linear MCP write — and the daemon adds an entry to the TUI escalation queue regardless of whether the failure cycle ran.
 
 ## User-visible Behavior
 
-### When a `daemon_directive` is sent (the orchestrator is alive)
+### Daemon-detected failure kinds
 
-The daemon emits a `daemon_directive` event to the orchestrator whenever a daemon-only failure event is recorded for an issue whose orchestrator session is still running. The current trigger set:
+The daemon classifies internal failures into the kinds listed in [20-rule-and-cycle-engine §Failure handling](20-rule-and-cycle-engine.md):
 
-| Trigger | Reason / event | Source |
-|---|---|---|
-| Phase subprocess stalled and was terminated | `daemon_directive` (`kind=stall`); the orchestrator typically follows with `action=stop` | [07-worker-execution](07-worker-execution.md) |
-| Ticket-level retry budget exhausted on phase non-clean exits | `daemon_directive` (`kind=retry_exhausted`) → orchestrator `action=stop` with `outcome=failure` | [07-worker-execution](07-worker-execution.md), `req:roki-mvp:5.10` |
-| Filesystem error poisoned an issue | `daemon_directive` (`kind=fs_poison`) | [04-state-machine-and-recovery](04-state-machine-and-recovery.md) |
-| Restart-recovery saw orphaned residue | `daemon_directive` (`kind=orphan`) | [04-state-machine-and-recovery](04-state-machine-and-recovery.md), Req 10.3 |
+| Kind | Trigger |
+|---|---|
+| `process_crash` | Subprocess SIGSEGV or non-zero exit without a parseable terminal response (covers former `fs_poison` during launch) |
+| `unparseable` | Last JSON object on stdout failed to parse, or `directive` missing |
+| `schema_drift` | `directive` value outside the legal set for the current phase (covers former `orchestrator_unparseable`) |
+| `stall` | Stall window exceeded; daemon SIGTERMed the subprocess (covers former phase-stall and orchestrator-stall) |
+| `iter_exhausted` | `max_iterations` exceeded with no cooperative termination (covers former `orchestrator_budget_exhausted` and `retry_exhausted`) |
+| `template_error` | Liquid render failure when preparing a phase prompt or command |
 
-The operator-facing pre-phase stops (`outcome ∈ {needs_split, allowlist_rejected, spec_incomplete, needs_operator}`) are **not** routed through `daemon_directive` — the orchestrator returns `action=stop` with the matching `outcome` and writes the corresponding Linear label + comment in the same turn (per [fr:19-orchestrator-session §Response schema](19-orchestrator-session.md)). `spec_incomplete` covers SPEC_DRIVEN target spec doc validation failure (per [fr:19-orchestrator-session §Artifact validation](19-orchestrator-session.md)); `needs_operator` covers NEEDS_CLASSIFY classify Path A / C / D / E (per [fr:18-worker-skill-workflow §Phase catalog](18-worker-skill-workflow.md)).
+The previous twelve `Inactive.reason` variants (`awaiting_linear`, `needs_operator`, `spec_incomplete`, `needs_split`, `allowlist_rejected`, `orchestrator_crash`, `orchestrator_unparseable`, `orchestrator_budget_exhausted`, `stall`, `retry_exhausted`, `fs_poison`, `orphan`) are gone. Operator-facing outcomes (`needs_operator`, `spec_incomplete`, `needs_split`, `allowlist_rejected`) are now operator-authored `outcome` strings on a normal cycle's terminal post directive. Operator-driven Linear writes happen inside the run / post of those cycles.
 
-Events that an agent (the orchestrator or a phase subprocess) is expected to self-report through Linear (normal phase completions, agent-recoverable errors the phase agent surfaces in the ticket itself, the orchestrator's `review.md` validation retry-budget exhaustion which the orchestrator surfaces directly via Linear MCP before its terminal `action=stop`) **do not** trigger a `daemon_directive`.
+### Failure-handler cycle
 
-### When the orchestrator is dead (no Linear-side notification)
+When the daemon detects an internal failure during an in-flight cycle:
 
-When the failure event itself is the death of the orchestrator, the daemon routes the issue to one of three terminal `Inactive(reason=*)` values (see [fr:19-orchestrator-session > Failure modes](19-orchestrator-session.md) and [04-state-machine-and-recovery](04-state-machine-and-recovery.md)) and surfaces the issue exclusively via the TUI escalation queue:
+1. The originating cycle is marked aborted; its current iteration is captured with the failure metadata.
+2. The daemon evaluates `[[on_failure]]` first-match against `failure.kind` (and optionally `failure.phase`).
+3. On match: spawn a new cycle with `cycle.kind = "failure"`. The cycle has its own UUID; the failed cycle's UUID is exposed as `{{ failure.failed_cycle_id }}` / `ROKI_FAILURE_FAILED_CYCLE_ID` so the failure handler can read the failed cycle's logs via `roki log --cycle <failed_cycle_id> ...`.
+4. On no match: the daemon does not write Linear. The failure surfaces only through the structured event log and the escalation queue.
 
-| Trigger | Inactive.reason | Auto-cleanup eligible? |
-|---|---|---|
-| The orchestrator crashes (SIGSEGV, non-zero exit without a `stop` action, or orchestrator stall | `orchestrator_crash` | no |
-| Orchestrator schema drift on two consecutive turns after one daemon-side reprompt | `orchestrator_unparseable` | no |
-| `max_phases` exhausted (the orchestrator would nominate another phase but the budget is gone) | `orchestrator_budget_exhausted` | no |
+A failure cycle that itself fails does **not** chain into another failure cycle. The default behavior (silent log + escalation entry) applies, bounding the recovery loop to one extra cycle per original failure.
 
-These three reasons are **not** auto-cleanup eligible: the worktree and session tempdir are preserved until the operator manually closes the Linear ticket, after which `Cleaning` proceeds. There is no Linear-side fallback because the orchestrator is the only Linear write path — once it is dead, the daemon will not impersonate it.
+### `[[on_failure]]` shape
 
-If a daemon-only failure (e.g. `fs_poison`, `orphan`, phase stall) is detected while the orchestrator is no longer alive — for example because the issue had already terminated and the orchestrator has been gracefully torn down — the failure surfaces via structured log + escalation queue only, on the same path as the three orchestrator-dead reasons above.
-
-### `daemon_directive` event payload (daemon → orchestrator)
-
-Minimum fields:
-
-```
-issue_id:    "ENG-1234"
-kind:        "stall" | "retry_exhausted" |
-             "fs_poison" | "orphan" | "<future kind>"
-fields:      { ...kind-specific structured fields, e.g.
-               correlation_id, repos[], worktree_path, last_subtype,
-               attempts, window_ms, errno, ... }
-timestamp:   "2026-05-04T12:34:56Z"
+```toml
+[[on_failure]]
+when.kind.in = ["unparseable", "schema_drift"]
+when.phase = "post"   # optional
+run.cmd = "claude -p '/post-mortem {{ failure.failed_cycle_id }}' --output-format stream-json"
+post.prompt = "Output {directive: 'end'}"
 ```
 
-The fields each `kind` carries are documented in [`docs/reference/log-events.md`](../reference/log-events.md) alongside the daemon's own structured-log event for the same trigger. The directive shall not include the Linear API token, the Linear webhook secret, or any other operator-declared secret (Req 12.5).
-
-The actual Linear label name(s) and comment text are determined by the orchestrator's `prompt_template_orchestrator` system prompt and any operator instructions therein; the daemon contributes only the directive `kind` and the structured fields and does not template the Linear write itself (Req 12.6).
+`when.kind` and `when.phase` use the same matcher vocabulary as `[[rule]]` ([02-configuration §Condition vocabulary](02-configuration.md)). `when.kind.not = "..."` and `when.kind.in = [...]` are also allowed.
 
 ### Escalation queue
 
-The daemon maintains an in-memory escalation queue keyed by Linear issue identifier; each entry holds the most recent failure category, structured fields, timestamp, correlation identifier, and repo identifier (when applicable). The queue is populated **at the same moment** the failure event is detected — for both orchestrator-alive (`daemon_directive` sent) and orchestrator-dead (no Linear write) paths — so the TUI / HTTP API surface is unaffected by the orchestrator's Linear write outcome.
+The daemon maintains an in-memory escalation queue keyed by `(ticket_id, cycle_id)` with the most recent failure category, structured fields, timestamp, and a short error text (typically the truncated last line of stderr or the parser's error message). The queue is populated **at the moment of failure detection**, before `[[on_failure]]` evaluation, so the TUI / HTTP API surface is unaffected by whether or not a failure handler ran.
 
 Consumers:
 
-- The optional HTTP API exposes the queue through `GET /api/v1/state` ([15-http-api](15-http-api.md)).
-- The TUI renders the queue with a local-only acknowledgement affordance ([16-roki-tui](16-roki-tui.md)). The TUI escalation queue is the **secondary surface for all daemon-only failures**, not just orchestrator-dead ones, and is the **primary surface for the three orchestrator-dead reasons**.
-- A queue entry is automatically cleared when the corresponding issue moves out of `Inactive` (e.g. via re-admission or cleanup).
+- The HTTP API exposes the queue at `GET /api/escalations` ([15-http-api](15-http-api.md)).
+- The TUI renders the queue with a local-only acknowledgement affordance ([16-roki-tui](16-roki-tui.md)). It is the **primary surface** when no `[[on_failure]]` matches and the **secondary surface** otherwise.
+- Entries are cleared automatically when the ticket is evicted (cleanup-cycle completion, admission failure, orphan reconcile). They are also lost on daemon restart (the queue is in-memory only).
 
-### Failure handling (orchestrator response to a `daemon_directive`)
+### Worktree retention
 
-- If the orchestrator's `action=linear_update_done` indicates a partial Linear write (the `linear_writes` field shows a subset of the expected writes), the daemon logs the partial-write entry, retains the escalation queue entry, and shall not retry on the orchestrator's behalf (Req 12.7).
-- If the orchestrator's turn ends with an error, or the orchestrator crashes mid-turn while processing a `daemon_directive`, the daemon logs the failure and routes the issue to `Inactive(reason=orchestrator_crash)` (Req 12.7); the escalation queue entry stays so the TUI continues to surface it.
-- The daemon does not retry the `daemon_directive` itself; if the orchestrator's first attempt fails, the escalation queue is the operator's authoritative surface.
+Failures that route through `[[on_failure]]` do not delete the worktree or session tempdir on their own — the failure-handler cycle is a normal cycle and inherits the same lifecycle rules ([06-worktree-and-session](06-worktree-and-session.md)). Operators that want post-failure cleanup author either (a) a `[[cleanup]]` entry whose match condition the failure handler creates (e.g. by writing a Linear label that the cleanup matches), or (b) a `[[cleanup]]` entry that fires on the same `when.status` / `when.labels` change the operator's failure handler caused.
+
+When `[[on_failure]]` does not match, the worktree and session tempdir are retained for forensics until the operator manually cleans up.
 
 ### Configuration
 
-- The orchestrator namespace `extension.orchestrator.{model, effort, max_phases, allowed_tools}` ([fr:19-orchestrator-session > Configuration](19-orchestrator-session.md)) governs the orchestrator's behaviour, including its tool surface (Linear MCP write + `Read` + `Bash`, with `Bash` running inside a read-only filesystem sandbox). There is no separate `extension.linear_updater.*` namespace; the loader rejects that legacy key per `req:roki-mvp:2.13`.
-- Slack and other push notification channels are **not** configured here. Daemon-only failure surfacing routes through the orchestrator → Linear MCP (when the orchestrator is alive) and the TUI escalation queue (always).
+- There is no separate `extension.linear_updater.*` namespace and no `extension.orchestrator.*` namespace. Linear write capability is whatever the cli line the failure handler runs provides.
+- Slack / Email / PagerDuty / Discord channels are not built into the daemon. Operators that want them author a failure-handler cycle that calls the appropriate webhook / CLI / MCP from inside the run phase.
 
 ## Capabilities
 
-- **Linear-side feedback without daemon write credentials**: the orchestrator is the only Linear write path; the daemon never holds a write-capable Linear path.
-- **Channel separation**: when the orchestrator is alive, the Linear ticket carries the agent-visible feedback (label + comment) and the TUI escalation queue carries the live operator-facing surface. When the orchestrator is dead, the TUI escalation queue is the only surface.
-- **Secrets-free directive payload**: the directive carries identifiers and structured fields only; secrets (Linear API token, webhook secret) are never propagated.
-- **Operator-controlled copy**: label names and comment prose live in `prompt_template_orchestrator`, not in the daemon binary.
-- **Daemon never blocked by Linear**: a Linear / MCP outage during a `daemon_directive` turn logs and continues; the per-issue state machine is unaffected (except for the orchestrator-dead routing path documented above).
+- **Linear feedback without daemon credentials**: the failure handler runs whatever cli the operator authored. The daemon never holds a Linear write credential or any other notification credential.
+- **Channel separation**: a Linear write (or any other operator-defined notification) lives inside the failure-handler cycle; the TUI escalation queue lives in-process and surfaces every detected failure.
+- **No-handler fallback**: when no `[[on_failure]]` entry matches, the failure still appears in the structured event log and the escalation queue. There is no silent failure path.
+- **Worktree retention by default**: failures preserve forensics; cleanup is operator-driven.
+- **Daemon never blocked by Linear / MCP**: a hung MCP call inside a failure handler is supervised by the same stall window used for any subprocess; SIGTERM applies.
 
 ## Boundaries
 
-- **Slack / Email / PagerDuty / Discord** are out of scope for v1 (the orchestrator-driven Linear path + TUI escalation queue replaces them; can be re-introduced as a separate channel if Linear-routed feedback proves insufficient).
-- **Per-event routing rules / per-issue or per-repo channel split** are out of scope (a single `daemon_directive` path handles every alive-orchestrator trigger).
+- **Slack / Email / PagerDuty / Discord** built into the daemon are out of scope. Operators add them inside `[[on_failure]]` run phases.
+- **Per-event routing rules / per-issue / per-repo channel split** are out of scope. A single `[[on_failure]]` list is evaluated first-match.
 - **Acknowledgement / read management on the Linear side** depends on Linear's own labelling / comment workflow; the daemon does not track ack state.
-- **Notifications to Linear tickets for normal phase progress** (PR opened, status updates) are performed by the phase agent's own Linear MCP path, not by `daemon_directive`.
-- **the orchestrator is not a substitute for a phase subprocess**: the orchestrator does not implement, review, or write to the worktree; the orchestrator's role is admission classification, phase planning, artifact validation, daemon-directive interpretation, and Linear writes only ([fr:19-orchestrator-session](19-orchestrator-session.md)).
-- **Orchestrator failure mid-`daemon_directive`** does not trigger another `daemon_directive` (no infinite recursion); the daemon routes the orchestrator's death to `Inactive(reason=orchestrator_crash)` and the TUI surfaces it.
-- **No Linear fallback when the orchestrator is dead**: the three orchestrator-dead reasons surface via structured log + TUI escalation queue only.
+- **Notifications for normal phase progress** are emitted by the operator's pre / run / post cli lines, not by the daemon.
+- **Failure-cycle inside a failure cycle** does not chain. The default behavior (escalation entry only) bounds the recovery depth.
+- **Persistent escalation queue** is out of scope; the queue is in-memory only and is reset on daemon restart.
 
 ## Traceability
 
-- **Roadmap**: `roadmap.md` > Constraints > Operator notifications; Boundary Strategy > "Orchestrator-vs-phase boundary"
+- **Roadmap**: `roadmap.md` > Constraints > Operator notifications.
 - **Requirements**:
-  - `req:roki-mvp:12`: Daemon-Only Failure Surfacing via `daemon_directive` (and TUI-only for orchestrator-dead reasons)
-  - `req:roki-mvp:5.10`: retry-exhausted `daemon_directive` contract
-  - `req:roki-mvp:2`: orchestrator namespace replaces the removed `extension.linear_updater.*`
-- **Reference**: [`docs/reference/log-events.md`](../reference/log-events.md) (canonical structured-log event catalog including `daemon_directive` payload schema)
-- **Related FR**: [04-state-machine-and-recovery](04-state-machine-and-recovery.md), [07-worker-execution](07-worker-execution.md), [13-observability-logs](13-observability-logs.md), [15-http-api](15-http-api.md), [16-roki-tui](16-roki-tui.md), [19-orchestrator-session](19-orchestrator-session.md)
+  - `req:roki-mvp:12`: Daemon-Only Failure Surfacing — replaced by `[[on_failure]]` + escalation queue.
+  - `req:roki-mvp:5.10`: Retry-budget exhaustion — replaced by `[[on_failure]] when.kind = "iter_exhausted"`.
+- **Reference**: [`docs/reference/log-events.md`](../reference/log-events.md) (pending rewrite for the new failure event catalog).
+- **Related FR**: [04-state-machine-and-recovery](04-state-machine-and-recovery.md), [07-worker-execution](07-worker-execution.md), [13-observability-logs](13-observability-logs.md), [15-http-api](15-http-api.md), [16-roki-tui](16-roki-tui.md), [20-rule-and-cycle-engine](20-rule-and-cycle-engine.md).

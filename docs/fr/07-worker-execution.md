@@ -10,100 +10,131 @@ refs:
     - req:roki-mvp:9
   related:
     - fr:01-daemon-lifecycle
+    - fr:02-configuration
     - fr:04-state-machine-and-recovery
-    - fr:11-agent-tool-boundary
+    - fr:06-worktree-and-session
     - fr:14-operator-notifications
-    - fr:18-worker-skill-workflow
-    - fr:19-orchestrator-session
+    - fr:20-rule-and-cycle-engine
+    - fr:21-log-access
 ---
 
 # FR 07: Phase Subprocess Execution
 
-> Per-phase bounded `claude -p '/<kiro-skill> <args>' --output-format stream-json --max-turns N` subprocess lifecycle: launch flags, stall detection, stream-json parsing, exit translation into `phase_complete` / `phase_nonclean` events delivered to the orchestrator. Includes the permission strategy for phase subprocesses, the per-phase `--max-turns` budget, and the rules for translating exits into events the orchestrator acts on. The orchestrator session's lifecycle is owned by [FR 19](19-orchestrator-session.md); this FR is the daemon-side phase-subprocess contract only.
+> The daemon-side mechanics that spawn each pre / run / post subprocess for a cycle, capture its stdout / stderr to disk, parse a structured directive from the last JSON object on stdout (pre / post), apply stall detection, and route the outcome back to the cycle engine. The cycle dispatch logic — which list to evaluate, what directive means what — lives in [20-rule-and-cycle-engine](20-rule-and-cycle-engine.md); this FR is the daemon-side process supervisor only.
 
 ## Purpose
 
-Run the agent (orchestrated inside by a slash-command kiro skill, or by a small daemon-internal prompt fragment for `open_pr` and `finalize_review`) as a **single bounded subprocess per phase the orchestrator nominates**. The daemon observes lifecycle and forwards a structured exit envelope back to the orchestrator; it does not drive the agent loop nor select the next phase — the orchestrator does ([FR 19 §Event catalog](19-orchestrator-session.md), [FR 18: Phase Subprocess Catalog](18-worker-skill-workflow.md)).
+Run each phase the cycle engine nominates as a single bounded subprocess. The daemon observes the lifecycle (launch, stall, exit) and forwards a structured outcome to the cycle engine; it does not drive the agent loop, choose the next phase, or interpret reasoning text. There are two subprocess shapes — long-lived AI session and one-shot command — supervised by the same engine adapter.
 
-The orchestrator session is supervised separately ([FR 19](19-orchestrator-session.md)). The same engine adapter supervises both shapes (orchestrator and phase subprocess) using a uniform stream-json parser and stall detector.
-
-Permission strategy lets the operator pick the safest profile that works for phase subprocesses, with a fallback when Claude's allowlist cannot be trusted. The orchestrator session always runs read-only sandbox with its own narrow tool surface, regardless of operator overrides ([FR 19 §Tool surface](19-orchestrator-session.md)).
+The previous orchestrator-session-vs-phase-subprocess distinction is collapsed. Both shapes go through this FR's launch / observe / translate path. Permission strategy is no longer interpreted by the daemon: whatever the operator's cli line says (e.g. `claude --dangerously-skip-permissions`, `--settings` overrides, sandbox profile flags) is passed through unchanged. The daemon does not parse, validate, or override permission flags.
 
 ## User-visible Behavior
 
-### Launch and observation (phase subprocess)
+### Subprocess shapes
 
-- **Trigger**: the orchestrator emits `action=run_phase` with `phase ∈ {classify, implement, review, validate, open_pr, ci_fix, finalize_review}` and an optional bounded `additional_context` string. (`classify` is legal only as the first phase in NEEDS_CLASSIFY mode, per [FR 18](18-worker-skill-workflow.md).)
-- **Launch**: the daemon spawns either a `claude -p '/<skill> <args>' --output-format stream-json --max-turns N` subprocess (skill-driven phases: `classify`, SPEC_DRIVEN `implement` / `validate`, `review`, `ci_fix`, `finalize_review`) or a `claude --input-format stream-json --output-format stream-json --max-turns N` subprocess with a daemon-internal Liquid template rendered onto stdin (template-driven phases: NEEDS_CLASSIFY `implement` / `validate`, `open_pr`). The subprocess runs inside the issue's session tempdir. The daemon renders the per-phase context envelope, including the orchestrator's `additional_context` verbatim through the engine adapter's `additional_context` channel (`req:roki-mvp:13.4`). The mapping from phase + mode to invocation form is owned by [FR 18: Phase Subprocess Catalog](18-worker-skill-workflow.md).
-- **Slash-command headless**: slash commands are supported as the initial prompt argument in `-p` mode, including for skills whose manifest sets `disable-model-invocation: true` (e.g. `kiro-impl`).
-- **Event handling**: stdout is parsed as a stream of newline-delimited JSON events → each event is parsed into a typed lifecycle event → emitted as a structured log + observability surface. **State machine transitions are driven only by subprocess exit and Linear state**, never by the contents of an event.
-- **One phase at a time per ticket**: at most one phase subprocess is in flight per Linear issue identifier at any instant; the daemon does not deliver events to the orchestrator while a phase subprocess is running ([FR 19 §Event catalog](19-orchestrator-session.md)). The single exception is `tracker_terminal` preemption — see "Tracker terminal preemption" below.
+| Shape | Declared by | cli source | Lifetime | Stdin protocol |
+|---|---|---|---|---|
+| Session | `session: "session"` in workflow/*.md frontmatter, or any inline `*.prompt` field | `roki.toml [default.ai.session].cli` | Reused across all pre and post invocations of the **same cycle** (one process per cycle, terminated when the cycle ends) | Bidirectional stream-json: the daemon writes one event JSON per turn; the AI replies with one terminal JSON per turn |
+| Command | `session: "command"` in workflow/*.md frontmatter, or any inline `*.cmd` field | `roki.toml [default.ai.command].cli`, or the workflow/*.md `cli` frontmatter, or the inline `*.cmd` string itself | Single invocation per phase iteration — fresh subprocess every time | Unidirectional: the daemon writes one launch envelope JSON to stdin and closes |
 
-### Permission strategy (phase subprocess)
+Run-phase subprocesses are typically command-shape (the run is the heavyweight code-changing subprocess and benefits from a fresh sandbox each time). Pre and post are typically session-shape so the AI keeps in-cycle reasoning state across iterations. Operators are free to mix and match.
 
-The strategy is configured via the `[permissions].strategy` config and the `--dangerously-skip-permissions` CLI flag (canonical references: [02-configuration](02-configuration.md) / [01-daemon-lifecycle](01-daemon-lifecycle.md)).
+### Launch and observation
 
-- **Default sandbox**: `workspace-write` + elicitations rejected.
-- **Override via `WORKFLOW.md`**: if an alternative sandbox / elicitation policy is declared there, it is applied to every phase subprocess.
-- **`--settings` allowlist strategy**: pass the configured allowlist to each phase subprocess through Claude Code's settings interface.
-- **`--dangerously-skip-permissions` strategy**: pass that flag to each phase subprocess, and log the elevated-permission decision per phase launch.
-- **No strategy configured**: refuse to start.
-- **Orchestrator session the orchestrator is governed separately**: the orchestrator always runs with a read-only filesystem sandbox; the `--dangerously-skip-permissions` fallback does **not** apply to the orchestrator. The orchestrator's tool surface is governed exclusively by `extension.orchestrator.allowed_tools` via `--settings` ([FR 19 §Tool surface](19-orchestrator-session.md), `req:roki-mvp:9.4`).
+**Trigger**: the cycle engine signals "spawn phase X with envelope E". The daemon does not pick what to spawn — it follows the engine's directive.
 
-### Termination handling (phase subprocess → daemon → orchestrator)
+**Launch (session)**: at the start of a cycle, if any phase declares session-shape, the daemon spawns one subprocess running `[default.ai.session].cli` inside the issue's session tempdir, with a working directory set as documented in [06-worktree-and-session](06-worktree-and-session.md). The same process is reused across pre and post invocations of the cycle. The daemon writes a launch-envelope JSON to stdin once on first use, then writes one event JSON per turn after each cooperative `directive: "..."` reply.
 
-The daemon translates each phase subprocess exit into a single event delivered on the orchestrator's stdin. the orchestrator makes the next-step decision; the daemon does not auto-retry on its own initiative.
+**Launch (command)**: each invocation spawns a fresh subprocess. The daemon renders the cli line as a Liquid template (substituting `{{ pre.* }}` / `{{ post.* }}` / `{{ ticket.* }}` / `{{ cycle.* }}` per [20-rule-and-cycle-engine §Inter-phase data flow](20-rule-and-cycle-engine.md)), spawns the process, writes the envelope JSON to stdin, closes stdin, and waits for exit.
 
-- **Stall**: if no event arrives from the phase subprocess for longer than the configured per-phase stall window, the daemon SIGTERMs the subprocess and sends `phase_nonclean` (kind=`stall`) to the orchestrator. The orchestrator may re-nominate the same phase, fall through to a `ci_fix` phase, or `action=stop`. If the orchestrator is no longer alive when the stall is detected, the daemon routes the issue to `Inactive(reason=stall)` and surfaces the failure via structured log + TUI escalation queue only ([FR 14: Operator Notifications](14-operator-notifications.md)).
-- **`--max-turns` exhausted**: a terminal `result` event reports turn-budget exhaustion → `phase_nonclean` (kind=`max_turns_exhausted`, raw subtype forwarded). the orchestrator decides whether to retry the phase, fall through to `ci_fix`, or `action=stop`.
-- **Clean exit (success)**: a terminal `result` event with `subtype: success` → `phase_complete` to the orchestrator with the parsed `result` envelope, `pr_url` (when `open_pr`), `review_artifact_path` (when `finalize_review`), and any phase-specific summary fields the skill emitted. The orchestrator returns `action=run_phase` (next phase) or `action=stop`.
-- **Non-clean exit (no terminal `result` event, signal-terminated, or terminal `result` with a non-`success` subtype)** → `phase_nonclean` to the orchestrator with the failure classification. The orchestrator's response drives whatever recovery happens; the daemon does not retry on its own.
-- **Unknown `result.subtype`**: the daemon forwards the raw `subtype` value verbatim in the `phase_nonclean` payload (and captures it in the structured log) — the orchestrator is alive to make the recovery judgment, so the daemon does not unilaterally route to `Inactive` for an unknown subtype (per `req:roki-mvp:5.9`).
-- **Tracker terminal preemption**: when a tracker terminal observation (Linear state moved to `done` / `canceled`, assignee reassigned, or `roki:ready` removed) arrives mid-phase, the daemon SIGTERMs the in-flight phase subprocess, awaits its exit, **discards the resulting terminal event without translating it into `phase_complete` / `phase_nonclean`** (captures it in the structured log only), and delivers `tracker_terminal` solo to the orchestrator's stdin ([FR 19 §Event catalog](19-orchestrator-session.md)). The orchestrator's next turn returns `action=stop outcome=cancelled`. Translating the SIGTERM-induced exit would burn an orchestrator turn on a decision the next event already overrides, and could mis-classify a tracker-terminated phase as a retry candidate. The discard rule applies regardless of the phase's exit subtype.
+**Capture**: stdout and stderr are copied to per-iter files under `<session_root>/<ticket-id>/cycle-<uuid>/iter-<n>/{phase}.{stdout,stderr}` ([21-log-access §Storage layout](21-log-access.md)). The capture is byte-for-byte; the daemon does not strip ANSI codes or filter content.
 
-### Ticket-level retry budget (the orchestrator drives, daemon enforces the cap)
+**Event handling**: stdout is also parsed as it arrives, line-by-line:
 
-The ticket-level retry budget for phase non-clean exits (default 3 attempts, range 1–10) is **enforced by the daemon as a counter** but the retry decision itself belongs to A: each `phase_nonclean → run_phase` (re-nomination of the same phase) counts as one attempt against the budget. While remaining attempts exist, the daemon transitions the issue from `Active` to `Backoff`, applies exponential backoff between attempts bounded between ten seconds and five minutes, retains the session tempdir and worktree, and on timer expiry transitions back to `Active` for the orchestrator's next phase nomination. When the budget is exhausted, the daemon sends a `daemon_directive` event with kind `retry_exhausted` to the orchestrator so that the orchestrator surfaces the failure to Linear via Linear MCP and emits its own `action=stop` with `outcome=failure` (per `req:roki-mvp:5.10`).
+- For session phases (pre / post) emitting stream-json: the daemon scans for the terminal JSON object that contains a `directive` field. Earlier JSON objects (advisory thinking blocks, tool-use messages, etc.) are recorded only in the iter capture file; they do not affect the cycle.
+- For command phases (run, or pre/post in command shape): the daemon reads the entire stdout, then on exit parses the **last** JSON object (for pre / post) or the terminal `result` event ([21-log-access §`run.terminal.json`](21-log-access.md)) (for run, when the command speaks claude/codex stream-json).
 
-The daemon does not auto-retry a phase: the orchestrator must return `action=run_phase` for the same `phase` for the daemon to spend a retry slot. The orchestrator may also choose to fall through to a `ci_fix` phase, change `additional_context`, or `action=stop` — those choices are the orchestrator's, and only same-phase re-nominations count against the retry budget.
+### Permission strategy (pass-through)
 
-The orchestrator's `review.md` validation retries (after `finalize_review` clean exit, per [FR 19 §Artifact validation](19-orchestrator-session.md)) re-use the same `action=run_phase` channel — typically re-nominating `implement` with the failing per-criterion entries injected into `additional_context`. Because the producing phase exited cleanly, those retries do not consume a phase-`nonclean` retry slot and are not bounded by this retry budget — the orchestrator's own retry budget (drawn from `prompt_template_orchestrator`) bounds them, with `max_phases` as the overall ceiling.
+Whatever the cli line says is what runs. The daemon does not enforce sandbox levels, allowlists, or `--dangerously-skip-permissions` decisions. Operators take responsibility for the resulting safety posture by choosing cli lines they trust:
 
-### Daemon-only failure surfacing (no linear-updater)
+```toml
+[default.ai.session]
+cli = "claude --input-format stream-json --output-format stream-json --model claude-opus-4-7 --settings ~/.config/roki/orchestrator.settings.json"
 
-Daemon-only failures (phase stall after the daemon killed the subprocess; phase non-clean retry-budget exhaustion; filesystem poison; restart-recovery orphan) are surfaced through `daemon_directive` events on the orchestrator's stdin per [FR 14: Operator Notifications](14-operator-notifications.md). When the orchestrator is alive, the orchestrator writes the appropriate Linear label + comment via Linear MCP and returns `action=linear_update_done`. When the orchestrator is dead — `orchestrator_crash`, `orchestrator_unparseable`, `orchestrator_budget_exhausted` — there is no Linear-side notification; the daemon logs structurally and populates the TUI escalation queue. The previously specified linear-updater subagent is removed; the `daemon_directive → orchestrator → Linear MCP` path is its full replacement. `review.md` validation retry-budget exhaustion (after `finalize_review`) is owned entirely by the orchestrator — the daemon does not send a `daemon_directive` for it; the orchestrator writes the Linear feedback itself before its terminal `action=stop`. Operator-facing pre-phase stops (`spec_incomplete`, `needs_operator`, `needs_split`, `allowlist_rejected`) are likewise orchestrator-driven and bypass `daemon_directive`.
+[default.ai.command]
+cli = "claude -p '{{ prompt }}' --output-format stream-json --max-turns 100 --dangerously-skip-permissions"
+```
+
+The previous `[permissions].strategy` switch (`allowlist` vs `dangerously-skip` vs `refuse-to-start-when-unset`) is removed. Operators that want a fail-closed mode can omit `[default.ai.session]` / `[default.ai.command]` and rely on each rule's per-phase cli to be set explicitly.
+
+### Termination handling
+
+The daemon translates each phase's exit into a single signal returned to the cycle engine. The engine, not the daemon, decides what comes next.
+
+| Outcome | When | Forwarded to engine |
+|---|---|---|
+| Clean directive | The terminal JSON object on stdout has a legal `directive` value for the phase | `{ kind: "directive", directive: <value>, payload: <parsed JSON> }` |
+| Unparseable | No JSON object on stdout, or the last JSON object lacks `directive` | `{ kind: "failure", failure_kind: "unparseable" }` |
+| Schema drift | `directive` value is outside the legal set for the phase | `{ kind: "failure", failure_kind: "schema_drift" }` |
+| Process crash | Subprocess exited via signal or non-zero exit code without producing any directive | `{ kind: "failure", failure_kind: "process_crash", exit_code: N }` |
+| Stall | Stdout silent for the configured stall window; daemon SIGTERMed the subprocess | `{ kind: "failure", failure_kind: "stall" }` |
+| Iteration cap (cooperative) | The daemon wrote `iteration_exhausted` to the session's stdin and the AI replied with `directive: "end"` | `{ kind: "directive", directive: "end" }` (handled as ordinary clean termination) |
+| Iteration cap (forced) | Same as above but the AI did not reply within the stall window | `{ kind: "failure", failure_kind: "iter_exhausted" }` |
+| Template render error | Liquid render of the cli line, prompt body, or envelope failed before launch | `{ kind: "failure", failure_kind: "template_error" }` |
+
+The cycle engine routes all `failure_kind` values through `[[on_failure]]` first-match ([20-rule-and-cycle-engine §Failure handling](20-rule-and-cycle-engine.md)). The previous daemon-side retry budget is removed: the daemon does not retry a phase on its own and does not enforce exponential backoff. Retries are operator-driven through post directives.
+
+### Stall detection
+
+Each subprocess has a stall window:
+
+- Session shape: `roki.toml [default.ai.session].stall_seconds` (default `600`).
+- Command shape: `roki.toml [default.ai.command].stall_seconds` (default `300`).
+- Per-file override: workflow/*.md frontmatter `stall_seconds: <int>`.
+
+The window is measured from the most recent stdout byte; if the subprocess emits a single byte every 100 ms it never stalls regardless of CPU work.
+
+When the window elapses, the daemon sends SIGTERM, waits up to a fixed grace period (currently 10 s), then sends SIGKILL if the process is still alive. The captured stdout/stderr remain on disk.
+
+### Tracker terminal handling
+
+A Linear status change to `Done` / `Cancelled` (or assignee removal, or any other webhook content) does **not** preempt an in-flight cycle. The new state lands in the diff cache; rule re-evaluation defers until the cycle ends. Operators that want forced termination on a tracker terminal author a `[[cleanup]]` entry whose run phase issues whatever signal they want; the cleanup cycle starts only after the in-flight cycle completes.
+
+### Daemon-only failures (no Linear writes)
+
+The daemon never writes Linear directly. Failures detected by the daemon (stall, process crash, unparseable, schema drift, iteration cap, template error) flow through `[[on_failure]]`. If `[[on_failure]]` matches, the operator's failure-handler cycle decides whether to write Linear feedback. If `[[on_failure]]` does not match (or is absent), the failure is recorded in the structured event log and as one entry in the TUI escalation queue ([14-operator-notifications](14-operator-notifications.md)); no Linear write is attempted.
+
+The previously specified linear-updater subagent and the `daemon_directive (kind=retry_exhausted)` event are removed. Their replacement is `[[on_failure]]` plus the operator's own Linear-write tooling inside the failure-handler cycle's run / post phase.
 
 ## Capabilities
 
-- **One phase subprocess per orchestrator-nominated phase**: the daemon never re-launches a phase on its own initiative. Re-launch paths are all orchestrator-initiated: (a) the orchestrator returns `action=run_phase` for the same phase after a `phase_nonclean` (consumes one retry slot from the phase-non-clean budget); (b) the orchestrator returns `action=run_phase` after `review.md` validation found a structural problem (typically re-nominates `implement` with diagnostic context; bounded by the orchestrator's own retry budget, not by the phase-non-clean budget — see [FR 19 §Artifact validation](19-orchestrator-session.md)).
-- **`--max-turns` passthrough**: a per-phase turn budget is configurable. Each phase subprocess honors its own budget; the orchestrator session is bounded by `max_phases` instead ([FR 19](19-orchestrator-session.md)).
-- **Retryable phase-nonclean classifications**: the daemon classifies the `phase_nonclean` payload but does not retry on its own; the orchestrator's `run_phase` decision is what consumes a retry slot. The compiled subtype mapping (e.g. `error_during_execution` as of the MVP build) flows verbatim into the `phase_nonclean` payload so the orchestrator can decide.
-- **Per-launch logging of the permission strategy**: each `--dangerously-skip-permissions` elevation decision is recorded on every phase launch.
-- **`daemon_directive → A` for daemon-only failures**: every transition into a non-auto-cleanup `Inactive(reason=...)` (other than the three orchestrator-dead reasons) routes through `daemon_directive` for Linear-side surfacing while the orchestrator is alive. The daemon never writes Linear directly.
+- **One subprocess per phase invocation, two shapes**: session (one process per cycle, reused across pre/post turns) and command (one process per phase iteration). Both use the same engine adapter for capture, stall detection, and exit translation.
+- **Pass-through cli lines**: the operator-authored cli is what runs. The daemon does not parse or rewrite permission flags.
+- **Structured directive parsing**: pre / post terminal JSON object on stdout is the only "thinking" surface the daemon parses. Earlier output is captured but does not influence the cycle.
+- **Engine-agnostic**: anything that follows the wire shape (stream-json bidirectional for session, exit-code + last-JSON-on-stdout for command) works. The daemon is not claude-specific.
+- **Per-launch logging**: every subprocess launch records the phase, cli, env vars, working dir, and (on completion) outcome and exit code in the structured event log.
+- **Stall handling**: per-shape default with per-file override. SIGTERM + grace + SIGKILL.
+- **Operator-driven retry**: post directives `pre` / `run` are how the operator retries. The daemon does not retry on its own.
+- **Failure routing**: every failure kind (process crash, unparseable, schema drift, stall, iter exhausted, template error) flows through `[[on_failure]]` first-match; default is structured log + escalation entry.
 
 ## Boundaries
 
-- **Driving the agent loop** is owned by the agent-side kiro skill (or the daemon-internal prompt fragment for `open_pr` / `finalize_review`), not the daemon.
-- **Selecting which phase runs next** is owned by the orchestrator's `action=run_phase` directive, not the daemon. The daemon never picks a phase on its own.
-- **Per-turn control / interruption / resumption** is out of scope (one phase invocation = one lifecycle, except for the two re-launch paths above).
-- **Semantic interpretation of subprocess output** is not done (only structured-event logging, stall detection, and exit translation).
-- **Per-tool-granularity permission policy** is out of scope (only what Claude Code's interface allows).
-- **Container / VM isolation** is out of scope (we depend on the `workspace-write` sandbox plus path safety for phase subprocesses; the orchestrator runs read-only).
-- **The orchestrator session's lifecycle, tool surface, response schema, and failure modes** are owned by [FR 19](19-orchestrator-session.md); this FR does not restate them.
-- **Linear writes from inside a phase subprocess** (PR linkage, status comments produced by the kiro skill via Linear MCP) go through the operator's Claude Code tool surface unchanged — not through any daemon-side write path. Daemon-only failure Linear writes are exclusively the orchestrator's job, not the phase subprocess's.
+- **Driving the agent loop** is owned by whatever cli the operator runs. The daemon does not step the agent.
+- **Selecting which phase runs next** is owned by the cycle engine, not the daemon. The daemon never picks a phase on its own.
+- **Per-tool-granularity permission policy** is out of scope. Whatever permission surface the operator's cli supports is what is enforced.
+- **Container / VM isolation** is out of scope (the daemon depends on whatever sandbox the operator's cli supplies).
+- **Parsing reasoning text** is out of scope. Only the terminal JSON object on stdout (for pre/post) and the terminal `result` event (for run, when applicable) are interpreted.
+- **Linear writes from the daemon** are out of scope; the daemon never writes Linear directly. Operators that want Linear feedback inside a phase pass the appropriate MCP / CLI through their cli line.
+- **Daemon-side retry budgets and exponential backoff** are out of scope; operators express retry / backoff in their post directive (e.g. by sleeping inside the subsequent pre).
 
 ## Traceability
 
-- **Roadmap**: `roadmap.md` > Scope > In > "Phase subprocesses for code-changing work"; Constraints > Engine ("Phase subprocess (short-lived, one per phase)"); Constraints > Permissions; Boundary Strategy > "Orchestrator-vs-phase boundary".
+- **Roadmap**: `roadmap.md` > Scope > In > "Phase subprocesses for code-changing work"; Constraints > Engine ("Phase subprocess (short-lived, one per phase)" + "Orchestrator session (long-lived)") collapses into the two-shape model here.
 - **Requirements**:
-  - `req:roki-mvp:5`: Bounded Subprocess Adapters (Orchestrator Session and Phase Subprocesses)
-  - `req:roki-mvp:5.6`: Phase subprocess spawn contract on the orchestrator's `action=run_phase`
-  - `req:roki-mvp:5.7`: Per-phase stall detection → `phase_nonclean` to the orchestrator
-  - `req:roki-mvp:5.8`: Phase clean / non-clean exit translation
-  - `req:roki-mvp:5.9`: Unknown `subtype` forwarded raw to the orchestrator
-  - `req:roki-mvp:5.10`: Retry budget exhaustion → `daemon_directive (kind=retry_exhausted)`
-  - `req:roki-mvp:9`: Permission Strategy and Default Sandbox (phase subprocesses)
+  - `req:roki-mvp:5`: Bounded Subprocess Adapters (the contract here covers both session and command shapes).
+  - `req:roki-mvp:5.10`: Retry budget exhaustion → operators express via `[[on_failure]] when.kind = "iter_exhausted"`.
+  - `req:roki-mvp:9`: Permission Strategy (collapses to pass-through; operator owns the safety posture by choosing cli lines).
 - **Design**:
-  - `Engine Adapter` / `Permission Strategy` sections of `.kiro/specs/roki-mvp/design.md`
-  - `.kiro/specs/roki-mvp/design-retry-policy.md`
-- **Related FR**: [01-daemon-lifecycle](01-daemon-lifecycle.md), [04-state-machine-and-recovery](04-state-machine-and-recovery.md), [11-agent-tool-boundary](11-agent-tool-boundary.md), [14-operator-notifications](14-operator-notifications.md), [18-worker-skill-workflow](18-worker-skill-workflow.md), [19-orchestrator-session](19-orchestrator-session.md)
+  - `Engine Adapter` section of `.kiro/specs/roki-mvp/design.md` (pending rewrite).
+- **Related FR**: [01-daemon-lifecycle](01-daemon-lifecycle.md), [04-state-machine-and-recovery](04-state-machine-and-recovery.md), [06-worktree-and-session](06-worktree-and-session.md), [14-operator-notifications](14-operator-notifications.md), [20-rule-and-cycle-engine](20-rule-and-cycle-engine.md), [21-log-access](21-log-access.md).

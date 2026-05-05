@@ -2,138 +2,130 @@
 refs:
   id: fr:04-state-machine-and-recovery
   kind: fr
-  title: "State Machine and Restart Recovery"
+  title: "Diff Cache and Recovery"
   spec: roki-mvp
   implements:
     - req:roki-mvp:8
     - req:roki-mvp:10
+  related:
+    - fr:01-daemon-lifecycle
+    - fr:02-configuration
+    - fr:03-linear-integration
+    - fr:06-worktree-and-session
+    - fr:14-operator-notifications
+    - fr:20-rule-and-cycle-engine
 ---
 
-# FR 04: State Machine and Restart Recovery
+# FR 04: Diff Cache and Recovery
 
-> The per-issue in-memory state machine (five states, single `Inactive` reason discriminator), the daemon-side mechanical pre-admission-judge that gates state entry, and restart recovery without persistence. Transitions are read-only observable; no transition is vetoable.
+> The per-ticket in-memory diff cache the daemon keeps to detect Linear status / labels / assignee changes, plus the cold-start / restart-recovery flow that rebuilds it from Linear and disk on every daemon launch. There is **no** daemon-side state machine of execution stages anymore — execution is bounded by the cycle ([20-rule-and-cycle-engine](20-rule-and-cycle-engine.md)), not by a daemon-tracked enum.
 
 ## Purpose
 
-Track per-issue stage inside the daemon and book-keep subprocess lifecycle and cleanup. **Persistence is intentionally avoided**; on restart the daemon re-reads Linear and the filesystem to reconstruct state. Transitions are observable read-only; not vetoable — substantive admission classification (Path A/B/C/D/E) runs inside the `classify` phase subprocess ([18-worker-skill-workflow](18-worker-skill-workflow.md)), not in daemon-side gate hooks. Structural validation of `review.md` and (in SPEC_DRIVEN mode) the target spec docs is owned by the orchestrator session ([19-orchestrator-session §Artifact validation](19-orchestrator-session.md)).
+The previous five-state machine (`Pending` / `Active` / `Backoff` / `Inactive` / `Cleaning`) and the twelve `Inactive.reason` discriminator have been retired. Workflow stages now live entirely inside operator-authored cycles; the daemon does not classify a ticket as "in implement" or "in validate" or "in retry budget exhaustion". What it tracks is much smaller:
+
+- For each admitted ticket: the most recent `(status, labels, assignee)` triple, the resolved repo, the resolved per-repo workflow path, and a flag for "cycle in flight". That is the diff cache.
+- A queue of pending re-evaluations (when a webhook arrives mid-cycle, the cache updates immediately but rule re-evaluation defers until the cycle ends).
+
+This file documents the diff cache and the cold-start / restart-recovery procedure that builds it from scratch each time the daemon process starts.
 
 ## User-visible Behavior
 
-### Pre-admission judge (daemon-side, mechanical, no LLM)
+### Admission filter
 
-Before any state entry, the daemon evaluates each Linear webhook against four mechanical conditions in order. The judge does not write Linear, does not launch the orchestrator, and does not record state for skipped tickets — only a structured log line.
+Before any cache update, the daemon evaluates the admission filter ([02-configuration §WORKFLOW.toml](02-configuration.md)):
 
-| # | Condition | On match |
-|---|---|---|
-| 1 | `ticket.assignee == roki.toml#linear.assignee` | continue |
-| 1 | `ticket.assignee != roki.toml#linear.assignee` | **skip** (log only) |
-| 2 | `linear_state ∈ roki.toml#linear.admit_states` | continue |
-| 2 | `linear_state ∉ roki.toml#linear.admit_states` | **skip** (log only) |
-| 3 | `labels ⊇ {roki:ready}` | continue |
-| 3 | `labels ⊉ {roki:ready}` | **skip** (log only) |
-| 4a | `labels ⊇ {roki:ready, roki:impl}` | enter `Pending` with `mode=SPEC_DRIVEN` |
-| 4b | `labels ⊇ {roki:ready}, roki:impl ∉ labels` | enter `Pending` with `mode=NEEDS_CLASSIFY` |
-| 4c | `labels ⊇ {roki:impl}, roki:ready ∉ labels` | **skip** (log only — `roki:impl` alone is not authorized) |
+1. `ticket.assignee == [admission].assignee` (with `me` resolving to the API token holder). Failure → silent eviction (logged but not surfaced to Linear).
+2. `[[admission.repos]]` first-match → resolves the ticket's ghq repo and the per-repo `workflow` path (or fall back to the top-level WORKFLOW.toml). No match → silent eviction (`reason: repo_unresolvable`).
 
-`admit_states` is operator-configured in `roki.toml` ([02-configuration §roki.toml](02-configuration.md)). Typical default: `["Todo"]` — tickets that are still being scoped (`Backlog`) or already in progress / under review (`In Progress` / `In Review` / `Done` / `Cancelled`) are silently skipped. A ticket whose state moves out of an admitted state mid-flight does not affect a running orchestrator (mode mutation mid-flight is out of scope, see §Boundaries); the next webhook re-runs the judge against the new state.
+Tickets that fail admission are not added to the cache. If the ticket was previously cached and the new webhook fails admission (assignee change, repo matcher no longer hits), the cache entry is evicted; if a cycle is currently in flight for that ticket, the cycle is allowed to terminate naturally and the worktree + session_tempdir are deleted afterward as orphan cleanup.
 
-The chosen `mode` (`SPEC_DRIVEN` or `NEEDS_CLASSIFY`) is attached to the per-issue state and rendered into the orchestrator's system prompt at launch ([19-orchestrator-session §Lifecycle](19-orchestrator-session.md)). The mode never changes for the lifetime of the orchestrator session; relabeling mid-flight does not re-route an in-flight ticket. Re-evaluation happens on the next webhook.
+### Diff cache
 
-### States (five, plus a discriminator on `Inactive`)
+Cache key: Linear issue identifier. Cache value:
 
-Each Linear issue moves through these daemon-local states:
-
-| State | Meaning |
+| Field | Source |
 |---|---|
-| `Pending` | Orchestrator session alive but no phase subprocess running. Entry state from pre-admission-judge pass and from re-entry between phases (after `Active` clean exit and before the orchestrator's next `run_phase` directive). |
-| `Active` | Phase subprocess in flight (the phase the orchestrator nominated via `action=run_phase`). |
-| `Backoff` | Non-clean phase exit + retry budget remains; awaiting backoff timer expiry, then back to `Active` for the orchestrator's next `run_phase` directive. |
-| `Inactive` | Not running. Carries a `reason` discriminator (see below); only some reasons are eligible for tracker-driven cleanup. |
-| `Cleaning` | Tracker-observed terminal Linear state or reassignment triggered cleanup; deleting worktree / tempdir. |
+| `repo` | Admission match |
+| `workflow_path` | Admission match (per-repo TOML or top-level) |
+| `status` | Last seen Linear state |
+| `labels` | Last seen Linear label set |
+| `assignee` | Last seen Linear assignee |
+| `cycle_id` (optional) | Currently in-flight cycle UUID, if any |
+| `pending_recheck` (bool) | Set to true when a webhook arrives mid-cycle; cleared after re-evaluation when the cycle ends |
+| `last_event_at` | Timestamp |
 
-> The daemon **does not mirror Linear-side workflow states (review / done / etc.)**. Linear states are looked up via the tracker each time.
->
-> The previous `Judging` state is removed: there is no longer an `admission_request` / `admission_decision` round-trip — admission classification happens inside the `classify` phase subprocess (NEEDS_CLASSIFY mode) or inside the orchestrator's first deliberation turn against the operator-named target spec (SPEC_DRIVEN mode). In both cases the orchestrator deliberates from `Pending` and transitions to `Active` only when it nominates a phase.
+#### Diff detection
 
-### `Inactive.reason` discriminator
+A new webhook for a cached ticket triggers re-evaluation only when at least one of `(status, labels, assignee)` differs from the cached value. Webhooks that announce changes outside this set (description edits, comment events, reactions, etc.) update Linear's own state but do not start a cycle.
 
-`Inactive` is the only "stopped" state. Its `reason` field is structured-log / TUI / cleanup-eligibility metadata, **not** an orchestrator-internal transition input. Possible values:
+#### Cycle dispatch
 
-| reason | When set | Auto-cleanup eligible? |
-|---|---|---|
-| `awaiting_linear` | The orchestrator emitted `action=stop` with `outcome=success` (PR opened, finalize_review passed). | yes |
-| `needs_operator` | NEEDS_CLASSIFY mode + `classify` phase returned Path A / C / D / E. The orchestrator wrote a Linear comment with the recommended next manual command and labels in the same turn before stopping. | no — preserve worktree until operator acts |
-| `spec_incomplete` | SPEC_DRIVEN mode + the orchestrator's structural check of `<repo>/.kiro/specs/<target>/{spec.json,requirements.md,design.md,tasks.md}` failed (missing files, `approvals.tasks.approved == false`, or target spec name unresolvable from ticket body). The orchestrator wrote a Linear comment naming the missing artifact and the recommended `/kiro-spec-*` command before stopping. | no — preserve worktree until operator acts |
-| `needs_split` | The orchestrator detected the ticket touches more than one allowlisted repo and wrote the matching Linear label + comment in the same turn before stopping. | yes |
-| `allowlist_rejected` | The orchestrator detected the ticket's named repo is not in the allowlist and wrote the matching Linear feedback in the same turn before stopping. | yes |
-| `orchestrator_crash` | The orchestrator crashes (SIGSEGV, non-zero exit without a `stop` action) or stalls (no event in N seconds) — surfaced via TUI escalation queue only ([19-orchestrator-session §Failure modes](19-orchestrator-session.md)). | no — preserve forensics |
-| `orchestrator_unparseable` | The orchestrator's response failed JSON schema validation on two consecutive turns (after one daemon-side reprompt) — surfaced via TUI escalation queue only. | no — preserve forensics |
-| `orchestrator_budget_exhausted` | `extension.orchestrator.max_phases` exhausted while the orchestrator would nominate another phase — surfaced via TUI escalation queue only. | no — preserve forensics |
-| `stall` | Phase subprocess stalled and was terminated while the orchestrator was no longer alive ([07-worker-execution](07-worker-execution.md)). When the orchestrator is alive, a phase stall is forwarded to the orchestrator as `phase_nonclean` and does not by itself land the issue in `Inactive`. | no |
-| `retry_exhausted` | Phase non-clean exit retry budget exhausted; the daemon sent `daemon_directive (kind=retry_exhausted)` and the orchestrator typically follows with `action=stop` (`outcome=failure`) ([07-worker-execution](07-worker-execution.md), `req:roki-mvp:5.10`). Also the catch-all reason for `outcome=failure` from `review.md` validation retry-budget exhaustion (the orchestrator surfaced the failure to Linear itself before stopping). | no |
-| `fs_poison` | Filesystem error during session/worktree create or remove ([06-worktree-and-session](06-worktree-and-session.md)). | no |
-| `orphan` | Restart recovery saw residue with no matching active Linear issue (Req 10.3). | no |
+When a diff is detected and no cycle is in flight, the daemon evaluates lists in priority order ([20-rule-and-cycle-engine §Cycle kinds](20-rule-and-cycle-engine.md)): `[[cleanup]]` first-match, then `[[rule]]` first-match. The first matching entry starts a cycle. If a cycle is already in flight for the ticket, the daemon sets `pending_recheck = true` instead of starting a new one (queue-mode preemption).
 
-`Auto-cleanup eligible` reasons let `Cleaning` enter when the tracker observes a terminal Linear state or assignment loss. The non-eligible reasons retain the worktree/session for inspection until the operator manually closes the Linear ticket; only then does cleanup proceed.
+#### Cycle in-flight semantics
 
-### Key transition rules
+Only one cycle is in flight per ticket at a time. The cache's `cycle_id` field names it. When the cycle terminates:
 
-- **(no entry) → Pending**: the daemon's pre-admission-judge passed (assignee match + `roki:ready` label). The orchestrator session is launched with the chosen `mode` rendered into its system prompt (per [19-orchestrator-session §Lifecycle](19-orchestrator-session.md)).
-- **Pending → Active**: the orchestrator returned `action=run_phase` and the daemon spawned the phase subprocess.
-- **Active → Pending**: the phase subprocess clean-exited and the daemon emitted `phase_complete` to the orchestrator. The orchestrator deliberates the next directive from `Pending`.
-- **Active → Backoff**: the orchestrator re-nominated the same phase (`action=run_phase`) after a `phase_nonclean` and the retry budget still has room (per [07-worker-execution](07-worker-execution.md)).
-- **Backoff → Active**: backoff timer expired; the daemon spawns the phase subprocess the orchestrator nominated.
-- **Pending → Inactive**: the orchestrator emitted `action=stop`. The `outcome` field selects the `Inactive.reason` per the table above. For `needs_operator`, `spec_incomplete`, `needs_split`, and `allowlist_rejected` the orchestrator already wrote the matching Linear feedback in the same turn before stopping.
-- **Active → Inactive(reason=stall)**: phase subprocess stalled and was terminated while the orchestrator was no longer alive ([07-worker-execution](07-worker-execution.md)). When the orchestrator is alive a stall is delivered to it as `phase_nonclean` and the orchestrator decides; the issue does not land in `Inactive` directly.
-- **Active → Inactive(reason=orchestrator_crash | orchestrator_unparseable | orchestrator_budget_exhausted)**: the orchestrator died, schema-drifted, or exhausted `max_phases` while a phase was running. The daemon SIGTERMs the in-flight phase and routes through one of the three orchestrator-dead reasons. Surfaced via TUI escalation queue only.
-- **Cleaning**: only entered from `Active` / `Backoff` / `Pending` / `Inactive` (cleanup-eligible reasons), and only via a **tracker observation** (terminal Linear state or reassignment). An orchestrator subprocess exit alone never causes this transition. If the orchestrator or any phase subprocess is still running for the issue at the moment of observation, the daemon terminates them before performing cleanup.
+1. The daemon clears `cycle_id`.
+2. If the cycle was a cleanup cycle, the daemon deletes worktree + session_tempdir and evicts the cache entry.
+3. Otherwise, if `pending_recheck` is true, the daemon re-evaluates the lists against the latest `(status, labels, assignee)`. The `pending_recheck` flag is cleared whether or not a new cycle starts.
 
-### Read-only transition observers
+#### Subscribers
 
-Subscribers observe transition events read-only — no vetoable transitions. Observability ([15-http-api](15-http-api.md), [16-roki-tui](16-roki-tui.md)) is the primary consumer; structured logs emit alongside.
+Other components (HTTP API, TUI, structured event log) observe cache changes via the structured event stream ([13-observability-logs](13-observability-logs.md)) — `cycle_started`, `cycle_completed`, `cycle_aborted`, `worktree_created`, `worktree_deleted`, `cold_start_began`, `cold_start_completed`. There is no in-process subscriber API for cache transitions; consumers subscribe to events through the public observability surface.
 
-A subscriber's unhandled error is logged in isolation; other subscribers and the orchestrator keep running.
+### Cold start and restart recovery
 
-### Restart recovery
+On every daemon process start (cold or post-crash), the same flow runs and is the only path that re-populates the cache:
 
-> Orchestrator sessions are **not** persisted across daemon restarts. A fresh orchestrator launches per re-admitted issue on `Pending` re-entry ([19-orchestrator-session §Lifecycle](19-orchestrator-session.md), `req:roki-mvp:8.5`); in-flight turns and orchestrator-internal scratch state are discarded. The pre-admission-judge re-runs against the current Linear label set, so a relabeling that occurred while the daemon was down is honored on restart.
+1. Load `roki.toml` and `WORKFLOW.toml` (and any per-repo TOMLs referenced through `[[admission.repos]] workflow`). Validate. Refuse to start on validation failure.
+2. Query Linear API for tickets satisfying the admission filter (assignee match plus the union of `when.status` values across all `[[rule]]` and `[[cleanup]]` entries). Pagination is cursor-based; the daemon walks the full result set before continuing.
+3. For each ticket: resolve repo via `[[admission.repos]]` first-match. On no match, log `reason: repo_unresolvable` and skip. On match, register a cache entry with the current `(status, labels, assignee, repo, workflow_path)`.
+4. After the cache is populated, evaluate `[[cleanup]]` then `[[rule]]` first-match for each ticket. On match, start a cycle with `cycle.trigger = "cold_start"` (env var `ROKI_CYCLE_TRIGGER=cold_start`). Cycles for distinct tickets may run concurrently; same-ticket queue ordering still applies.
+5. Reconcile disk residue: enumerate session tempdirs under `[paths].session_root` and worktrees under `[paths].worktree_root`. Anything not corresponding to a Linear-API-hit ticket is treated as an orphan and auto-deleted (worktree + session_tempdir removed; one structured log entry per deletion with `reason: orphan`).
 
-- At startup: enumerate **all session tempdirs** under the platform-appropriate user cache root, and the **worktrees in each allowlisted repo whose branch name matches the issue identifier pattern**.
-- Reconcile each discovered issue identifier against Linear (applying the assignee + label filter).
-- Classify each issue into one of: `resume-active` / `orphaned-session` / `orphaned-worktree` / `fresh-queued` / `no-op`.
-  - `resume-active` → `Pending` (re-enters the normal admission flow with a freshly launched orchestrator; mode is recomputed from the current Linear label set).
-  - `orphaned-session` / `orphaned-worktree` → `Inactive(reason=orphan)`. The daemon does not dispatch a separate subprocess for surfacing; if a future orchestrator is alive for any in-flight issue the daemon sends `daemon_directive (kind=orphan)` to that orchestrator so the orchestrator writes the matching Linear feedback ([14-operator-notifications](14-operator-notifications.md)). Otherwise the orphan surfaces via structured log + TUI escalation queue only (Req 10.3).
-  - `fresh-queued` → `Pending`.
-  - `no-op` → no entry created.
+For tickets the daemon was previously running cycles for (e.g. crash-restart): the in-flight cycle is gone (subprocess died with the daemon). The fresh cycle launched in step 4 takes over. Any partial files inside the session tempdir from the previous run remain on disk and are accessible via `roki log --cycle <previous-uuid> ...` for forensics; the new cycle uses a fresh cycle UUID.
+
+The trigger value `cold_start` covers both first-launch and post-crash recovery. A future `restart_recovery` trigger value can be added if operators need to distinguish "we know the daemon crashed" from "this is a fresh start"; MVP collapses both into `cold_start`.
+
+### Stop / shutdown
+
+On orderly shutdown ([01-daemon-lifecycle](01-daemon-lifecycle.md)):
+
+1. The daemon stops accepting webhooks and stops launching new cycles.
+2. In-flight cycles are SIGTERMed; their pre/run/post subprocesses receive SIGTERM and the configured shutdown grace window applies.
+3. The cache is dropped (it is in-memory only; nothing is persisted).
+4. Worktrees and session tempdirs are not deleted at shutdown — recovery will reconcile them at the next start.
 
 ## Capabilities
 
-- **Mechanical pre-admission**: assignee + fixed-label gating runs in Rust without any LLM call. Skipped tickets cost zero subprocess.
-- **Single state set**: five states + an `Inactive.reason` discriminator. State key is the Linear issue identifier alone (single repo per ticket, per Req 2.6 / Req 4).
-- **Mode-tagged orchestrator**: each `Pending` entry carries a `mode` flag (`SPEC_DRIVEN` / `NEEDS_CLASSIFY`) determined at pre-admission and rendered into the orchestrator's system prompt; the mode is immutable for the session.
-- **Publishing transition events**: each transition publishes a structured event with prev state / next state / trigger source / issue identifier / repo identifier where applicable; `Inactive` transitions additionally include the `reason`.
-- **Subscription hooks**: other components can observe transition events read-only; no transition is vetoable.
-- **Subscriber failure isolation**: an exception in one subscriber does not affect other subscribers or the orchestrator.
-- **No persistent storage**: per-issue runtime state is never written to disk (with the exception of session tempdir contents, worktree contents, and the structured log).
+- **Mechanical admission**: assignee + repo allowlist match runs in Rust without any LLM call. Skipped tickets cost zero subprocess.
+- **Single triple per ticket**: the cache stores `(status, labels, assignee)` plus repo/workflow path, in-flight cycle id, and a recheck flag. State key is the Linear issue identifier (single repo per ticket; multi-repo tickets are handled by operator-authored end-cycle responses).
+- **Diff-driven dispatch**: rule re-evaluation runs only when at least one of the tracked fields differs from the cached value.
+- **Queue-mode preemption**: only one cycle per ticket at a time. New webhooks update the cache and re-evaluate after the in-flight cycle ends.
+- **No persistent storage**: the cache is rebuilt every start from Linear API and disk reconciliation.
+- **Cold-start = restart-recovery**: a single procedure handles both. Cycle `trigger` is `cold_start` for both; future trigger values can extend the enum.
+- **Orphan auto-delete**: residue not matched by the Linear API result is auto-deleted with one log line per deletion.
 
 ## Boundaries
 
-- **Skipped tickets are silent**: the pre-admission-judge does not write Linear, does not surface to TUI, and does not enter any state. Operators discover skip via structured log only. Adding a Linear comment for skips (e.g. "this ticket was not assigned to a configured operator") is out of scope.
-- **Mode mutation mid-flight** is out of scope: relabeling a ticket while its orchestrator is running does not re-route it. The next webhook re-runs pre-admission and may launch a fresh orchestrator if the prior one has stopped.
-- **Mirroring Linear state** is not done.
-- **A persistent DB** is intentionally not maintained (recovery is a re-read of Linear + filesystem).
+- **No daemon-side execution-stage enum**: the `Pending` / `Active` / `Backoff` / `Inactive` / `Cleaning` state set is removed. Execution stages live inside operator-authored cycles.
+- **No `Inactive.reason` discriminator**: the twelve-variant reason set (`awaiting_linear`, `needs_operator`, `spec_incomplete`, `needs_split`, `allowlist_rejected`, `orchestrator_crash`, `orchestrator_unparseable`, `orchestrator_budget_exhausted`, `stall`, `retry_exhausted`, `fs_poison`, `orphan`) is removed. Operators express these distinctions as `outcome` strings inside their post directives.
+- **No daemon-driven Linear feedback for skipped tickets**: silent eviction stays silent. Operators that want a Linear comment on a skip (e.g. "this ticket was not assigned to a configured operator") cannot rely on the daemon — the daemon does not have any Linear write path.
+- **No mid-cycle preemption of an in-flight cycle by tracker-terminal observations**: a Linear status change to `Done` or `Cancelled` updates the cache; the in-flight cycle runs to natural end; only after it terminates does the cleanup/rule re-evaluation happen. Operators that want forced termination author a `[[cleanup]]` entry whose run phase issues whatever termination signal they want.
+- **No mirroring of Linear-side workflow states** is done. Linear states are looked up via the tracker each time.
+- **A persistent DB** is intentionally not maintained.
 - **Cross-issue state correlation** is out of scope (each issue is independent).
-- **Per-repo state** is out of scope: one ticket = one repo (multi-repo tickets are rejected by the orchestrator with `outcome=needs_split` per [19-orchestrator-session](19-orchestrator-session.md)).
-- **Visualization / debug UI of the state machine** belongs to [13-observability-logs](13-observability-logs.md), [15-http-api](15-http-api.md), and [16-roki-tui](16-roki-tui.md).
-- **A pre-cleanup vetoable hook between terminal success and workspace deletion** is no longer provided — post-merge distill is handled in CI, not by the daemon.
+- **Per-repo state** is out of scope: one ticket = one repo. Multi-repo tickets are resolved to the first matching `[[admission.repos]]` entry; operators that detect the ticket spans repos can `directive: "end"` with whatever Linear write they choose to make.
+- **Visualization / debug UI of the cache** belongs to [13-observability-logs](13-observability-logs.md), [15-http-api](15-http-api.md), and [16-roki-tui](16-roki-tui.md).
 
 ## Traceability
 
-- **Roadmap**: `roadmap.md` > Scope > In > "Per-issue session tempdir lifecycle ..."; Boundary Strategy > "in-memory orchestrator with no persistent database", "State machine extension points"
+- **Roadmap**: `roadmap.md` > Scope > In > "Per-issue session tempdir lifecycle ..."; Boundary Strategy > "in-memory orchestrator with no persistent database".
 - **Requirements**:
-  - `roki-mvp Req 8`: Orchestrator State Machine and Extension Points
-  - `roki-mvp Req 10`: Restart Recovery Without Persistent Storage
+  - `roki-mvp Req 8`: Orchestrator State Machine and Extension Points (the requirement remains; the implementation collapses to the diff cache plus the cycle engine in [20-rule-and-cycle-engine](20-rule-and-cycle-engine.md)).
+  - `roki-mvp Req 10`: Restart Recovery Without Persistent Storage.
 - **Design**:
-  - `Orchestrator State Machine` section of `.kiro/specs/roki-mvp/design.md`
-  - `.kiro/specs/roki-mvp/design-bootstrap.md`
-- **Related FR**: [01-daemon-lifecycle](01-daemon-lifecycle.md), [02-configuration](02-configuration.md), [07-worker-execution](07-worker-execution.md), [12-extension-surface](12-extension-surface.md), [14-operator-notifications](14-operator-notifications.md), [18-worker-skill-workflow](18-worker-skill-workflow.md), [19-orchestrator-session](19-orchestrator-session.md)
+  - `Diff Cache` / `Cold Start` sections of `.kiro/specs/roki-mvp/design.md` (pending rewrite).
+- **Related FR**: [01-daemon-lifecycle](01-daemon-lifecycle.md), [02-configuration](02-configuration.md), [03-linear-integration](03-linear-integration.md), [06-worktree-and-session](06-worktree-and-session.md), [14-operator-notifications](14-operator-notifications.md), [20-rule-and-cycle-engine](20-rule-and-cycle-engine.md).

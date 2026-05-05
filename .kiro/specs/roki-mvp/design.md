@@ -8,12 +8,12 @@ refs:
     - requirements:roki-mvp
   related:
     - research:roki-mvp
-    - fr:18-worker-skill-workflow
-    - fr:19-orchestrator-session
     - fr:04-state-machine-and-recovery
     - fr:11-agent-tool-boundary
     - fr:12-extension-surface
     - fr:14-operator-notifications
+    - fr:20-rule-and-cycle-engine
+    - fr:21-log-access
   modules:
     - crates/roki-daemon/
 ---
