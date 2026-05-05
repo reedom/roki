@@ -6,6 +6,7 @@
 
 pub mod adapter;
 pub mod catalog;
+pub mod engine_impl;
 pub mod exit;
 pub mod override_resolver;
 pub mod policy;

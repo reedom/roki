@@ -8,4 +8,5 @@
 pub mod action_parser;
 pub mod adapter;
 pub mod budget;
+pub mod engine_impl;
 pub mod events;

@@ -26,9 +26,10 @@
 //!
 //! Spec refs: requirements.md Req 1.1, 1.3, 2.5, 2.12, 7.1, 7.2, 7.3.
 
+use std::collections::HashMap;
 use std::net::TcpListener;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 
 use thiserror::Error;
 use tokio::net::TcpListener as TokioTcpListener;
@@ -42,9 +43,20 @@ use crate::config::{
 };
 use crate::engine::claude::{ClaudeBinary, ClaudeError};
 use crate::engine::orchestrator_session::adapter::OrchestratorSessionAdapter;
+use crate::engine::orchestrator_session::engine_impl::OrchestratorEngineImpl;
 use crate::engine::phase_subprocess::adapter::PhaseSubprocessAdapter;
+use crate::engine::phase_subprocess::engine_impl::PendingPhaseEngine;
 use crate::exec::ghq::RealGhq;
 use crate::exec::wt::RealWt;
+use crate::orchestrator::core::{
+    ActorMessage, Orchestrator, OrchestratorDeps, OrchestratorEngine, PhaseEngine, SessionDirOps,
+    WorktreeOps,
+};
+use crate::orchestrator::escalation::EscalationQueue;
+use crate::orchestrator::events::EventBus;
+use crate::orchestrator::hooks::SubscriberHooks;
+use crate::orchestrator::read::{ActorSnapshot, OrchestratorReadHandle};
+use crate::orchestrator::state::IssueId;
 use crate::permissions::{PermissionConfigError, PermissionResolver};
 use crate::session::SessionManager;
 use crate::shutdown::{
@@ -149,6 +161,21 @@ struct Bootstrapped {
     /// single anchor.
     #[allow(dead_code)]
     components: RuntimeComponents,
+    /// Per-issue actor-map container assembled in step 8 (design.md "Daemon
+    /// bootstrap"). Seeded empty in 10.1.2; recovery seed lands in 10.1.3.
+    #[allow(dead_code)]
+    orchestrator: Arc<Orchestrator>,
+    /// Inbox handle bridging the tracker / admission pipe (10.1.4-10.1.5)
+    /// to the per-issue actors. Held so step-11 wiring can clone it.
+    #[allow(dead_code)]
+    inbox: OrchestratorInbox,
+    /// Read-only projection over the per-issue state map + escalation
+    /// queue. Consumed by TUI/JSON snapshot endpoints (Task 13.x).
+    #[allow(dead_code)]
+    read_handle: Arc<OrchestratorReadHandle>,
+    /// Held so escalation snapshots survive the bootstrap return.
+    #[allow(dead_code)]
+    escalations: Arc<EscalationQueue>,
 }
 
 /// Assembled engine adapters + managers handed to subsequent composition
@@ -252,11 +279,17 @@ async fn bootstrap(args: RunArgs, env: &dyn EnvReader) -> Result<Bootstrapped, R
         permission_resolver,
     })?;
 
-    // ---- Step 9-10: orchestrator + tracker construction. The smoke-test
-    // surface defers the orchestrator/tracker wiring to the production
-    // entry point (Task 4.13 and beyond) so this module can be exercised
-    // without requiring a fully fledged orchestrator. The webhook bind is
-    // the load-bearing refusal point under Tasks 10.1-10.3.
+    // ---- Step 8 (continued): compose the orchestrator actor map around
+    // the assembled `RuntimeComponents`. Seeded empty per 10.1.2 — recovery
+    // wiring lands in 10.1.3. The phase pipeline is wired by 10.1.5; until
+    // then `PendingPhaseEngine` refuses every `run_phase` so a misrouted
+    // phase nomination surfaces a structured error rather than a silent
+    // miswiring.
+    let orchestrator_seams = ProductionOrchestratorSeams::from_components(&components);
+    let composition = compose_orchestrator(orchestrator_seams);
+
+    // ---- Step 9-10: tracker construction is deferred to Task 10.1.4. The
+    // webhook bind is the load-bearing refusal point under Tasks 10.1-10.3.
 
     // ---- Step 11: bind webhook listener. Hard-refuse on port conflict.
     let bind_addr = compose_bind_addr(&config);
@@ -280,7 +313,140 @@ async fn bootstrap(args: RunArgs, env: &dyn EnvReader) -> Result<Bootstrapped, R
         _logging_guard: logging_guard,
         _signal_task: signal_task,
         components,
+        orchestrator: composition.orchestrator,
+        inbox: composition.inbox,
+        read_handle: composition.read_handle,
+        escalations: composition.escalations,
     })
+}
+
+// ---------------------------------------------------------------------------
+// Orchestrator actor-map composition
+// ---------------------------------------------------------------------------
+
+/// Bundle of orchestrator-side trait objects + the read-side state map.
+/// Construction is split between [`ProductionOrchestratorSeams::from_components`]
+/// (production path) and the [`testing::compose_for_test`] helper (test path)
+/// so test fixtures can inject recording stubs without forking the
+/// composition step.
+struct OrchestratorSeams {
+    orchestrator_engine: Arc<dyn OrchestratorEngine>,
+    phase_engine: Arc<dyn PhaseEngine>,
+    worktree: Arc<dyn WorktreeOps>,
+    session_dirs: Arc<dyn SessionDirOps>,
+}
+
+struct ProductionOrchestratorSeams;
+
+impl ProductionOrchestratorSeams {
+    fn from_components(components: &RuntimeComponents) -> OrchestratorSeams {
+        let orchestrator_engine: Arc<dyn OrchestratorEngine> =
+            Arc::new(OrchestratorEngineImpl::new(
+                components.orchestrator_session_adapter.clone(),
+                components.session_manager.clone(),
+                components.workflow_policy.orchestrator.allowed_tools.clone(),
+            ));
+
+        // Phase pipeline placeholder: see `PendingPhaseEngine` doc-comment.
+        // The adapter handle is retained on `RuntimeComponents` so 10.1.5
+        // can wire the production phase pipeline without re-resolving the
+        // claude binary.
+        let phase_engine: Arc<dyn PhaseEngine> = Arc::new(PendingPhaseEngine::new());
+
+        let worktree: Arc<dyn WorktreeOps> = components.worktree_manager.clone();
+        let session_dirs: Arc<dyn SessionDirOps> = components.session_manager.clone();
+
+        OrchestratorSeams {
+            orchestrator_engine,
+            phase_engine,
+            worktree,
+            session_dirs,
+        }
+    }
+}
+
+/// Result of [`compose_orchestrator`]. Held inside `Bootstrapped` so the
+/// downstream composition steps (10.1.3 recovery, 10.1.4 tracker, 10.1.5
+/// admission pipe, 10.1.6 shutdown) consume a single anchor.
+struct OrchestratorComposition {
+    orchestrator: Arc<Orchestrator>,
+    inbox: OrchestratorInbox,
+    read_handle: Arc<OrchestratorReadHandle>,
+    escalations: Arc<EscalationQueue>,
+    /// Shared between the orchestrator deps and the read handle. Held here
+    /// so the integration test surface can observe per-issue snapshot rows
+    /// without going through the read handle's sorting projection.
+    state_map: Arc<RwLock<HashMap<IssueId, ActorSnapshot>>>,
+}
+
+/// Compose the orchestrator actor-map container from the supplied seams.
+/// Wires:
+///   - a fresh `EventBus` (default capacity);
+///   - an empty `SubscriberHooks` registry (subscribers register later);
+///   - a fresh `EscalationQueue`;
+///   - an empty `state_map` shared between the orchestrator and the read
+///     handle so the read handle observes every actor snapshot row;
+///   - a fresh `OrchestratorReadHandle` projection;
+///   - an `OrchestratorInbox` newtype around the `Arc<Orchestrator>` for
+///     downstream admission/recovery wiring.
+fn compose_orchestrator(seams: OrchestratorSeams) -> OrchestratorComposition {
+    let event_bus = EventBus::new();
+    let hooks = Arc::new(SubscriberHooks::new());
+    let escalations = Arc::new(EscalationQueue::new());
+    let state_map: Arc<RwLock<HashMap<IssueId, ActorSnapshot>>> =
+        Arc::new(RwLock::new(HashMap::new()));
+
+    let deps = OrchestratorDeps {
+        orchestrator_engine: seams.orchestrator_engine,
+        phase_engine: seams.phase_engine,
+        worktree: seams.worktree,
+        session_dirs: seams.session_dirs,
+        event_bus,
+        hooks,
+        escalations: escalations.clone(),
+        state_map: state_map.clone(),
+    };
+
+    let orchestrator = Arc::new(Orchestrator::new(deps));
+    let inbox = OrchestratorInbox::new(orchestrator.clone());
+    let read_handle = Arc::new(OrchestratorReadHandle::new(
+        state_map.clone(),
+        escalations.clone(),
+    ));
+
+    OrchestratorComposition {
+        orchestrator,
+        inbox,
+        read_handle,
+        escalations,
+        state_map,
+    }
+}
+
+/// Thin handle around the orchestrator actor-map container. Bridges the
+/// admission pipe (10.1.5) and recovery seed (10.1.3) into the per-issue
+/// actors via a single typed surface. Cheap to clone (one `Arc` bump per
+/// clone).
+#[derive(Clone)]
+pub struct OrchestratorInbox {
+    orchestrator: Arc<Orchestrator>,
+}
+
+impl OrchestratorInbox {
+    pub fn new(orchestrator: Arc<Orchestrator>) -> Self {
+        Self { orchestrator }
+    }
+
+    /// Forward `message` to the per-issue actor for `issue`. Spawns the
+    /// actor on first message. Returns `Err(message)` if the actor's inbox
+    /// is closed (terminal state already reached).
+    pub async fn send(
+        &self,
+        issue: IssueId,
+        message: ActorMessage,
+    ) -> Result<(), ActorMessage> {
+        self.orchestrator.send(issue, message).await
+    }
 }
 
 /// Inputs to [`assemble_runtime_components`]. Kept as a typed bundle so the
@@ -599,6 +765,99 @@ async fn bind_listener(addr: &str) -> Result<TokioTcpListener, RuntimeError> {
         addr: addr.to_owned(),
         source,
     })
+}
+
+// ---------------------------------------------------------------------------
+// Test composition entry point
+// ---------------------------------------------------------------------------
+
+/// Composition helpers exposed to integration tests under
+/// `crates/roki-daemon/tests/`. Lives behind a public submodule rather than
+/// `#[cfg(test)]` because the integration tests run against the
+/// already-compiled library; the helpers here are intentionally narrow and
+/// only construct the orchestrator actor-map composition (10.1.2 surface)
+/// without binding any sockets or starting tracker tasks.
+pub mod testing {
+    use std::collections::HashMap;
+    use std::sync::{Arc, RwLock};
+
+    use crate::orchestrator::core::{
+        Orchestrator, OrchestratorEngine, PhaseEngine, SessionDirOps, WorktreeOps,
+    };
+    use crate::orchestrator::escalation::EscalationQueue;
+    use crate::orchestrator::read::{ActorSnapshot, OrchestratorReadHandle};
+    use crate::orchestrator::state::IssueId;
+
+    use super::{
+        OrchestratorComposition, OrchestratorInbox, OrchestratorSeams, compose_orchestrator,
+    };
+
+    /// Caller-supplied seams for [`compose_for_test`]. Tests inject
+    /// recording stubs (see `tests/common/mod.rs`) under each `Arc<dyn ...>`
+    /// surface so they can assert engine invocations + state-map snapshots
+    /// without spawning any real subprocess.
+    pub struct RuntimeTestSeams {
+        pub orchestrator_engine: Arc<dyn OrchestratorEngine>,
+        pub phase_engine: Arc<dyn PhaseEngine>,
+        pub worktree: Arc<dyn WorktreeOps>,
+        pub session_dirs: Arc<dyn SessionDirOps>,
+    }
+
+    /// Result of [`compose_for_test`]. Mirrors the orchestrator-composition
+    /// half of `Bootstrapped` so integration tests can assert on the actor
+    /// map shape directly.
+    pub struct ComposedHarness {
+        pub engine: Arc<dyn OrchestratorEngine>,
+        pub phase: Arc<dyn PhaseEngine>,
+        pub worktree: Arc<dyn WorktreeOps>,
+        pub session_dirs: Arc<dyn SessionDirOps>,
+        pub orchestrator: Arc<Orchestrator>,
+        pub inbox: OrchestratorInbox,
+        pub state_map: Arc<RwLock<HashMap<IssueId, ActorSnapshot>>>,
+        pub escalations: Arc<EscalationQueue>,
+        pub read_handle: Arc<OrchestratorReadHandle>,
+        /// Lifetime anchors (e.g. tempdirs) the caller wants to keep alive
+        /// alongside the harness. Stored as opaque drop guards so the
+        /// runtime crate need not depend on `tempfile` at build time.
+        pub lifetime_anchors: Vec<Box<dyn std::any::Any + Send + Sync>>,
+    }
+
+    /// Compose an orchestrator actor-map around the supplied seams.
+    /// Mirrors the production composition step that runs inside
+    /// `runtime::bootstrap`, so tests exercise the same wiring shape.
+    pub fn compose_for_test(seams: RuntimeTestSeams) -> ComposedHarness {
+        let engine = seams.orchestrator_engine.clone();
+        let phase = seams.phase_engine.clone();
+        let worktree = seams.worktree.clone();
+        let session_dirs = seams.session_dirs.clone();
+
+        let composition = compose_orchestrator(OrchestratorSeams {
+            orchestrator_engine: engine.clone(),
+            phase_engine: phase.clone(),
+            worktree: worktree.clone(),
+            session_dirs: session_dirs.clone(),
+        });
+        let OrchestratorComposition {
+            orchestrator,
+            inbox,
+            read_handle,
+            escalations,
+            state_map,
+        } = composition;
+
+        ComposedHarness {
+            engine,
+            phase,
+            worktree,
+            session_dirs,
+            orchestrator,
+            inbox,
+            state_map,
+            escalations,
+            read_handle,
+            lifetime_anchors: Vec::new(),
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------

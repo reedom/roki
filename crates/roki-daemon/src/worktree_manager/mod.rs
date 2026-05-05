@@ -14,9 +14,12 @@ use std::sync::Arc;
 
 use thiserror::Error;
 
+use async_trait::async_trait;
+
 use crate::config::repos::RepoEntry;
 use crate::exec::ghq::{GhqError, GhqTool};
 use crate::exec::wt::{WorktreeEntry, WtError, WtTool};
+use crate::orchestrator::core::{WorktreeOpError, WorktreeOps};
 use crate::orchestrator::state::IssueId;
 use crate::session::{SessionError, sanitize_issue_id};
 use crate::tracker::model::RepoId;
@@ -151,6 +154,48 @@ impl<W: WtTool, G: GhqTool> WorktreeManager<W, G> {
 
 fn matches_issue_branch(entry: &WorktreeEntry, issue: &IssueId) -> bool {
     entry.branch.as_deref() == Some(issue.0.as_str())
+}
+
+/// Adapt [`WorktreeManager`] to the orchestrator core's [`WorktreeOps`]
+/// seam. Pure routing — every call delegates to the existing
+/// `WorktreeManager` method. The error variants are mapped onto the
+/// orchestrator's documented taxonomy:
+/// - [`WorktreeError::AllowlistRejected`] -> [`WorktreeOpError::AllowlistRejected`]
+///   (orchestrator stops with `Inactive(allowlist_rejected)`).
+/// - [`WorktreeError::FsPoison`] -> [`WorktreeOpError::FsPoison`]
+///   (orchestrator routes through `handle_fs_poison`).
+/// - Any other backing failure (`InvalidIssueId`, `Wt`, `Ghq`) -> [`WorktreeOpError::Other`].
+///
+/// Behavior of `WorktreeManager` itself is unchanged.
+#[async_trait]
+impl<W, G> WorktreeOps for WorktreeManager<W, G>
+where
+    W: WtTool + Send + Sync + 'static,
+    G: GhqTool + Send + Sync + 'static,
+{
+    async fn ensure(
+        &self,
+        issue: &IssueId,
+        repo_id: &RepoId,
+    ) -> Result<PathBuf, WorktreeOpError> {
+        WorktreeManager::ensure(self, issue, repo_id)
+            .await
+            .map_err(map_worktree_error)
+    }
+
+    async fn cleanup(&self, issue: &IssueId) -> Result<Vec<PathBuf>, WorktreeOpError> {
+        WorktreeManager::cleanup(self, issue)
+            .await
+            .map_err(map_worktree_error)
+    }
+}
+
+fn map_worktree_error(err: WorktreeError) -> WorktreeOpError {
+    match err {
+        WorktreeError::AllowlistRejected(repo) => WorktreeOpError::AllowlistRejected(repo),
+        WorktreeError::FsPoison(cause) => WorktreeOpError::FsPoison(cause),
+        other => WorktreeOpError::Other(other.to_string()),
+    }
 }
 
 #[cfg(test)]

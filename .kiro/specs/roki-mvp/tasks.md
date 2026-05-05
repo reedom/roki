@@ -472,7 +472,7 @@ refs:
   - _Requirements: 1.1, 7.1_
   - _Boundary: runtime_
 
-- [ ] 10.1.2 Compose Orchestrator actor map (no recovery seed yet)
+- [x] 10.1.2 Compose Orchestrator actor map (no recovery seed yet)
   - Construct the per-issue Orchestrator actor map from the assembled `RuntimeComponents`, plus `EventBus`, `EscalationQueue`, `SubscriberHooks` registry, and the `OrchestratorRead` snapshot projection. Spawn the actor-map supervisor task; expose an `OrchestratorInbox` handle.
   - Seed the map empty (recovery wiring lands in 10.1.3).
   - Observable completion: integration test constructs the actor map via `runtime::run_with_shutdown` (with recovery scan stubbed empty), pushes a synthetic `Admit { issue, mode }` into the inbox, and asserts the orchestrator session adapter is invoked exactly once for the issue.

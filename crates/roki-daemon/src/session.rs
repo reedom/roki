@@ -13,6 +13,7 @@ use std::sync::Mutex;
 
 use thiserror::Error;
 
+use crate::orchestrator::core::{SessionDirError as CoreSessionDirError, SessionDirOps};
 use crate::orchestrator::state::IssueId;
 
 /// Default platform cache root: `~/Library/Caches/roki/sessions` on macOS,
@@ -165,6 +166,22 @@ impl SessionManager {
 impl Default for SessionManager {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+/// Adapt the concrete [`SessionManager`] to the orchestrator core's
+/// [`SessionDirOps`] seam. Pure routing — every call delegates to the
+/// matching `SessionManager` method and re-tags the error string under
+/// `SessionDirError::Other` so the orchestrator's `fs_poison` taxonomy stays
+/// the only path that surfaces session-tempdir failures (Req 8.1
+/// `Inactive(fs_poison)`). Behavior of `SessionManager` itself is unchanged.
+impl SessionDirOps for SessionManager {
+    fn ensure(&self, issue: &IssueId) -> Result<std::path::PathBuf, CoreSessionDirError> {
+        SessionManager::ensure(self, issue).map_err(|err| CoreSessionDirError::Other(err.to_string()))
+    }
+
+    fn remove(&self, issue: &IssueId) -> Result<(), CoreSessionDirError> {
+        SessionManager::remove(self, issue).map_err(|err| CoreSessionDirError::Other(err.to_string()))
     }
 }
 
