@@ -680,7 +680,7 @@ refs:
   - _Requirements: 1.1, 1.2, 1.3, 1.4, 11.6, 11.7_
   - _Boundary: runtime_
 
-- [ ] 13.2 (P) Write e2e_spec_driven_happy test
+- [x] 13.2 (P) Write e2e_spec_driven_happy test
   - SPEC_DRIVEN end-to-end: orchestrator first turn structurally validates the target spec docs (using `Read` + `Bash` in the read-only sandbox), nominates `implement` (`/kiro-impl <target>`) → `review` → `validate` → `open_pr` → `finalize_review` → orchestrator reads `review.md` and validates → `action=stop outcome=success` → daemon maps to `Inactive(awaiting_linear)`.
   - Observable completion: `cargo test e2e_spec_driven_happy` passes; the resulting transition log shows the documented sequence and final `Inactive(awaiting_linear)`.
   - _Depends: 10.1, 11.6, 11.4_
