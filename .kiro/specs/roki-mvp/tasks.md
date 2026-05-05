@@ -744,7 +744,7 @@ refs:
   - _Requirements: 3.10, 4.9_
   - _Boundary: runtime_
 
-- [ ] 13.10 (P) Write e2e_review_md_validation_retry test
+- [x] 13.10 (P) Write e2e_review_md_validation_retry test
   - `finalize_review` clean exit but the orchestrator's structural validation of `review.md` reports overall `status = fail` → orchestrator re-nominates `implement` with `additional_context` populated from failing per-criterion entries → eventually `review.md` validation passes → `outcome=success`.
   - Observable completion: `cargo test e2e_review_md_validation_retry` passes; the implement re-nomination's rendered envelope contains the failing per-criterion entries verbatim.
   - _Depends: 10.1, 11.4_
