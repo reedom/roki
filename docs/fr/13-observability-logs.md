@@ -39,7 +39,7 @@ Operators must diagnose daemon behavior, gate decisions, and orchestrator / phas
 Exact event list: [`docs/reference/log-events.md`](../reference/log-events.md). Conceptual categories:
 
 - **roki-mvp**: orchestrator-session lifecycle (start / stop / turn / schema drift), phase subprocess lifecycle changes (including `Inactive(reason=...)` transitions covering the three orchestrator-dead reasons `orchestrator_crash` / `orchestrator_unparseable` / `orchestrator_budget_exhausted`), session/worktree operations, Linear poll/webhook, backoff/stall decisions, retry attempts, state-machine transitions, the orchestrator's `daemon_directive` Linear-write outcomes, escalation queue updates, subprocess stderr lines. The orchestrator's artifact-validation outcomes (after `materialize_spec` / `finalize_review` clean exit) surface through the existing `Orchestrator turn` event (`action` / `phase` / `additional_context` / `reason`).
-- **HTTP API** ([15](15-http-api.md)): per-request event (method/path/status/duration/correlation), refresh request.
+- **HTTP API** ([15](15-http-api.md)): server-startup events (API disabled / API listening / non-loopback bind warn / bind failure), per-request event (method/path/status/duration/correlation), refresh request, server-config validation failure (startup or hot-reload), server-config deferred-until-restart (hot-reload of `port` / `bind`).
 
 ### Surfacing subprocess stderr
 

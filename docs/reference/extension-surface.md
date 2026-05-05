@@ -16,7 +16,8 @@ Traits / hooks / context channels that downstream specs use to plug in without f
 
 | Surface | Kind | Purpose | Used by | Requirements |
 |---|---|---|---|---|
-| `OrchestratorRead` trait | Read-only trait | Per-issue state snapshot (including the three orchestrator-dead `Inactive.reason` values) + single-issue lookup + escalation queue snapshot | [15-http-api](../fr/15-http-api.md) | roki-mvp Req 13.1 |
+| `OrchestratorRead` trait | Read-only trait | Per-issue state snapshot (including the three orchestrator-dead `Inactive.reason` values) + single-issue lookup by `IssueId` + escalation queue snapshot | [15-http-api](../fr/15-http-api.md) | roki-mvp Req 13.1 |
+| `TransitionSubscriber` (via `SubscriberHooks::subscribe`) | Read-only event subscription | Observe per-issue state-machine transitions as `TransitionEvent` values; subscriber's `on_transition` is synchronous and non-blocking; trait has no veto; panics are caught and isolated; subscription handle drops to unsubscribe | [15-http-api](../fr/15-http-api.md) (event cache feed) | roki-mvp Req 13.1 |
 | `TrackerRefresh` trait | Nudge trait | Out-of-cycle poll request | [15-http-api](../fr/15-http-api.md), [16-roki-tui](../fr/16-roki-tui.md) | roki-mvp Req 13.3 |
 | Engine adapter `additional_context` field | Additive context channel | Inject machine-extractable additional context into a phase subprocess's prompt envelope (kept distinct from the skill's installed prompt body). The orchestrator populates this on `action=run_phase` directives, including the artifact-validation retry path (e.g. failing per-criterion entries the orchestrator read from `review.md` injected into the next `implement` phase) | [18-worker-skill-workflow](../fr/18-worker-skill-workflow.md), [19-orchestrator-session](../fr/19-orchestrator-session.md) | roki-mvp Req 13.4 |
 | Phase override (`extension.phase.<name>.command` / `prompt_template_<phase>`) | Per-phase invocation surface | Operator override of any phase's catalog default. Two mutually exclusive forms per phase: `extension.phase.<name>.command` swaps the slash-command-driven skill while keeping the daemon's invocation pattern; `prompt_template_<phase>` (named template block) replaces the prompt entirely and is rendered onto the subprocess's stdin. Default invocation is restored when neither form is declared. Mutually exclusive: declaring both for one phase is a configuration error rejected at startup or retained as previous policy at hot reload | [18-worker-skill-workflow](../fr/18-worker-skill-workflow.md), [02-configuration](../fr/02-configuration.md) | roki-mvp Req 6.7, Req 13.5 |
@@ -30,6 +31,15 @@ Traits / hooks / context channels that downstream specs use to plug in without f
 - Strictly **read-only**. Does not grant state-mutation rights.
 - Exposes a per-issue snapshot (including the `Inactive.reason` discriminator with the three orchestrator-dead values `orchestrator_crash` / `orchestrator_unparseable` / `orchestrator_budget_exhausted` per [19-orchestrator-session](../fr/19-orchestrator-session.md)), a single-issue lookup, and a snapshot of the escalation queue (the daemon-only failure surface populated alongside `daemon_directive` events sent to the orchestrator).
 - To prevent duplication of internal types, types exposed via the API are mapped through a projection layer.
+
+### `TransitionSubscriber` (via `SubscriberHooks::subscribe`)
+
+- **Read-only**: subscribers observe `TransitionEvent` values; the trait has no veto method.
+- `on_transition(&self, event: &TransitionEvent)` is **synchronous and non-blocking**. Subscribers must not call `.await` and must not block on locks.
+- **Panic isolation**: the dispatcher wraps each call in `catch_unwind`; a panicking subscriber does not stop the orchestrator core or other subscribers, and the panic is logged with the subscriber's tag.
+- **Lifecycle**: registration returns a `SubscriptionHandle`; dropping the handle unsubscribes (RAII).
+- **Order**: subscribers are dispatched in registration order; downstream consumers must not depend on a specific order across subscribers.
+- **Origin coverage**: subscribers see the resulting `TransitionEvent` regardless of trigger origin (orchestrator action, phase event, tracker event, daemon directive). Subscribers do not see the underlying envelopes (`phase_complete` / `phase_nonclean` / `daemon_directive`) directly.
 
 ### `TrackerRefresh` trait
 

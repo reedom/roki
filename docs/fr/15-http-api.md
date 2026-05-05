@@ -20,7 +20,7 @@ refs:
 
 # FR 15: HTTP API
 
-> An optional axum HTTP server. Three endpoints: `GET /api/v1/state` / `GET /api/v1/<issue>` / `POST /api/v1/refresh`. Default off, loopback only, symphony-compatible schema, with HTML escape + ANSI strip on agent / Linear-derived strings. The orchestrator read-only projection that does not duplicate the in-memory state owned by `roki-mvp`.
+> An optional axum HTTP server. Three endpoints: `GET /api/v1/state` / `GET /api/v1/<issue>` / `POST /api/v1/refresh`. Default off, loopback only, versioned JSON schema centralized in a single shared crate, with HTML escape + ANSI strip on agent / Linear-derived strings. The orchestrator read-only projection that does not duplicate the in-memory state owned by `roki-mvp`.
 
 ## Purpose
 
@@ -43,7 +43,8 @@ Without it, an operator's only view of daemon state is `tail | grep` on the trac
 #### `GET /api/v1/state`
 
 - **Response**: HTTP 200 + a JSON body. A daemon snapshot (version, uptime, configured repositories, set of active workers, escalation queue, aggregate token usage, aggregate rate-limit window) and per-issue entries (issue identifier key, current `WorkerState`, latest `Inactive(reason=...)` discriminator when applicable, summary of the latest lifecycle event, latest timestamp, current correlation identifier).
-- **Coherent snapshot**: assembled from a single coherent read; entries do not drift from each other beyond the documented bound.
+- **Bounded-drift snapshot**: assembled in a fixed three-step order (1) `OrchestratorRead::snapshot()` → (2) per-issue event cache → (3) `OrchestratorRead::escalation_queue()`; entries from the three sub-reads may reflect adjacent moments rather than one instant; the bound between the earliest and latest sub-read is the snapshot drift bound (≤50ms on a developer-class machine, documented in `SPEC.md`).
+- **Escalation source**: `escalations` are projected from `OrchestratorRead::escalation_queue()` (the queue is owned by roki-mvp's orchestrator and populated alongside `daemon_directive` events per [14-operator-notifications](14-operator-notifications.md)); the server module does NOT maintain a parallel escalation queue. The per-issue event cache feeds the per-issue detail endpoint only and never derives `escalations`.
 - **Headers**: `Content-Type: application/json; charset=utf-8`, `Cache-Control: no-store`.
 - **Unhealthy state**: HTTP 503 + a JSON error body (the names of unhealthy subsystems).
 - **API self-counter**: the daemon's internal API request counter is exposed in this endpoint's `server` block.
@@ -69,11 +70,12 @@ Without it, an operator's only view of daemon state is `tail | grep` on the trac
 - **Defense in depth on the TUI side**: `roki-tui` also strips ANSI / control characters from received strings ([16-roki-tui](16-roki-tui.md)).
 - **Sanitize failure** (invalid UTF-8, etc.) → replace the string with a sanitized placeholder marker and log the offending field name.
 
-### Symphony schema compatibility
+### Schema stability and versioning
 
-- All three endpoints are compatible with symphony's documented `/api/v1/...` contract in field names / structure.
-- **roki-specific fields** (e.g. `Inactive.reason` discriminator, escalation queue entry): added under names that do not collide with symphony fields, and documented in the consuming spec's design.
-- **Versioning**: currently `/api/v1/`. Breaking changes introduce `/api/v2/` without breaking existing consumers.
+- **Single source of truth**: every request / response shape is declared in the `roki-api-types` crate. The server module and `roki-tui` both import these types; neither side may redefine them locally.
+- **`api_version` field**: every JSON response body carries an `api_version` field whose value matches `roki_api_types::API_VERSION` (currently `"v1"`).
+- **Versioning**: currently `/api/v1/`. Within `/api/v1/`, additions are additive only (new optional fields). Breaking changes (renames, removals, type changes) introduce `/api/v2/` without breaking existing `/api/v1/` consumers.
+- **roki-specific fields** (e.g. `Inactive.reason` discriminator, escalation queue entry, multi-repo `(repo, issue)` keying as separate `repo` / `issue` fields): documented per-field in `SPEC.md` under `## Observability HTTP API`.
 
 ### Logging (no body leakage)
 
@@ -112,7 +114,7 @@ Without it, an operator's only view of daemon state is `tail | grep` on the trac
 
 - **Roadmap**: `roadmap.md` > Specs > `roki-observability`; Boundary Strategy > "Observability (HTTP + TUI)"
 - **Requirements**:
-  - `roki-observability Req 1` - `Req 7`: server gating / endpoints / loopback / symphony / sanitization
+  - `roki-observability Req 1` - `Req 7`: server gating / endpoints / loopback / schema stability / sanitization
   - `roki-observability Req 12` - `Req 15`: shared types / projection / logging / configuration
   - `roki-mvp Req 13.1`, `Req 13.3`: `OrchestratorRead` trait, `TrackerRefresh` trait
 - **Design**:

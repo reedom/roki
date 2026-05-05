@@ -25,7 +25,7 @@ A single-terminal view of daemon state at second-by-second granularity. The TUI'
 
 ### Startup and connection
 
-- **`roki-tui <api-url>`**: connects to the given API URL, fetches the initial snapshot via `GET /api/v1/state` ([15-http-api](15-http-api.md)), and renders a live state view within the documented startup window.
+- **`roki-tui <api-url>`**: connects to the given API URL, fetches the initial snapshot via `GET /api/v1/state` ([15-http-api](15-http-api.md)), and renders a live state view within the documented startup window (1 second on a developer-class machine against a loopback daemon; pinned in `SPEC.md`).
 - **Refresh loop**: re-fetches `GET /api/v1/state` at the configured cadence. If the API returns non-2xx, an error is shown in the status bar; the TUI does not exit.
 - **Quit key**: a clean exit on the documented quit key. Restores the terminal to its original mode.
 
