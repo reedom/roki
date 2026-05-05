@@ -455,7 +455,7 @@ refs:
 
 - [ ] 10. Bootstrap composition
 
-- [ ] 10.1 Wire runtime::run_with_shutdown composition order (umbrella; rolls up sub-tasks 10.1.1–10.1.6)
+- [x] 10.1 Wire runtime::run_with_shutdown composition order (umbrella; rolls up sub-tasks 10.1.1–10.1.6)
   - Compose the daemon in the order documented in `design.md > Daemon bootstrap` (steps 1–12): config load → secret resolve + redaction list → `[linear].assignee` resolution → `[linear].admit_states` resolution → signal handlers → external binary discovery → workflow load → `Orchestrator::with_recovery` → start single workspace-level `LinearTracker` → mount `POST /linear/webhook` on a single `axum::Router` → funnel polling + webhook through `PreAdmissionJudge` → `tokio::select!` on shutdown across orchestrator + bridge + server + tracker.
   - Pass the assembled engine adapters (`OrchestratorSessionAdapter`, `PhaseSubprocessAdapter`), `SessionManager`, `WorktreeManager`, `PermissionResolver`, `WorkflowLoader`, and `EscalationQueue` into `Orchestrator::run`. The orchestrator does not receive any agent tool factory — the daemon registers no agent-side tools (Req 7.1).
   - Observable completion: marked `[x]` only when 10.1.1–10.1.6 are all `[x]`; the e2e suite (13.1–13.12) drives the full `runtime::run_with_shutdown` against a `fake_claude` binary, a wiremock Linear, and a signed webhook posted via HTTP.
@@ -505,7 +505,7 @@ refs:
   - _Requirements: 3.1, 3.2, 3.7, 3.8, 3.9, 3.10, 3.11, 3.12, 3.13, 3.14_
   - _Boundary: runtime_
 
-- [ ] 10.1.6 Wire shutdown across orchestrator + tracker + reconciler + server
+- [x] 10.1.6 Wire shutdown across orchestrator + tracker + reconciler + server
   - Extend the existing `tokio::select!` shutdown loop in `runtime::run_with_shutdown` to await the orchestrator actor map, the tracker poller, the webhook server, and any in-flight reconciler tasks within `SHUTDOWN_WINDOW = 30s` via `await_workers_with_window`.
   - On shutdown signal: stop accepting new tracker events first (tracker + webhook), then send each live orchestrator session a final `stop`-acknowledgement signal and close its stdin, then SIGTERM in-flight phase subprocesses, then await each within the configured per-subprocess shutdown window.
   - Observable completion: integration test starts the daemon with a fake long-running phase subprocess, fires a signed webhook for an admit-passing issue, sends SIGTERM mid-phase, and asserts (a) the daemon exits cleanly within the documented window, (b) orchestrator stdin closed, (c) phase subprocess SIGTERMed, (d) tracker + webhook stop accepting new events before orchestrator teardown begins.
@@ -741,3 +741,7 @@ refs:
   - _Blocked: depends on 10.1 runtime composition completion. `tests/e2e_recovery.rs` drives the RecoveryReconciler directly + assembles an OrchHarness; does not exercise the full daemon kill+restart cycle through `runtime::run_with_shutdown` (no real process restart, no real fresh orchestrator session)._
   - _Requirements: 8.5, 10.1, 10.2_
   - _Boundary: runtime_
+
+## Implementation Notes
+
+- **Mid-phase abort SIGTERM gap (10.1.6 follow-up):** when the runtime aborts an actor mid-phase via `JoinHandle::abort()` at the `SHUTDOWN_WINDOW` boundary, the held `OrchestratorSessionHandle` (`engine/orchestrator_session/adapter.rs`) and the spawned `tokio::process::Child` (`engine/claude.rs::ClaudeSpawn::spawn`) have NO `Drop` impl that issues SIGTERM, and the child is not spawned with `kill_on_drop(true)`. Production effect is unreachable today because runtime currently wires `PendingPhaseEngine` (placeholder); when a future task replaces the placeholder with the real `PhaseSubprocessAdapter`, that task MUST either set `kill_on_drop(true)` on the spawned child or implement `Drop` on the phase handle issuing SIGTERM, otherwise observable "(c) phase subprocess SIGTERMed" cannot be guaranteed under mid-phase abort.

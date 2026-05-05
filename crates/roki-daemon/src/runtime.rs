@@ -30,6 +30,7 @@ use std::collections::HashMap;
 use std::net::TcpListener;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
+use std::time::Duration;
 
 use thiserror::Error;
 use tokio::net::TcpListener as TokioTcpListener;
@@ -66,7 +67,8 @@ use crate::orchestrator::tracker_bridge::{DedupIndex, ObserveOutcome, Terminatio
 use crate::permissions::{PermissionConfigError, PermissionResolver};
 use crate::session::SessionManager;
 use crate::shutdown::{
-    self, SHUTDOWN_WINDOW, ShutdownSignal, await_workers_with_window, install_signal_handlers,
+    self, AwaitOutcome, SHUTDOWN_WINDOW, ShutdownSignal, await_workers_with_window,
+    install_signal_handlers,
 };
 use crate::tracker::linear::{
     DEFAULT_LINEAR_ENDPOINT, LinearClient, LinearError, LinearPoller,
@@ -1083,8 +1085,106 @@ fn build_permission_resolver(config: &Config) -> PermissionResolver {
     }
 }
 
-/// Step 12: serve the webhook router and await shutdown. Bounds wind-down at
-/// [`SHUTDOWN_WINDOW`] via [`await_workers_with_window`].
+/// Await each per-issue actor `JoinHandle` within `window`, aborting the
+/// underlying actor task (not a wrapper) on timeout.
+///
+/// `await_workers_with_window` is wired for "spawned futures the runtime
+/// owns"; for orchestrator actors the runtime already holds the
+/// `JoinHandle` returned by `Orchestrator::drain_actors`. Calling
+/// `handle.abort()` on those handles is what actually cancels the actor
+/// task — wrapping the handle in another spawn would only abort the
+/// wrapper and leave the actor running. Mirrors the per-tag completed /
+/// timed_out partitioning that `await_workers_with_window` produces so the
+/// caller's aggregate reporting stays uniform.
+async fn await_actor_handles_with_window(
+    handles: Vec<(IssueId, tokio::task::JoinHandle<()>)>,
+    window: Duration,
+) -> AwaitOutcome {
+    if handles.is_empty() {
+        return AwaitOutcome::default();
+    }
+    let mut pending: Vec<(String, tokio::task::JoinHandle<()>)> = handles
+        .into_iter()
+        .map(|(issue, handle)| (format!("orchestrator-actor:{issue}"), handle))
+        .collect();
+    let mut outcome = AwaitOutcome::default();
+    let sleep = tokio::time::sleep(window);
+    tokio::pin!(sleep);
+
+    loop {
+        if pending.is_empty() {
+            return outcome;
+        }
+        let next_done = async {
+            use std::future::poll_fn;
+            use std::pin::Pin;
+            use std::task::Poll;
+            poll_fn(|cx| {
+                for (idx, (_, handle)) in pending.iter_mut().enumerate() {
+                    if let Poll::Ready(result) = Pin::new(handle).poll(cx) {
+                        return Poll::Ready((result, idx));
+                    }
+                }
+                Poll::Pending
+            })
+            .await
+        };
+        tokio::select! {
+            (join_result, idx) = next_done => {
+                let (tag, _handle) = pending.remove(idx);
+                match join_result {
+                    Ok(()) => outcome.completed.push(tag),
+                    Err(join_err) => {
+                        warn!(
+                            target: "runtime.shutdown",
+                            worker = %tag,
+                            error = %join_err,
+                            "orchestrator actor join error"
+                        );
+                        outcome.completed.push(tag);
+                    }
+                }
+            }
+            _ = &mut sleep => {
+                for (tag, handle) in pending.drain(..) {
+                    warn!(
+                        target: "runtime.shutdown",
+                        worker = %tag,
+                        "orchestrator actor exceeded shutdown window; aborting"
+                    );
+                    handle.abort();
+                    outcome.timed_out.push(tag);
+                }
+                return outcome;
+            }
+        }
+    }
+}
+
+/// Sub-window for tracker-side wind-down (phase 1 of the phased shutdown).
+/// The tracker poller, webhook server, and admission pipe must all stop
+/// accepting new events before the orchestrator actor map is torn down,
+/// per design.md "Daemon bootstrap" step 12. The remainder of
+/// [`SHUTDOWN_WINDOW`] is reserved for awaiting the actor map (phase 2).
+const TRACKER_SHUTDOWN_SUB_WINDOW: Duration = Duration::from_secs(5);
+
+/// Step 12: serve the webhook router and await shutdown.
+///
+/// Phased wind-down inside [`SHUTDOWN_WINDOW`]:
+///
+/// 1. **Stop accepting new events.** Wait for the shutdown signal, then
+///    await the webhook server, the linear poller, and the admission pipe
+///    within [`TRACKER_SHUTDOWN_SUB_WINDOW`] so the orchestrator inbox no
+///    longer receives admissions before any actor begins teardown.
+/// 2. **Drain the orchestrator actor map.** Drop the [`OrchestratorInbox`]
+///    so no future message can be routed in, then call
+///    [`Orchestrator::drain_actors`] which drops every per-actor `Sender`.
+///    Each actor's `rx.recv()` returns `None` and the actor's loop tail
+///    closes the held orchestrator session at the engine seam (stdin close
+///    → SIGTERM → bounded wait per the adapter's grace window).
+/// 3. **Aggregate timeouts.** A warn-severity log entry surfaces any
+///    workers (tracker-side or actor-side) that exceeded the window so the
+///    operator log names exactly which subsystem failed to drain.
 async fn serve(bootstrap: Bootstrapped) -> Result<(), RuntimeError> {
     let Bootstrapped {
         shutdown_signal,
@@ -1096,6 +1196,7 @@ async fn serve(bootstrap: Bootstrapped) -> Result<(), RuntimeError> {
         judge,
         inbox,
         dedup,
+        orchestrator,
         ..
     } = bootstrap;
 
@@ -1122,7 +1223,7 @@ async fn serve(bootstrap: Bootstrapped) -> Result<(), RuntimeError> {
         issue_rx,
         judge,
         dedup,
-        inbox,
+        inbox.clone(),
         shutdown_signal.clone(),
     ));
     let TrackerHandle {
@@ -1132,19 +1233,45 @@ async fn serve(bootstrap: Bootstrapped) -> Result<(), RuntimeError> {
 
     shutdown_signal.wait().await;
 
-    let outcome = await_workers_with_window(
+    let shutdown_started = std::time::Instant::now();
+
+    // ---- Phase 1: tracker + webhook + admission pipe stop accepting new
+    // events. Bounded by `TRACKER_SHUTDOWN_SUB_WINDOW` so the orchestrator
+    // actor map gets the bulk of `SHUTDOWN_WINDOW` for engine-seam shutdown.
+    let phase1 = await_workers_with_window(
         [
             ("webhook-server".to_owned(), join_to_unit(server_handle)),
             ("admission-pipe".to_owned(), join_to_unit(admission_handle)),
             ("linear-poller".to_owned(), join_to_unit(poller_join)),
         ],
-        SHUTDOWN_WINDOW,
+        TRACKER_SHUTDOWN_SUB_WINDOW,
     )
     .await;
-    if !outcome.timed_out.is_empty() {
+
+    // ---- Phase 2: drop the OrchestratorInbox + drain per-issue actors.
+    // Dropping `inbox` releases the runtime's `Arc<Orchestrator>` clone the
+    // admission pipe / recovery seed hold, but the actor map still owns
+    // each actor's `Sender`. `drain_actors` removes every entry from the
+    // map and returns the join handles; each dropped `Sender` closes the
+    // actor's receive side, so the actor's loop tail runs the engine-seam
+    // teardown (stdin close + SIGTERM via the adapter's grace).
+    drop(inbox);
+    let actor_handles = orchestrator.drain_actors();
+    let elapsed_phase1 = shutdown_started.elapsed();
+    let phase2_window = SHUTDOWN_WINDOW
+        .checked_sub(elapsed_phase1)
+        .unwrap_or_else(|| Duration::from_secs(0));
+
+    let phase2 = await_actor_handles_with_window(actor_handles, phase2_window).await;
+
+    // ---- Phase 3: aggregate + warn on timeouts.
+    let mut combined_timed_out = phase1.timed_out;
+    combined_timed_out.extend(phase2.timed_out);
+    if !combined_timed_out.is_empty() {
         warn!(
-            target: "runtime.shutdown",
-            timed_out = ?outcome.timed_out,
+            target: "runtime.shutdown.timed_out",
+            timed_out = ?combined_timed_out,
+            window_secs = SHUTDOWN_WINDOW.as_secs(),
             "wind-down exceeded SHUTDOWN_WINDOW"
         );
     }
@@ -1344,6 +1471,7 @@ pub mod testing {
     };
     use crate::orchestrator::core::ActorMessage;
     use crate::orchestrator::tracker_bridge::{DedupIndex, ObserveOutcome};
+    use crate::shutdown::AwaitOutcome;
 
     /// Caller-supplied seams for [`compose_for_test`]. Tests inject
     /// recording stubs (see `tests/common/mod.rs`) under each `Arc<dyn ...>`
@@ -1676,6 +1804,28 @@ pub mod testing {
         sink: &RecordingInbox,
     ) -> ObserveOutcome {
         route_observation(issue, judge, dedup, sink).await
+    }
+
+    // -----------------------------------------------------------------------
+    // Phased-shutdown test seam (Task 10.1.6)
+    // -----------------------------------------------------------------------
+
+    /// Drive phase 2 of the daemon's phased shutdown in isolation: drop the
+    /// supplied `OrchestratorInbox` so no admission pipe / recovery sink can
+    /// route a fresh message in, then call `Orchestrator::drain_actors` and
+    /// await each per-issue actor's `JoinHandle` within `window` via the
+    /// production `await_workers_with_window`. Mirrors the production
+    /// `serve()` phase-2 ordering so integration tests exercise the same
+    /// teardown shape — drop inbox, drain map, await within window — without
+    /// standing up the webhook server / poller / admission pipe.
+    pub async fn drain_actors_with_window_for_test(
+        orchestrator: Arc<Orchestrator>,
+        inbox: OrchestratorInbox,
+        window: Duration,
+    ) -> AwaitOutcome {
+        drop(inbox);
+        let handles = orchestrator.drain_actors();
+        super::await_actor_handles_with_window(handles, window).await
     }
 }
 

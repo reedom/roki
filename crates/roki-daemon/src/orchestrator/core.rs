@@ -323,6 +323,25 @@ impl Orchestrator {
             let _ = handle.await;
         }
     }
+
+    /// Drop every actor inbox and return the join handles so the runtime
+    /// can await them within a bounded window. After this call, no new
+    /// admissions can be sent — `Orchestrator::send` will spawn a new actor
+    /// for any subsequent message because the actor's `inbox` is gone from
+    /// the map. Dropping `ctx.inbox` (the mpsc Sender) closes the channel
+    /// for actors currently parked at `rx.recv().await`; those actors fall
+    /// through the loop tail which closes the held orchestrator session at
+    /// the engine seam (stdin close → SIGTERM → bounded wait per the
+    /// adapter). Actors blocked deeper in the action / phase pipelines are
+    /// awaited by the caller within `await_workers_with_window`'s budget;
+    /// timeouts force-abort the JoinHandle.
+    pub fn drain_actors(&self) -> Vec<(IssueId, JoinHandle<()>)> {
+        let mut guard = self.actors.lock().expect("actors mutex poisoned");
+        guard
+            .drain()
+            .map(|(issue, ctx)| (issue, ctx.join))
+            .collect()
+    }
 }
 
 fn spawn_actor(issue: IssueId, deps: OrchestratorDeps) -> ActorContext {
@@ -397,6 +416,17 @@ async fn actor_loop(
     // Drain any remaining inbox messages so producers don't block on send;
     // the actor is no longer authoritative once it exits.
     while rx.try_recv().is_ok() {}
+
+    // Daemon-shutdown teardown path: when the runtime drops the actor's
+    // inbox (`Orchestrator::drain_actors`), `rx.recv()` returns None and we
+    // fall through here. If a session is still held (the actor parked at
+    // its inbox between turns) close it through the engine seam so stdin
+    // closes + the session adapter SIGTERMs the in-flight orchestrator
+    // child within the per-subprocess shutdown grace. Without this, the
+    // wind-down would only drop the handle and leak the IO tasks.
+    if let Some(session) = state.session.take() {
+        session.shutdown(Some(Duration::from_secs(5))).await;
+    }
 }
 
 /// Returns `true` iff the actor should exit after handling this message.

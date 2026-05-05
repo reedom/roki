@@ -46,6 +46,7 @@ Attached to every event via spans.
 | Retry attempt | Retry with attempt counter (ticket-level, between `phase_nonclean → run_phase` cycles the orchestrator drives) | [07-worker-execution](../fr/07-worker-execution.md) | roki-mvp Req 5.10, Req 11.1 |
 | State-machine transition | Per-issue state transition (prev / next / trigger source / `Inactive.reason` when transitioning to `Inactive`); `reason` may be any of the discriminator values including the three orchestrator-dead values `orchestrator_crash`, `orchestrator_unparseable`, `orchestrator_budget_exhausted` | [04-state-machine-and-recovery](../fr/04-state-machine-and-recovery.md) | roki-mvp Req 8.1, Req 8.2, Req 11.1, Req 12.3 |
 | Subprocess stderr line | One stderr line of orchestrator / phase / sweep subprocess = one warn event tagged with the subprocess role and (for phases) the phase name | [13-observability-logs](../fr/13-observability-logs.md) | roki-mvp Req 11.5 |
+| Shutdown window exceeded | Warn-severity event on daemon wind-down when one or more workers (`webhook-server`, `linear-poller`, `admission-pipe`, or any `orchestrator-actor:<issue>`) failed to drain inside `SHUTDOWN_WINDOW`; carries the offending tag list and the configured window so the operator can correlate hung subsystems with the bounded shutdown contract | [01-daemon-lifecycle](../fr/01-daemon-lifecycle.md) | roki-mvp Req 1.4, Req 11.1 |
 
 ## Events emitted by orchestrator-driven artifact validation
 
