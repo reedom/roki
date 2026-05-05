@@ -190,6 +190,10 @@ pub struct StubEngine {
     pub shutdown_calls: Arc<AsyncMutex<u32>>,
     pub launch_count: AsyncMutex<u32>,
     pub launch_modes: AsyncMutex<Vec<Mode>>,
+    /// Captures the rendered system prompt passed to each `launch` call so
+    /// tests can assert prompt content (e.g. recovery rendering the
+    /// recomputed `mode` per Req 8.5 / 10.2).
+    pub launch_prompts: AsyncMutex<Vec<String>>,
     pub fail_deliver: Arc<AsyncMutex<bool>>,
     /// When set, the next launch returns this error and decrements no
     /// streams from the queue.
@@ -204,6 +208,7 @@ impl StubEngine {
             shutdown_calls: Arc::new(AsyncMutex::new(0)),
             launch_count: AsyncMutex::new(0),
             launch_modes: AsyncMutex::new(Vec::new()),
+            launch_prompts: AsyncMutex::new(Vec::new()),
             fail_deliver: Arc::new(AsyncMutex::new(false)),
             launch_error: AsyncMutex::new(None),
         })
@@ -223,13 +228,14 @@ impl OrchestratorEngine for StubEngine {
         &self,
         _issue: &IssueId,
         mode: Mode,
-        _system_prompt: String,
+        system_prompt: String,
     ) -> Result<Box<dyn OrchestratorSessionLike>, EngineError> {
         if let Some(err) = self.launch_error.lock().await.take() {
             return Err(err);
         }
         *self.launch_count.lock().await += 1;
         self.launch_modes.lock().await.push(mode);
+        self.launch_prompts.lock().await.push(system_prompt);
         let actions = self
             .launch_streams
             .lock()

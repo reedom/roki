@@ -168,6 +168,22 @@ async fn recovery_resumes_active_issue_with_recomputed_mode_and_records_orphans(
     assert_eq!(modes.as_slice(), &[Mode::SpecDriven]);
     drop(modes);
 
+    // Req 8.5 / 10.2: the fresh orchestrator's RENDERED system prompt must
+    // carry the recomputed mode so the orchestrator session observes the
+    // post-restart Linear label set rather than any pre-restart residue.
+    let prompts = h.engine.launch_prompts.lock().await;
+    assert_eq!(prompts.len(), 1, "exactly one fresh orchestrator launch");
+    let rendered = &prompts[0];
+    assert!(
+        rendered.contains("SpecDriven"),
+        "rendered prompt must surface recomputed mode SpecDriven, got: {rendered}",
+    );
+    assert!(
+        rendered.contains("ENG-1"),
+        "rendered prompt must reference the resumed issue, got: {rendered}",
+    );
+    drop(prompts);
+
     // Orphan path (ENG-2): the orchestrator-driver layer enqueues
     // EscalationKind::Orphan for any DiscoveredIssue whose decide() yields
     // OrphanedWorktree / OrphanedSession. We model that surface here by

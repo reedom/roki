@@ -760,7 +760,7 @@ refs:
   - _Requirements: 4.5_
   - _Boundary: runtime_
 
-- [ ] 13.12 (P) Write e2e_recovery test
+- [x] 13.12 (P) Write e2e_recovery test
   - Kill the daemon mid-phase (orchestrator + phase both alive); restart; assert the recovery scan reconciles sessions + worktrees + Linear; the resume-active issue gets a fresh orchestrator with `mode` recomputed from the current Linear label set; orphan paths surface via the escalation queue.
   - Observable completion: `cargo test e2e_recovery` passes; no in-flight orchestrator is persisted across restart; the fresh orchestrator's rendered prompt contains the recomputed `mode`.
   - _Depends: 10.1, 9.2_
