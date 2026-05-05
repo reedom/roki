@@ -8,20 +8,32 @@
 //!   verbatim (Req 1.1, 1.2, 1.3, 1.4, 7.1).
 //! - **(c)** the Linear API token + webhook secret resolve from the
 //!   injected env reader and never appear in any structured log produced
-//!   during bootstrap (Req 11.6, 11.7).
+//!   during bootstrap (Req 11.6, 11.7). Two-tier coverage:
+//!     1. The refusal message itself never echoes verbatim secret values.
+//!     2. The `traced_test` log capture during the bootstrap path never
+//!        contains verbatim secret values either (positive control over
+//!        the redaction layer wired by `init_logging_with_redaction`).
 //! - **(e)** the legacy `[judge].model` config key is refused at startup
 //!   with the offending key named (Req 2.12).
 //!
-//! Sub-assertions deferred (and tracked under `CONCERNS` in the section-13
+//! Sub-assertions deferred (and tracked under `BLOCKER` in the section-13
 //! status report):
 //!
-//! - **(a)** "composition order completes": the bootstrap runs through the
-//!   bind step, but the orchestrator + tracker poller + recovery scan
-//!   pipelines are not yet composed by `runtime::run_with_shutdown` — once
-//!   that lands, replace the bind+wind-down assertion with a webhook POST
-//!   driving the orchestrator inbox.
-//! - **(d)** `--debug` per-issue debug sink: relies on the orchestrator
-//!   adapter being instantiated by the runtime; deferred with (a).
+//! - **(a)** "composition order completes": exercising
+//!   `runtime::run_with_env` end-to-end through the bind step + shutdown
+//!   wind-down requires (i) a configurable `[linear].endpoint` so the
+//!   `viewer()` call can be pointed at a wiremock — currently hardcoded to
+//!   `DEFAULT_LINEAR_ENDPOINT`; (ii) a test-only seam exposing the
+//!   `ShutdownTrigger` so the test can wind the daemon down without
+//!   sending SIGINT to the test harness process. Neither lands as part of
+//!   tasks 10.1.1-10.1.6; surfaced as BLOCKER on this task.
+//! - **(d)** `--debug` per-issue debug sink: production
+//!   `OrchestratorEngineImpl::launch` and `PhaseSubprocessAdapter::launch`
+//!   currently hardcode `debug_sink: None`. The runtime never builds a
+//!   `DebugSinkFactory` from `RunArgs.debug` / `[debug].dir` and never
+//!   threads one into the engine adapters. Wiring the factory through
+//!   the engine boundary is the prerequisite; surfaced as BLOCKER on this
+//!   task.
 //!
 //! Spec refs: requirements.md 1.1, 1.2, 1.3, 1.4, 2.12, 7.1, 11.6, 11.7.
 
@@ -30,6 +42,10 @@ use std::path::PathBuf;
 use roki_daemon::cli::RunArgs;
 use roki_daemon::config::StaticEnv;
 use roki_daemon::runtime::{self, RuntimeError};
+use tracing_test::traced_test;
+
+const E2E_API_TOKEN: &str = "lin_api_token_for_e2e_bootstrap";
+const E2E_WEBHOOK_SECRET: &str = "webhook_secret_for_e2e_bootstrap";
 
 fn args_with_config(path: PathBuf) -> RunArgs {
     RunArgs {
@@ -74,8 +90,8 @@ strategy = "settings-allowlist"
 
 fn env_with_secrets() -> StaticEnv {
     StaticEnv::new()
-        .set("LINEAR_API_TOKEN", "lin_api_token_for_e2e_bootstrap")
-        .set("LINEAR_WEBHOOK_SECRET", "webhook_secret_for_e2e_bootstrap")
+        .set("LINEAR_API_TOKEN", E2E_API_TOKEN)
+        .set("LINEAR_WEBHOOK_SECRET", E2E_WEBHOOK_SECRET)
 }
 
 /// (b) When a required external binary (`wt` / `ghq` / `claude`) is missing,
@@ -166,14 +182,59 @@ async fn secrets_resolve_via_env_reader_and_never_appear_in_refusal() {
     if let Err(err) = result {
         let msg = err.to_string();
         assert!(
-            !msg.contains("lin_api_token_for_e2e_bootstrap"),
+            !msg.contains(E2E_API_TOKEN),
             "Linear API token leaked into refusal: {msg}",
         );
         assert!(
-            !msg.contains("webhook_secret_for_e2e_bootstrap"),
+            !msg.contains(E2E_WEBHOOK_SECRET),
             "Linear webhook secret leaked into refusal: {msg}",
         );
     }
+}
+
+/// (c) positive control: secrets registered with the redaction layer at
+/// bootstrap step 3 must NOT appear verbatim in any captured log line
+/// emitted during the bootstrap — even when the daemon's own log events
+/// fire during the in-progress composition. We let the bootstrap run
+/// through to whichever refusal surfaces first (PATH-missing-binary on a
+/// typical CI runner, or `viewer()` failure when all three tools are
+/// installed) and then scan every captured log line for verbatim secret
+/// occurrences.
+///
+/// `tracing-test::traced_test` installs a per-test tracing subscriber
+/// before the bootstrap runs; the runtime's `init_logging_with_redaction`
+/// then encounters `LoggingError::AlreadyInstalled` and returns the
+/// sentinel guard, leaving the per-test subscriber active. This means the
+/// captured output is pre-redaction — the assertion is therefore that the
+/// daemon **never log-emits secret values verbatim** in the first place,
+/// independent of the production redaction writer.
+#[tokio::test]
+#[traced_test]
+async fn bootstrap_log_capture_never_contains_verbatim_secrets() {
+    let env = env_with_secrets();
+    let dir = tempfile::tempdir().unwrap();
+    let toml = write_minimal_config(dir.path());
+    let args = args_with_config(toml);
+    // We do not assert on the result — the bootstrap may succeed up to a
+    // PATH refusal or a `viewer()` failure depending on host environment.
+    // The contract under test is the log-capture invariant, not the exit
+    // path.
+    let _ = runtime::run_with_env(args, &env).await;
+
+    // `tracing-test`'s `logs_contain` is the documented check for "was
+    // this substring observed in any captured log event". We invert the
+    // check: asserting `false` for both secret values guarantees that no
+    // bootstrap-emitted log entry surfaced either verbatim secret. If the
+    // production code ever logs the resolved token at debug severity (a
+    // common refactor footgun), this test fails loudly.
+    assert!(
+        !logs_contain(E2E_API_TOKEN),
+        "Linear API token leaked into a captured log event"
+    );
+    assert!(
+        !logs_contain(E2E_WEBHOOK_SECRET),
+        "Linear webhook secret leaked into a captured log event"
+    );
 }
 
 /// (e) Legacy `[judge].model` config key is refused at startup; the
