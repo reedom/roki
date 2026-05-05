@@ -76,6 +76,13 @@ pub enum ConfigError {
     PollCadenceTooLow { value: u64, minimum: u64 },
 
     #[error(
+        "`[linear].endpoint = \"{value}\"` is not a valid Linear GraphQL endpoint URL: \
+         {reason} — omit the key for the documented default \
+         (`https://api.linear.app/graphql`) or set an explicit `http(s)://` URL"
+    )]
+    InvalidLinearEndpoint { value: String, reason: String },
+
+    #[error(
         "duplicate `[[repos]].ghq = \"{ghq}\"` declared at entries #{first} and #{second}; \
          remove one"
     )]
@@ -231,6 +238,14 @@ pub struct LinearConfig {
     /// cap from Req 3.3 / design.md "Daemon bootstrap" step 9). The loader
     /// refuses values below [`MIN_POLL_CADENCE_SECONDS`].
     pub poll_cadence_seconds: u64,
+    /// Linear GraphQL endpoint URL the production `bootstrap` composes
+    /// `LinearClient` against. Defaults to
+    /// [`crate::tracker::linear::DEFAULT_LINEAR_ENDPOINT`]. Validated as a
+    /// non-empty `http://` or `https://` URL at config load so the operator
+    /// gets one log line naming the offending key rather than a tracker
+    /// startup failure. Tests redirect production bootstrap at a wiremock
+    /// by setting this slot.
+    pub endpoint: String,
 }
 
 /// Default workspace-level polling cadence floor (5 minutes), per Req 3.3.
@@ -317,6 +332,8 @@ struct RawLinear {
     admit_states: Option<Vec<String>>,
     #[serde(default)]
     poll_cadence_seconds: Option<u64>,
+    #[serde(default)]
+    endpoint: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -419,6 +436,26 @@ impl Config {
             return Err(ConfigError::EmptyAdmitStates);
         }
 
+        let endpoint = match raw_linear.endpoint {
+            Some(value) => {
+                let trimmed = value.trim();
+                if trimmed.is_empty() {
+                    return Err(ConfigError::InvalidLinearEndpoint {
+                        value,
+                        reason: "value is empty".to_owned(),
+                    });
+                }
+                if !(trimmed.starts_with("http://") || trimmed.starts_with("https://")) {
+                    return Err(ConfigError::InvalidLinearEndpoint {
+                        value,
+                        reason: "must start with `http://` or `https://`".to_owned(),
+                    });
+                }
+                trimmed.to_owned()
+            }
+            None => crate::tracker::linear::DEFAULT_LINEAR_ENDPOINT.to_owned(),
+        };
+
         let poll_cadence_seconds = match raw_linear.poll_cadence_seconds {
             Some(value) if value < MIN_POLL_CADENCE_SECONDS => {
                 return Err(ConfigError::PollCadenceTooLow {
@@ -445,6 +482,7 @@ impl Config {
                 assignee,
                 admit_states,
                 poll_cadence_seconds,
+                endpoint,
             },
             workflow: WorkflowConfig {
                 path: raw_workflow.path,
@@ -1030,6 +1068,100 @@ strategy = "dangerously-skip"
         fs::write(&toml_path, minimal_toml(&workflow)).unwrap();
         let cfg = Config::load_from_path(&toml_path).expect("load_from_path must succeed");
         assert!(matches!(cfg.linear.assignee, AssigneeSpec::Me));
+    }
+
+    #[test]
+    fn defaults_linear_endpoint_to_documented_default_when_omitted() {
+        let dir = TempDir::new().unwrap();
+        let workflow = write_workflow(&dir);
+        let cfg = Config::load_from_str(&minimal_toml(&workflow)).unwrap();
+        assert_eq!(
+            cfg.linear.endpoint,
+            crate::tracker::linear::DEFAULT_LINEAR_ENDPOINT
+        );
+    }
+
+    #[test]
+    fn accepts_explicit_linear_endpoint() {
+        let dir = TempDir::new().unwrap();
+        let workflow = write_workflow(&dir);
+        let body = format!(
+            r#"
+[linear]
+api_token = {{ env = "X" }}
+webhook_secret = {{ env = "Y" }}
+assignee = "me"
+endpoint = "https://eu.api.linear.app/graphql"
+
+[workflow]
+path = "{}"
+
+[permissions]
+strategy = "settings-allowlist"
+"#,
+            workflow.display()
+        );
+        let cfg = Config::load_from_str(&body).unwrap();
+        assert_eq!(cfg.linear.endpoint, "https://eu.api.linear.app/graphql");
+    }
+
+    #[test]
+    fn refuses_empty_linear_endpoint() {
+        let dir = TempDir::new().unwrap();
+        let workflow = write_workflow(&dir);
+        let body = format!(
+            r#"
+[linear]
+api_token = {{ env = "X" }}
+webhook_secret = {{ env = "Y" }}
+assignee = "me"
+endpoint = ""
+
+[workflow]
+path = "{}"
+
+[permissions]
+strategy = "settings-allowlist"
+"#,
+            workflow.display()
+        );
+        let err = Config::load_from_str(&body).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            matches!(err, ConfigError::InvalidLinearEndpoint { .. }),
+            "expected InvalidLinearEndpoint, got {msg}"
+        );
+        assert!(msg.contains("[linear].endpoint"), "{msg}");
+    }
+
+    #[test]
+    fn refuses_non_url_linear_endpoint() {
+        let dir = TempDir::new().unwrap();
+        let workflow = write_workflow(&dir);
+        let body = format!(
+            r#"
+[linear]
+api_token = {{ env = "X" }}
+webhook_secret = {{ env = "Y" }}
+assignee = "me"
+endpoint = "not-a-url"
+
+[workflow]
+path = "{}"
+
+[permissions]
+strategy = "settings-allowlist"
+"#,
+            workflow.display()
+        );
+        let err = Config::load_from_str(&body).unwrap_err();
+        match err {
+            ConfigError::InvalidLinearEndpoint { value, reason } => {
+                assert_eq!(value, "not-a-url");
+                assert!(reason.contains("http://") && reason.contains("https://"));
+            }
+            other => panic!("expected InvalidLinearEndpoint, got {other:?}"),
+        }
     }
 
     #[test]

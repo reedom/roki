@@ -529,7 +529,7 @@ refs:
   - _Requirements: 1.1, 2.5_
   - _Boundary: runtime_
 
-- [ ] 10.4 Add configurable Linear endpoint (config slot or test seam)
+- [x] 10.4 Add configurable Linear endpoint (config slot or test seam)
   - `runtime::bootstrap` currently hardcodes `LinearClient::new(DEFAULT_LINEAR_ENDPOINT, api_token)`. Add EITHER (a) a `[linear].endpoint` config slot (default `DEFAULT_LINEAR_ENDPOINT`, validated as a non-empty URL) consumed by `bootstrap`, OR (b) a `runtime::testing` seam that injects a pre-built `Arc<LinearClient>` into the production composition path so e2e tests can redirect `viewer()` and `list_issues()` against a wiremock without modifying production paths.
   - Pick one approach (the config slot is the more durable choice; the test seam is the lower-cost choice). Document the rationale in the commit message.
   - Update `docs/reference/config.md` if the config-slot path is chosen.

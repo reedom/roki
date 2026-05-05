@@ -70,9 +70,7 @@ use crate::shutdown::{
     self, AwaitOutcome, SHUTDOWN_WINDOW, ShutdownSignal, await_workers_with_window,
     install_signal_handlers,
 };
-use crate::tracker::linear::{
-    DEFAULT_LINEAR_ENDPOINT, LinearClient, LinearError, LinearPoller,
-};
+use crate::tracker::linear::{LinearClient, LinearError, LinearPoller};
 use crate::tracker::model::{LinearStateName, LinearUserId, NormalizedIssue};
 use crate::tracker::pre_admission::PreAdmissionJudge;
 use crate::tracker::refresh::{LinearTrackerHandle, TrackerRefresh};
@@ -376,10 +374,13 @@ async fn bootstrap(args: RunArgs, env: &dyn EnvReader) -> Result<Bootstrapped, R
 
     // ---- Step 8 (continued): build the read-only Linear client + resolved
     // viewer + pre-admission judge that recovery (and 10.1.4 poller) share.
-    // The endpoint is the documented default; future config-overrideable
-    // endpoints land alongside the `[linear].endpoint` slot.
+    // Endpoint comes from the validated `[linear].endpoint` slot (defaulted
+    // to `DEFAULT_LINEAR_ENDPOINT` at config load); the slot exists so
+    // operators can target Linear's EU endpoint or a self-hosted GraphQL
+    // proxy, and so e2e tests can redirect production bootstrap at a
+    // wiremock without modifying this composition path.
     let linear_client = Arc::new(LinearClient::new(
-        DEFAULT_LINEAR_ENDPOINT.to_owned(),
+        config.linear.endpoint.clone(),
         api_token.clone(),
     ));
     let viewer = match &config.linear.assignee {
