@@ -57,6 +57,21 @@ fn main() {
             drain_stdin(&mut reader);
             emit_stream_result("success");
         }
+        "phase_success_capture_stdin" => {
+            // Like `phase_success`, but captures the full stdin (including
+            // the system-prompt envelope first line we already read above)
+            // verbatim into `<cwd>/.fake_claude_stdin_capture` so tests can
+            // assert the rendered template body — including
+            // `additional_context` — actually reached the subprocess.
+            // Gated on this dedicated mode to keep the existing
+            // `phase_success` callers unaffected.
+            let mut sink = Vec::new();
+            let _ = reader.read_to_end(&mut sink);
+            let mut combined = first_line.clone().into_bytes();
+            combined.extend_from_slice(&sink);
+            let _ = std::fs::write(".fake_claude_stdin_capture", &combined);
+            emit_stream_result("success");
+        }
         "phase_error_max_turns" => {
             drain_stdin(&mut reader);
             emit_stream_result("error_max_turns");

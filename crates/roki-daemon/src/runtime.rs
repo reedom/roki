@@ -46,7 +46,7 @@ use crate::engine::claude::{ClaudeBinary, ClaudeError};
 use crate::engine::orchestrator_session::adapter::OrchestratorSessionAdapter;
 use crate::engine::orchestrator_session::engine_impl::OrchestratorEngineImpl;
 use crate::engine::phase_subprocess::adapter::PhaseSubprocessAdapter;
-use crate::engine::phase_subprocess::engine_impl::PendingPhaseEngine;
+use crate::engine::phase_subprocess::engine_impl::PhaseSubprocessEngineImpl;
 use crate::exec::ghq::{GhqTool, RealGhq};
 use crate::exec::wt::{RealWt, WtTool};
 use crate::orchestrator::core::{
@@ -399,10 +399,10 @@ async fn bootstrap(
     })?;
 
     // ---- Step 8 (continued): compose the orchestrator actor map around
-    // the assembled `RuntimeComponents`. The phase pipeline is wired by
-    // 10.1.5; until then `PendingPhaseEngine` refuses every `run_phase` so
-    // a misrouted phase nomination surfaces a structured error rather than
-    // a silent miswiring.
+    // the assembled `RuntimeComponents`. The phase pipeline is wired
+    // through `PhaseSubprocessEngineImpl` so each `run_phase` action
+    // reaches the bounded `PhaseSubprocessAdapter::spawn` plus the
+    // documented exit translation.
     let orchestrator_seams = ProductionOrchestratorSeams::from_components(&components);
     let composition = compose_orchestrator(orchestrator_seams);
 
@@ -602,14 +602,17 @@ impl ProductionOrchestratorSeams {
                 components.debug_sink_factory.clone(),
             ));
 
-        // Phase pipeline placeholder: see `PendingPhaseEngine` doc-comment.
-        // The adapter handle is retained on `RuntimeComponents` so 10.1.5
-        // can wire the production phase pipeline without re-resolving the
-        // claude binary. The factory is forwarded so the placeholder's
-        // 10.1.5 successor can route per-issue debug capture without
-        // re-walking `RuntimeComponents`.
-        let phase_engine: Arc<dyn PhaseEngine> =
-            Arc::new(PendingPhaseEngine::new(components.debug_sink_factory.clone()));
+        // Production phase pipeline: `PhaseSubprocessEngineImpl` composes
+        // the bounded `PhaseSubprocessAdapter` with the documented exit
+        // translation, threading the workflow policy + permission resolver
+        // captured in `RuntimeComponents` and the optional per-issue
+        // debug-sink factory (Req 11.6 / 11.7) into every spawn.
+        let phase_engine: Arc<dyn PhaseEngine> = Arc::new(PhaseSubprocessEngineImpl::new(
+            components.phase_subprocess_adapter.clone(),
+            components.workflow_policy.clone(),
+            (*components.permission_resolver).clone(),
+            components.debug_sink_factory.clone(),
+        ));
 
         let worktree: Arc<dyn WorktreeOps> = components.worktree_manager.clone();
         let session_dirs: Arc<dyn SessionDirOps> = components.session_manager.clone();
@@ -1946,6 +1949,21 @@ pub mod testing {
         /// onto `RuntimeComponents`.
         pub fn has_debug_sink_factory(&self) -> bool {
             self.inner.components.debug_sink_factory.is_some()
+        }
+
+        /// Test-only accessor: did bootstrap wire the production
+        /// [`crate::engine::phase_subprocess::engine_impl::PhaseSubprocessEngineImpl`]
+        /// into the orchestrator actor map (as opposed to the placeholder
+        /// that previously refused every `run_phase` call)?
+        ///
+        /// The accessor inspects the strong count of the
+        /// `phase_subprocess_adapter` Arc held on `RuntimeComponents`: when
+        /// the production composition path runs, the engine impl clones the
+        /// adapter into its own slot, lifting the count to >= 2. The
+        /// previous placeholder did not retain the adapter, so an
+        /// integration test can use this signal to assert the real wiring.
+        pub fn has_real_phase_engine(&self) -> bool {
+            std::sync::Arc::strong_count(&self.inner.components.phase_subprocess_adapter) >= 2
         }
     }
 

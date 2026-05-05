@@ -286,6 +286,7 @@ impl PhaseEngine for StubPhaseEngine {
         mode: Mode,
         worktree_path: Option<PathBuf>,
         additional_context: Option<String>,
+        _session_tempdir: PathBuf,
     ) -> Result<PhaseRunOutcome, EngineError> {
         self.invocations.lock().await.push(PhaseInvocation {
             phase,

@@ -555,7 +555,7 @@ refs:
   - _Requirements: 1.5, 11.2, 11.3, 11.4, 11.6, 11.7_
   - _Boundary: runtime, engine/orchestrator_session, engine/phase_subprocess (debug-sink threading only; no behavior change to subprocess launch otherwise)_
 
-- [ ] 10.7 Wire real PhaseSubprocessAdapter as PhaseEngine + mid-phase SIGTERM
+- [x] 10.7 Wire real PhaseSubprocessAdapter as PhaseEngine + mid-phase SIGTERM
   - Replace `Arc::new(PendingPhaseEngine::new(...))` at `crates/roki-daemon/src/runtime.rs:611` with the real `PhaseSubprocessAdapter` (already constructed and held on `RuntimeComponents.phase_subprocess_adapter`). Add a `PhaseEngine` impl on the adapter (or a thin `PhaseSubprocessEngineImpl` adapter analogous to `OrchestratorEngineImpl`) so orchestrator core's `phase_engine.run_phase(...)` reaches real subprocess launch.
   - On the spawned `tokio::process::Child` for phase subprocesses (`engine/claude.rs::ClaudeSpawn::spawn` or wherever the phase Child is built), set `kill_on_drop(true)` AND/OR implement `Drop` on the phase handle that issues SIGTERM via `Child::start_kill` before returning. This closes the mid-phase abort SIGTERM gap recorded in Implementation Notes.
   - Wire the `DebugSinkFactory` from 10.6 through the new engine impl into the phase Child's stdout/stderr pumps (the orchestrator-session adapter already does this; mirror that wiring).

@@ -212,7 +212,15 @@ impl ClaudeSpawn {
         command
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
+            .stderr(Stdio::piped())
+            // SIGKILL the spawned child if its handle is dropped without an
+            // explicit wait. Closes the mid-phase abort gap (Req 1.4): when
+            // the per-issue actor task is aborted while a phase / orchestrator
+            // session is in flight, the dropped `Child` SIGKILLs the
+            // subprocess instead of leaking it past daemon shutdown. The
+            // documented graceful shutdown path still SIGTERMs first via
+            // `Child::start_kill` + bounded wait.
+            .kill_on_drop(true);
 
         let mut child = command
             .spawn()

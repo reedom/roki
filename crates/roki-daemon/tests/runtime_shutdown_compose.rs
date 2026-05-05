@@ -154,6 +154,7 @@ impl roki_daemon::orchestrator::core::PhaseEngine for HangingPhaseEngine {
         _mode: Mode,
         _worktree_path: Option<std::path::PathBuf>,
         _additional_context: Option<String>,
+        _session_tempdir: std::path::PathBuf,
     ) -> Result<
         roki_daemon::orchestrator::core::PhaseRunOutcome,
         roki_daemon::orchestrator::core::EngineError,

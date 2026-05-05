@@ -130,6 +130,9 @@ pub enum PhaseRunOutcome {
 pub trait PhaseEngine: Send + Sync {
     /// Run one phase. `worktree_path` is `None` for `Classify`, `Some` for
     /// every other phase (the orchestrator core ensures this contract).
+    /// `session_tempdir` is the per-issue session directory the orchestrator
+    /// core ensured at admission; the engine impl threads it into the
+    /// adapter's `PhaseLaunchContext` as the spawn cwd.
     async fn run_phase(
         &self,
         issue: &IssueId,
@@ -137,6 +140,7 @@ pub trait PhaseEngine: Send + Sync {
         mode: Mode,
         worktree_path: Option<PathBuf>,
         additional_context: Option<String>,
+        session_tempdir: PathBuf,
     ) -> Result<PhaseRunOutcome, EngineError>;
 }
 
@@ -775,7 +779,21 @@ async fn run_phase_for_action(
     );
 
     // Run the phase. The phase engine returns the typed event ready for
-    // delivery to the orchestrator's stdin.
+    // delivery to the orchestrator's stdin. The session tempdir was
+    // ensured at admission (`handle_admit`); a missing slot here is a
+    // bug — refuse the phase nomination cleanly so the actor falls back
+    // to its inbox loop instead of deref-panicking on `None`.
+    let session_tempdir = match state.session_tempdir.clone() {
+        Some(path) => path,
+        None => {
+            warn!(
+                target: "orchestrator.core",
+                issue = %state.issue,
+                "phase nomination without session tempdir; refusing"
+            );
+            return true;
+        }
+    };
     let phase_outcome = deps
         .phase_engine
         .run_phase(
@@ -784,6 +802,7 @@ async fn run_phase_for_action(
             mode,
             worktree_path,
             additional_context,
+            session_tempdir,
         )
         .await;
 
@@ -1338,6 +1357,7 @@ mod tests {
             mode: Mode,
             worktree_path: Option<PathBuf>,
             _additional_context: Option<String>,
+            _session_tempdir: PathBuf,
         ) -> Result<PhaseRunOutcome, EngineError> {
             self.invocations
                 .lock()
