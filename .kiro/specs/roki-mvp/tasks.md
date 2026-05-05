@@ -728,7 +728,7 @@ refs:
   - _Requirements: 5.4, 12.3_
   - _Boundary: runtime_
 
-- [ ] 13.8 (P) Write e2e_orchestrator_budget_exhausted test
+- [x] 13.8 (P) Write e2e_orchestrator_budget_exhausted test
   - Configure `extension.orchestrator.max_phases = 2`. Drive the orchestrator stub to nominate a third phase → daemon routes to `Inactive(orchestrator_budget_exhausted)`; the additional phase is NOT spawned.
   - Observable completion: `cargo test e2e_orchestrator_budget_exhausted` passes; the assertion on the spawn primitive confirms only two phase subprocesses were created.
   - _Depends: 10.1, 6.5_
