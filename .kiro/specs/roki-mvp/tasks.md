@@ -488,7 +488,7 @@ refs:
   - _Requirements: 8.5, 10.1, 10.2, 10.3, 10.4, 10.5_
   - _Boundary: runtime_
 
-- [ ] 10.1.4 Start workspace-level LinearTracker poller
+- [x] 10.1.4 Start workspace-level LinearTracker poller
   - Construct + spawn the single workspace-level `LinearTracker` poller using the Linear read-only client, resolved `[linear].assignee`, resolved `[linear].admit_states`, and the configured cadence cap. Wire the 429 backoff state with the existing client backoff.
   - Expose a `TrackerHandle` carrying the poller's observation stream (`NormalizedIssue` events) and the `TrackerRefresh` nudge endpoint.
   - Observable completion: integration test against a wiremock Linear asserts (a) the poller emits a `NormalizedIssue` for an admit-states + assignee match within the cadence window, (b) a 429 response suspends polling for the documented backoff window, (c) `TrackerRefresh::nudge` honours throttle / backoff per Task 3.5.

@@ -146,6 +146,12 @@ impl BackoffState {
 /// Read-only Linear GraphQL client. Construction takes the endpoint and the
 /// resolved API token; the token header format follows Linear's convention
 /// (`Authorization: <token>`, not `Bearer <token>`).
+///
+/// `Clone` is mechanical: every field already implements `Clone`, and the
+/// shared `Arc<BackoffState>` means cloning preserves the single backoff
+/// curve across the workspace-level webhook + poller composition (Task
+/// 10.1.4 / design.md "Daemon bootstrap" step 9).
+#[derive(Clone)]
 pub struct LinearClient {
     http: reqwest::Client,
     endpoint: String,

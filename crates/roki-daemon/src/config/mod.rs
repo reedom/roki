@@ -69,6 +69,13 @@ pub enum ConfigError {
     EmptyAdmitStates,
 
     #[error(
+        "`[linear].poll_cadence_seconds = {value}` is below the minimum {minimum}s floor; \
+         Linear's rate limits + design.md \"Daemon bootstrap\" step 9 require a poll \
+         cadence of at least {minimum}s — omit the key for the documented 5-minute default"
+    )]
+    PollCadenceTooLow { value: u64, minimum: u64 },
+
+    #[error(
         "duplicate `[[repos]].ghq = \"{ghq}\"` declared at entries #{first} and #{second}; \
          remove one"
     )]
@@ -218,7 +225,20 @@ pub struct LinearConfig {
     pub webhook_secret: SecretSource,
     pub assignee: AssigneeSpec,
     pub admit_states: BTreeSet<String>,
+    /// Workspace-level polling cadence floor (seconds). The poller will not
+    /// issue more than one HTTP request per `poll_cadence_seconds`. Defaults
+    /// to [`DEFAULT_POLL_CADENCE_SECONDS`] (300s, the documented 5-minute
+    /// cap from Req 3.3 / design.md "Daemon bootstrap" step 9). The loader
+    /// refuses values below [`MIN_POLL_CADENCE_SECONDS`].
+    pub poll_cadence_seconds: u64,
 }
+
+/// Default workspace-level polling cadence floor (5 minutes), per Req 3.3.
+pub const DEFAULT_POLL_CADENCE_SECONDS: u64 = 300;
+
+/// Production minimum cadence floor. Tests drive the poller below this floor
+/// via the [`crate::runtime::testing`] seam, never via the config slot.
+pub const MIN_POLL_CADENCE_SECONDS: u64 = 60;
 
 /// Carries the raw operator string. `"me"` is a placeholder resolved later by
 /// runtime against the Linear viewer; the loader does not perform any lookup
@@ -295,6 +315,8 @@ struct RawLinear {
     assignee: String,
     #[serde(default)]
     admit_states: Option<Vec<String>>,
+    #[serde(default)]
+    poll_cadence_seconds: Option<u64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -397,6 +419,17 @@ impl Config {
             return Err(ConfigError::EmptyAdmitStates);
         }
 
+        let poll_cadence_seconds = match raw_linear.poll_cadence_seconds {
+            Some(value) if value < MIN_POLL_CADENCE_SECONDS => {
+                return Err(ConfigError::PollCadenceTooLow {
+                    value,
+                    minimum: MIN_POLL_CADENCE_SECONDS,
+                });
+            }
+            Some(value) => value,
+            None => DEFAULT_POLL_CADENCE_SECONDS,
+        };
+
         if let Some(dup) = repos::find_duplicate_ghq(&raw.repos) {
             return Err(ConfigError::DuplicateRepo {
                 ghq: dup.ghq,
@@ -411,6 +444,7 @@ impl Config {
                 webhook_secret: raw_linear.webhook_secret,
                 assignee,
                 admit_states,
+                poll_cadence_seconds,
             },
             workflow: WorkflowConfig {
                 path: raw_workflow.path,

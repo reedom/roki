@@ -67,9 +67,12 @@ use crate::session::SessionManager;
 use crate::shutdown::{
     self, SHUTDOWN_WINDOW, ShutdownSignal, await_workers_with_window, install_signal_handlers,
 };
-use crate::tracker::linear::{DEFAULT_LINEAR_ENDPOINT, LinearClient, LinearError};
-use crate::tracker::model::{LinearStateName, NormalizedIssue};
+use crate::tracker::linear::{
+    DEFAULT_LINEAR_ENDPOINT, LinearClient, LinearError, LinearPoller,
+};
+use crate::tracker::model::{LinearStateName, LinearUserId, NormalizedIssue};
 use crate::tracker::pre_admission::PreAdmissionJudge;
+use crate::tracker::refresh::{LinearTrackerHandle, TrackerRefresh};
 use crate::tracker::webhook::{WebhookState, router as webhook_router};
 use crate::workflow::schema::WorkflowPolicy;
 use crate::workflow::watcher::{WatcherError, load_policy};
@@ -228,6 +231,27 @@ struct Bootstrapped {
     /// 10.1.5's pre-admission funnel.
     #[allow(dead_code)]
     judge: Arc<PreAdmissionJudge>,
+    /// Workspace-level tracker handle: owns the spawned poller's join
+    /// handle and the `TrackerRefresh` nudge endpoint. Held so 10.1.5 can
+    /// share the refresh handle with the orchestrator session, 10.1.6 can
+    /// await the poller within `SHUTDOWN_WINDOW`, and observability can
+    /// clone the refresh `Arc<dyn TrackerRefresh>` without rewiring.
+    tracker_handle: TrackerHandle,
+}
+
+/// Workspace-level tracker handle composed by step 9 of the daemon
+/// bootstrap. Carries the `TrackerRefresh` nudge endpoint and the spawned
+/// poller's `JoinHandle` so wind-down can await the poller alongside the
+/// webhook server inside `SHUTDOWN_WINDOW`.
+pub(crate) struct TrackerHandle {
+    /// `Arc<dyn TrackerRefresh>` so downstream callers (10.1.5 / 10.1.6 /
+    /// observability) clone this value cheaply without re-constructing the
+    /// underlying watch sender or backoff peek.
+    pub(crate) refresh: Arc<dyn TrackerRefresh>,
+    /// Join handle for the spawned poller task. Awaited in `serve()` under
+    /// the shared `SHUTDOWN_WINDOW`; the poller exits when the shared
+    /// `ShutdownSignal` fires.
+    pub(crate) poller_join: tokio::task::JoinHandle<()>,
 }
 
 /// Assembled engine adapters + managers handed to subsequent composition
@@ -367,7 +391,7 @@ async fn bootstrap(args: RunArgs, env: &dyn EnvReader) -> Result<Bootstrapped, R
         .iter()
         .map(|name| LinearStateName::from(name.as_str()))
         .collect();
-    let judge = Arc::new(PreAdmissionJudge::new(viewer, admit_states));
+    let judge = Arc::new(PreAdmissionJudge::new(viewer.clone(), admit_states));
 
     // ---- Step 8 (continued): drive the restart-recovery scan + decide
     // pass via `RecoveryReconciler` against the same on-disk world the
@@ -395,13 +419,31 @@ async fn bootstrap(args: RunArgs, env: &dyn EnvReader) -> Result<Bootstrapped, R
     )
     .await?;
 
-    // ---- Step 9-10: tracker construction is deferred to Task 10.1.4. The
-    // webhook bind is the load-bearing refusal point under Tasks 10.1-10.3.
-
-    // ---- Step 11: bind webhook listener. Hard-refuse on port conflict.
+    // ---- Step 11 (anchor): build the single workspace-level mpsc that
+    // both the webhook receiver (Task 10.3) and the poller (this step,
+    // 10.1.4) feed into. Constructing the channel up front so the poller's
+    // sink shares the same `issue_rx` consumer as the webhook drain.
     let bind_addr = compose_bind_addr(&config);
     let (issue_tx, issue_rx) = mpsc::channel::<NormalizedIssue>(64);
-    let webhook_state = Arc::new(WebhookState::new(webhook_secret.clone(), issue_tx));
+    let webhook_state = Arc::new(WebhookState::new(webhook_secret.clone(), issue_tx.clone()));
+
+    // ---- Step 9: start the workspace-level `LinearTracker` poller. The
+    // poller shares the same backoff curve as the recovery client (so a
+    // 429 surfaced during recovery still suppresses subsequent polls), the
+    // resolved viewer assignee, and the resolved admit_states. The cadence
+    // floor comes from `[linear].poll_cadence_seconds` (default 300s; the
+    // loader refuses anything below `MIN_POLL_CADENCE_SECONDS`).
+    let cadence_floor = std::time::Duration::from_secs(config.linear.poll_cadence_seconds);
+    let tracker_handle = spawn_workspace_poller(
+        (*linear_client).clone(),
+        viewer.clone(),
+        admit_states_to_states_vec(&config.linear.admit_states),
+        cadence_floor,
+        issue_tx.clone(),
+        shutdown_signal.clone(),
+    );
+
+    // ---- Step 10-11: bind webhook listener. Hard-refuse on port conflict.
     let listener = bind_listener(&bind_addr).await?;
 
     info!(
@@ -426,7 +468,54 @@ async fn bootstrap(args: RunArgs, env: &dyn EnvReader) -> Result<Bootstrapped, R
         escalations: composition.escalations,
         linear_client,
         judge,
+        tracker_handle,
     })
+}
+
+// ---------------------------------------------------------------------------
+// Workspace-level tracker poller (Task 10.1.4)
+// ---------------------------------------------------------------------------
+
+/// Convert the loader's resolved `BTreeSet<String>` into the
+/// `Vec<LinearStateName>` shape `LinearPoller::new` consumes.
+fn admit_states_to_states_vec(
+    admit_states: &std::collections::BTreeSet<String>,
+) -> Vec<LinearStateName> {
+    admit_states
+        .iter()
+        .map(|name| LinearStateName::from(name.as_str()))
+        .collect()
+}
+
+/// Construct + spawn the single workspace-level [`LinearPoller`] and a
+/// paired [`LinearTrackerHandle`]. The handle and the poller share the same
+/// `BackoffState` (read off `client.backoff()`) so a 429 surfaced by either
+/// path immediately gates the other; the same `mpsc::Sender` feeds both the
+/// poller and the webhook receiver into the single workspace-level
+/// `issue_rx` consumer (Task 10.1.5 admission funnel).
+///
+/// Spawned via `tokio::spawn` so the bootstrap can return synchronously; the
+/// returned [`TrackerHandle`] holds the poller's `JoinHandle` so 10.1.6 can
+/// await wind-down within `SHUTDOWN_WINDOW`.
+fn spawn_workspace_poller(
+    client: LinearClient,
+    assignee: LinearUserId,
+    states: Vec<LinearStateName>,
+    cadence_floor: std::time::Duration,
+    sink: mpsc::Sender<NormalizedIssue>,
+    shutdown_signal: ShutdownSignal,
+) -> TrackerHandle {
+    let backoff = client.backoff();
+    let (handle, refresh_rx) = LinearTrackerHandle::paired(cadence_floor, backoff);
+    let refresh: Arc<dyn TrackerRefresh> = Arc::new(handle);
+
+    let poller = LinearPoller::new(client, assignee, states, cadence_floor, sink, refresh_rx);
+    let poller_join = tokio::spawn(poller.run(shutdown_signal));
+
+    TrackerHandle {
+        refresh,
+        poller_join,
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -847,6 +936,7 @@ async fn serve(bootstrap: Bootstrapped) -> Result<(), RuntimeError> {
         bind_addr,
         webhook_state,
         mut issue_rx,
+        tracker_handle,
         ..
     } = bootstrap;
 
@@ -870,8 +960,9 @@ async fn serve(bootstrap: Bootstrapped) -> Result<(), RuntimeError> {
 
     let shutdown_for_drain = shutdown_signal.clone();
     let drain = async move {
-        // Until the orchestrator bridge is wired in, drain the channel so
-        // the webhook receiver does not back-pressure the axum handler.
+        // Until the admission pipe is wired in (Task 10.1.5), drain the
+        // workspace-level mpsc so neither the webhook receiver nor the
+        // poller back-pressure their producers.
         loop {
             tokio::select! {
                 _ = shutdown_for_drain.wait() => return,
@@ -886,6 +977,10 @@ async fn serve(bootstrap: Bootstrapped) -> Result<(), RuntimeError> {
 
     let server_handle = tokio::spawn(server);
     let drain_handle = tokio::spawn(drain);
+    let TrackerHandle {
+        refresh: _refresh,
+        poller_join,
+    } = tracker_handle;
 
     shutdown_signal.wait().await;
 
@@ -893,6 +988,7 @@ async fn serve(bootstrap: Bootstrapped) -> Result<(), RuntimeError> {
         [
             ("webhook-server".to_owned(), join_to_unit(server_handle)),
             ("issue-drain".to_owned(), join_to_unit(drain_handle)),
+            ("linear-poller".to_owned(), join_to_unit(poller_join)),
         ],
         SHUTDOWN_WINDOW,
     )
@@ -1074,6 +1170,7 @@ pub mod testing {
     use std::time::Duration;
 
     use tokio::sync::Mutex as AsyncMutex;
+    use tokio::sync::mpsc;
 
     use crate::exec::ghq::GhqTool;
     use crate::exec::wt::WtTool;
@@ -1086,12 +1183,15 @@ pub mod testing {
         DiscoveredIssue, RecoveryDecision, RecoveryReconciler,
     };
     use crate::orchestrator::state::{IssueId, Mode};
-    use crate::tracker::linear::LinearClient;
+    use crate::shutdown::ShutdownSignal;
+    use crate::tracker::linear::{BackoffState, LinearClient};
+    use crate::tracker::model::{LinearStateName, LinearUserId, NormalizedIssue};
     use crate::tracker::pre_admission::PreAdmissionJudge;
+    use crate::tracker::refresh::TrackerRefresh;
 
     use super::{
         OrchestratorComposition, OrchestratorInbox, OrchestratorSeams, RecoverySeedSink,
-        RuntimeError, compose_orchestrator, drive_recovery_seed,
+        RuntimeError, compose_orchestrator, drive_recovery_seed, spawn_workspace_poller,
     };
 
     /// Caller-supplied seams for [`compose_for_test`]. Tests inject
@@ -1243,6 +1343,62 @@ pub mod testing {
         G: GhqTool,
     {
         compose_recovery_for_test_with_extras(reconciler, linear, judge, window, Vec::new()).await
+    }
+
+    // -----------------------------------------------------------------------
+    // Tracker-poller test seam (Task 10.1.4)
+    // -----------------------------------------------------------------------
+
+    /// Harness returned by [`compose_poller_for_test`]. Mirrors the
+    /// runtime-internal `TrackerHandle` shape but exposes the underlying
+    /// `BackoffState` so integration tests can assert on the deadline curve
+    /// without re-issuing requests.
+    pub struct PollerHarness {
+        /// Cheap-clone refresh handle. Kept as `Arc<dyn TrackerRefresh>` so
+        /// tests exercise the same trait surface 10.1.5 / 10.1.6 will rely on.
+        pub refresh: Arc<dyn TrackerRefresh>,
+        /// Spawned poller's join handle. Tests await this within a bounded
+        /// window after firing shutdown to assert clean exit.
+        pub poller_join: tokio::task::JoinHandle<()>,
+        /// Shared backoff state — the same `Arc<BackoffState>` the poller
+        /// observes. Tests use it to (a) observe the deadline shift after a
+        /// 429 lands, and (b) force the deadline forward via
+        /// [`BackoffState::set_deadline_for_test`].
+        pub backoff: Arc<BackoffState>,
+    }
+
+    /// Compose the same workspace-level poller + `TrackerRefresh` handle the
+    /// production `bootstrap` step constructs, but accept a caller-supplied
+    /// `LinearClient` (typically pointed at a wiremock URI with a shrunk
+    /// backoff curve via
+    /// [`crate::tracker::linear::LinearClient::with_backoff_window`]) and a
+    /// caller-controlled `ShutdownSignal`. The cadence floor argument is the
+    /// same `Duration` the production path reads from
+    /// `[linear].poll_cadence_seconds`; tests pass sub-second values to keep
+    /// runtime bounded without hitting the production `MIN_POLL_CADENCE_SECONDS`
+    /// floor (which is enforced at config load, not at this layer).
+    pub fn compose_poller_for_test(
+        client: LinearClient,
+        assignee: LinearUserId,
+        states: Vec<LinearStateName>,
+        cadence_floor: Duration,
+        sink: mpsc::Sender<NormalizedIssue>,
+        shutdown_signal: ShutdownSignal,
+    ) -> Result<PollerHarness, RuntimeError> {
+        let backoff = client.backoff();
+        let handle = spawn_workspace_poller(
+            client,
+            assignee,
+            states,
+            cadence_floor,
+            sink,
+            shutdown_signal,
+        );
+        Ok(PollerHarness {
+            refresh: handle.refresh,
+            poller_join: handle.poller_join,
+            backoff,
+        })
     }
 
     /// Variant accepting synthetic decisions appended after the on-disk
