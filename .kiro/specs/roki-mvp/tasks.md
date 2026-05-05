@@ -480,7 +480,7 @@ refs:
   - _Requirements: 7.1, 7.3, 13.1, 13.2_
   - _Boundary: runtime_
 
-- [ ] 10.1.3 Wire RecoveryReconciler scan via Orchestrator::with_recovery
+- [x] 10.1.3 Wire RecoveryReconciler scan via Orchestrator::with_recovery
   - Replace the empty-seed orchestrator construction from 10.1.2 with `Orchestrator::with_recovery(...)`. Drive the 5-cell decision matrix at startup before the actor-map supervisor accepts new tracker events; seed the actor map with `ResumeActive` and `FreshQueued` issues plus `Inactive(orphan)` retentions.
   - Block the bootstrap progression past this step until the recovery scan completes (or times out per the configured window); on scan failure, refuse to start and log the offending path.
   - Observable completion: integration test seeds session tempdirs + worktrees on disk for each of the 5 cells against a wiremock Linear, starts the daemon, and asserts the actor map matches the documented daemon state per cell.

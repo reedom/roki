@@ -46,23 +46,30 @@ use crate::engine::orchestrator_session::adapter::OrchestratorSessionAdapter;
 use crate::engine::orchestrator_session::engine_impl::OrchestratorEngineImpl;
 use crate::engine::phase_subprocess::adapter::PhaseSubprocessAdapter;
 use crate::engine::phase_subprocess::engine_impl::PendingPhaseEngine;
-use crate::exec::ghq::RealGhq;
-use crate::exec::wt::RealWt;
+use crate::exec::ghq::{GhqTool, RealGhq};
+use crate::exec::wt::{RealWt, WtTool};
 use crate::orchestrator::core::{
     ActorMessage, Orchestrator, OrchestratorDeps, OrchestratorEngine, PhaseEngine, SessionDirOps,
     WorktreeOps,
 };
-use crate::orchestrator::escalation::EscalationQueue;
+use crate::orchestrator::escalation::{
+    EscalationEntry, EscalationKind, EscalationQueue,
+};
 use crate::orchestrator::events::EventBus;
 use crate::orchestrator::hooks::SubscriberHooks;
 use crate::orchestrator::read::{ActorSnapshot, OrchestratorReadHandle};
-use crate::orchestrator::state::IssueId;
+use crate::orchestrator::recovery::{
+    DiscoveredIssue, RecoveryDecision, RecoveryError, RecoveryReconciler,
+};
+use crate::orchestrator::state::{InactiveReason, IssueId, Mode, WorkerState};
 use crate::permissions::{PermissionConfigError, PermissionResolver};
 use crate::session::SessionManager;
 use crate::shutdown::{
     self, SHUTDOWN_WINDOW, ShutdownSignal, await_workers_with_window, install_signal_handlers,
 };
-use crate::tracker::model::NormalizedIssue;
+use crate::tracker::linear::{DEFAULT_LINEAR_ENDPOINT, LinearClient, LinearError};
+use crate::tracker::model::{LinearStateName, NormalizedIssue};
+use crate::tracker::pre_admission::PreAdmissionJudge;
 use crate::tracker::webhook::{WebhookState, router as webhook_router};
 use crate::workflow::schema::WorkflowPolicy;
 use crate::workflow::watcher::{WatcherError, load_policy};
@@ -128,7 +135,42 @@ pub enum RuntimeError {
         component: &'static str,
         message: String,
     },
+
+    /// Linear `viewer` lookup failed while resolving `[linear].assignee = "me"`.
+    /// The daemon refuses to start so the operator sees one log line naming
+    /// the upstream cause rather than per-issue admission churn at runtime.
+    #[error(
+        "Linear `viewer` lookup failed while resolving `[linear].assignee = \"me\"`: \
+         {source}; verify the API token and network reachability"
+    )]
+    AssigneeViewerLookup {
+        #[source]
+        source: LinearError,
+    },
+
+    /// Restart-recovery scan failed before the bootstrap could seed the
+    /// orchestrator actor map. The error surfaces the offending session-root
+    /// path or repo id so the operator log entry points at exactly one cause.
+    #[error("restart-recovery scan failed: {source}")]
+    RecoverySeed {
+        #[source]
+        source: RecoveryError,
+    },
+
+    /// Restart-recovery exceeded the configured window. Refuses to start so
+    /// a hung Linear instance does not block the daemon indefinitely; the
+    /// elapsed bound is included in the message for the operator log.
+    #[error(
+        "restart-recovery scan did not complete within {elapsed:?}; refusing to start"
+    )]
+    RecoveryTimedOut { elapsed: std::time::Duration },
 }
+
+/// Maximum time the bootstrap waits for `RecoveryReconciler` to complete its
+/// scan + decide pass before refusing to start. Set conservatively so
+/// transient Linear slowness does not block the daemon indefinitely; the
+/// scan is read-only so re-running on next start is safe.
+pub const RECOVERY_WINDOW: std::time::Duration = std::time::Duration::from_secs(120);
 
 /// Top-level entry point dispatched by `main.rs`. Drives the documented
 /// 12-step bootstrap composition.
@@ -176,6 +218,16 @@ struct Bootstrapped {
     /// Held so escalation snapshots survive the bootstrap return.
     #[allow(dead_code)]
     escalations: Arc<EscalationQueue>,
+    /// Read-only Linear GraphQL client constructed during step 8 and shared
+    /// with the recovery seed + (in 10.1.4) the workspace-level
+    /// `LinearTracker` poller. Held here so the poller wiring can clone the
+    /// same `Arc` without re-constructing the backoff state.
+    #[allow(dead_code)]
+    linear_client: Arc<LinearClient>,
+    /// Resolved pre-admission judge (assignee + admit_states); shared with
+    /// 10.1.5's pre-admission funnel.
+    #[allow(dead_code)]
+    judge: Arc<PreAdmissionJudge>,
 }
 
 /// Assembled engine adapters + managers handed to subsequent composition
@@ -280,13 +332,68 @@ async fn bootstrap(args: RunArgs, env: &dyn EnvReader) -> Result<Bootstrapped, R
     })?;
 
     // ---- Step 8 (continued): compose the orchestrator actor map around
-    // the assembled `RuntimeComponents`. Seeded empty per 10.1.2 — recovery
-    // wiring lands in 10.1.3. The phase pipeline is wired by 10.1.5; until
-    // then `PendingPhaseEngine` refuses every `run_phase` so a misrouted
-    // phase nomination surfaces a structured error rather than a silent
-    // miswiring.
+    // the assembled `RuntimeComponents`. The phase pipeline is wired by
+    // 10.1.5; until then `PendingPhaseEngine` refuses every `run_phase` so
+    // a misrouted phase nomination surfaces a structured error rather than
+    // a silent miswiring.
     let orchestrator_seams = ProductionOrchestratorSeams::from_components(&components);
     let composition = compose_orchestrator(orchestrator_seams);
+
+    // ---- Step 8 (continued): build the read-only Linear client + resolved
+    // viewer + pre-admission judge that recovery (and 10.1.4 poller) share.
+    // The endpoint is the documented default; future config-overrideable
+    // endpoints land alongside the `[linear].endpoint` slot.
+    let linear_client = Arc::new(LinearClient::new(
+        DEFAULT_LINEAR_ENDPOINT.to_owned(),
+        api_token.clone(),
+    ));
+    let viewer = match &config.linear.assignee {
+        AssigneeSpec::Me => linear_client
+            .viewer()
+            .await
+            .map_err(|source| RuntimeError::AssigneeViewerLookup { source })?,
+        // The Selector path is already refused at step 4; this arm exists
+        // for exhaustiveness and to surface `Selector(_)` again should the
+        // step-4 gate ever loosen without updating this branch.
+        AssigneeSpec::Selector(value) => {
+            return Err(RuntimeError::AssigneeResolve {
+                selector: value.clone(),
+            });
+        }
+    };
+    let admit_states: std::collections::BTreeSet<LinearStateName> = config
+        .linear
+        .admit_states
+        .iter()
+        .map(|name| LinearStateName::from(name.as_str()))
+        .collect();
+    let judge = Arc::new(PreAdmissionJudge::new(viewer, admit_states));
+
+    // ---- Step 8 (continued): drive the restart-recovery scan + decide
+    // pass via `RecoveryReconciler` against the same on-disk world the
+    // orchestrator + worktree-manager observe. The scan is read-only; the
+    // bootstrap blocks until it completes (or `RECOVERY_WINDOW` elapses).
+    let reconciler = RecoveryReconciler::new(
+        components.session_manager.root().to_path_buf(),
+        config.repos.clone(),
+        Arc::new(RealWt::new()),
+        Arc::new(RealGhq::new()),
+    )
+    .map_err(|source| RuntimeError::RecoverySeed { source })?;
+    let production_sink = ProductionSeedSink {
+        inbox: composition.inbox.clone(),
+        escalations: composition.escalations.clone(),
+        state_map: composition.state_map.clone(),
+    };
+    drive_recovery_seed(
+        &reconciler,
+        &linear_client,
+        judge.as_ref(),
+        &production_sink,
+        RECOVERY_WINDOW,
+        Vec::new(),
+    )
+    .await?;
 
     // ---- Step 9-10: tracker construction is deferred to Task 10.1.4. The
     // webhook bind is the load-bearing refusal point under Tasks 10.1-10.3.
@@ -317,6 +424,8 @@ async fn bootstrap(args: RunArgs, env: &dyn EnvReader) -> Result<Bootstrapped, R
         inbox: composition.inbox,
         read_handle: composition.read_handle,
         escalations: composition.escalations,
+        linear_client,
+        judge,
     })
 }
 
@@ -446,6 +555,188 @@ impl OrchestratorInbox {
         message: ActorMessage,
     ) -> Result<(), ActorMessage> {
         self.orchestrator.send(issue, message).await
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Recovery seed driver (Task 10.1.3)
+// ---------------------------------------------------------------------------
+
+/// Sink consuming the per-issue decisions emitted by the recovery scan. The
+/// production sink seeds the orchestrator actor map + escalation queue; the
+/// integration-test sink records observations into in-memory buffers. Both
+/// share the [`drive_recovery_seed`] driver so the same `scan` + `decide`
+/// composition runs in tests as in production.
+#[async_trait::async_trait]
+pub(crate) trait RecoverySeedSink: Send + Sync {
+    /// Seed an admit (covers `ResumeActive` + `FreshQueued`).
+    async fn admit(&self, issue: IssueId, mode: Mode);
+    /// Retain an orphan (covers `OrphanedSession` + `OrphanedWorktree`).
+    /// `discovered` is the original on-disk evidence so the sink can build
+    /// the structured-fields blob and the snapshot row consistently.
+    async fn orphan(&self, issue: IssueId, discovered: &DiscoveredIssue);
+    /// Skip cell (`NoOp`). Sinks may log; production logs at info level.
+    async fn noop(&self, issue: IssueId);
+}
+
+/// Production sink: seeds the orchestrator inbox with `TrackerAdmit`,
+/// enqueues `EscalationKind::Orphan` entries, and writes
+/// `Inactive(InactiveReason::Orphan)` rows into the shared state map so
+/// `OrchestratorRead::snapshot` reflects the orphan retention.
+struct ProductionSeedSink {
+    inbox: OrchestratorInbox,
+    escalations: Arc<EscalationQueue>,
+    state_map: Arc<RwLock<HashMap<IssueId, ActorSnapshot>>>,
+}
+
+#[async_trait::async_trait]
+impl RecoverySeedSink for ProductionSeedSink {
+    async fn admit(&self, issue: IssueId, mode: Mode) {
+        // The production recovery seed sends Admit with `repo: None`; the
+        // worktree allowlist is re-resolved on the orchestrator's first
+        // non-classify phase nomination per design.md.
+        if let Err(returned) = self
+            .inbox
+            .send(issue.clone(), ActorMessage::TrackerAdmit { mode, repo: None })
+            .await
+        {
+            // The actor's inbox should never be closed on first message; log
+            // and drop so the bootstrap proceeds. The actor can be revived on
+            // the next webhook / poll observation.
+            warn!(
+                target: "runtime.recovery",
+                issue = %issue,
+                "actor inbox closed before recovery admit landed; dropping {:?}",
+                returned,
+            );
+        }
+    }
+
+    async fn orphan(&self, issue: IssueId, discovered: &DiscoveredIssue) {
+        let fields = RecoveryReconciler::<RealWt, RealGhq>::orphan_directive_fields(discovered);
+        let entry = EscalationEntry {
+            issue: issue.clone(),
+            repo: discovered
+                .worktrees
+                .first()
+                .map(|w| w.repo_id.0.clone()),
+            kind: EscalationKind::Orphan,
+            correlation_id: format!("recovery-{issue}"),
+            timestamp: time::OffsetDateTime::now_utc(),
+            structured_fields: fields,
+        };
+        self.escalations.enqueue(entry).await;
+        // Reflect the orphan retention in the read-side state map. The actor
+        // map is NOT spawned for orphans — the escalation queue + snapshot
+        // row are the only surfaces.
+        if let Ok(mut map) = self.state_map.write() {
+            map.insert(
+                issue.clone(),
+                ActorSnapshot {
+                    issue,
+                    state: WorkerState::Inactive(InactiveReason::Orphan),
+                    mode: None,
+                    latest_linear_state: None,
+                },
+            );
+        }
+    }
+
+    async fn noop(&self, issue: IssueId) {
+        info!(
+            target: "runtime.recovery",
+            issue = %issue,
+            "recovery NoOp (Linear terminal + nothing on disk)"
+        );
+    }
+}
+
+/// Drive `scan + decide` for every discovered issue, dispatching each
+/// decision through `sink`. Bounded by `window` via `tokio::time::timeout`;
+/// on timeout returns [`RuntimeError::RecoveryTimedOut`]. Reconciler errors
+/// are mapped to [`RuntimeError::RecoverySeed`] so the operator log line
+/// names the offending session-root or repo id.
+async fn drive_recovery_seed<W, G, S>(
+    reconciler: &RecoveryReconciler<W, G>,
+    linear: &LinearClient,
+    judge: &PreAdmissionJudge,
+    sink: &S,
+    window: std::time::Duration,
+    extra_decisions: Vec<RecoveryDecision>,
+) -> Result<(), RuntimeError>
+where
+    W: WtTool,
+    G: GhqTool,
+    S: RecoverySeedSink + ?Sized,
+{
+    let started = std::time::Instant::now();
+    let result = tokio::time::timeout(window, async {
+        let discovered_set = reconciler
+            .scan()
+            .await
+            .map_err(|source| RuntimeError::RecoverySeed { source })?;
+
+        for discovered in discovered_set {
+            let decision = reconciler
+                .decide(discovered.clone(), linear, judge)
+                .await
+                .map_err(|source| RuntimeError::RecoverySeed { source })?;
+            dispatch_decision(decision, &discovered, sink).await;
+        }
+
+        for decision in extra_decisions {
+            // Synthetic decisions (test seam + future poller-fed seeds) need
+            // an empty `discovered` shell so the orphan branch can render
+            // structured fields without on-disk evidence.
+            let synthetic = DiscoveredIssue {
+                issue: decision_issue(&decision).clone(),
+                session_present: false,
+                worktrees: Vec::new(),
+            };
+            dispatch_decision(decision, &synthetic, sink).await;
+        }
+
+        Ok::<(), RuntimeError>(())
+    })
+    .await;
+
+    match result {
+        Ok(inner) => inner,
+        Err(_elapsed) => Err(RuntimeError::RecoveryTimedOut {
+            elapsed: started.elapsed(),
+        }),
+    }
+}
+
+fn decision_issue(decision: &RecoveryDecision) -> &IssueId {
+    match decision {
+        RecoveryDecision::ResumeActive { issue, .. }
+        | RecoveryDecision::FreshQueued { issue, .. }
+        | RecoveryDecision::OrphanedSession { issue }
+        | RecoveryDecision::OrphanedWorktree { issue }
+        | RecoveryDecision::NoOp { issue } => issue,
+    }
+}
+
+async fn dispatch_decision<S>(
+    decision: RecoveryDecision,
+    discovered: &DiscoveredIssue,
+    sink: &S,
+) where
+    S: RecoverySeedSink + ?Sized,
+{
+    match decision {
+        RecoveryDecision::ResumeActive { issue, mode }
+        | RecoveryDecision::FreshQueued { issue, mode } => {
+            sink.admit(issue, mode).await;
+        }
+        RecoveryDecision::OrphanedSession { issue }
+        | RecoveryDecision::OrphanedWorktree { issue } => {
+            sink.orphan(issue, discovered).await;
+        }
+        RecoveryDecision::NoOp { issue } => {
+            sink.noop(issue).await;
+        }
     }
 }
 
@@ -780,16 +1071,27 @@ async fn bind_listener(addr: &str) -> Result<TokioTcpListener, RuntimeError> {
 pub mod testing {
     use std::collections::HashMap;
     use std::sync::{Arc, RwLock};
+    use std::time::Duration;
 
+    use tokio::sync::Mutex as AsyncMutex;
+
+    use crate::exec::ghq::GhqTool;
+    use crate::exec::wt::WtTool;
     use crate::orchestrator::core::{
         Orchestrator, OrchestratorEngine, PhaseEngine, SessionDirOps, WorktreeOps,
     };
     use crate::orchestrator::escalation::EscalationQueue;
     use crate::orchestrator::read::{ActorSnapshot, OrchestratorReadHandle};
-    use crate::orchestrator::state::IssueId;
+    use crate::orchestrator::recovery::{
+        DiscoveredIssue, RecoveryDecision, RecoveryReconciler,
+    };
+    use crate::orchestrator::state::{IssueId, Mode};
+    use crate::tracker::linear::LinearClient;
+    use crate::tracker::pre_admission::PreAdmissionJudge;
 
     use super::{
-        OrchestratorComposition, OrchestratorInbox, OrchestratorSeams, compose_orchestrator,
+        OrchestratorComposition, OrchestratorInbox, OrchestratorSeams, RecoverySeedSink,
+        RuntimeError, compose_orchestrator, drive_recovery_seed,
     };
 
     /// Caller-supplied seams for [`compose_for_test`]. Tests inject
@@ -857,6 +1159,121 @@ pub mod testing {
             read_handle,
             lifetime_anchors: Vec::new(),
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // Recovery-seed test seam (Task 10.1.3)
+    // -----------------------------------------------------------------------
+
+    /// Recording sink used by the recovery-composition integration tests.
+    /// Captures every `Admit` the seed routine emits and forwards orphan
+    /// retentions onto the supplied `EscalationQueue` so tests can assert on
+    /// the exact same observable surface the production sink produces.
+    /// One recorded admit observation: `(issue, mode, repo)`. `repo` is
+    /// currently always `None` since the recovery seed sends
+    /// `TrackerAdmit { repo: None }` and re-resolves the worktree on the
+    /// orchestrator's first non-classify phase nomination.
+    pub type RecordedAdmit = (IssueId, Mode, Option<crate::tracker::model::RepoId>);
+    /// Shared recording buffer used by both the public harness handle and
+    /// the internal recording sink so tests observe the exact same vec.
+    pub type AdmitBuffer = Arc<AsyncMutex<Vec<RecordedAdmit>>>;
+
+    #[derive(Debug)]
+    pub struct RecoverySeedHarness {
+        /// Every `Admit` the seed produced.
+        pub admits: AdmitBuffer,
+        /// Escalation queue the orphan branch enqueues into; assertions read
+        /// via `EscalationQueue::snapshot()`.
+        pub escalations: Arc<EscalationQueue>,
+        /// Issues skipped via the `NoOp` branch.
+        pub noops: Arc<AsyncMutex<Vec<IssueId>>>,
+    }
+
+    struct RecordingSink {
+        admits: AdmitBuffer,
+        escalations: Arc<EscalationQueue>,
+        noops: Arc<AsyncMutex<Vec<IssueId>>>,
+    }
+
+    #[async_trait::async_trait]
+    impl RecoverySeedSink for RecordingSink {
+        async fn admit(&self, issue: IssueId, mode: Mode) {
+            self.admits.lock().await.push((issue, mode, None));
+        }
+
+        async fn orphan(&self, issue: IssueId, discovered: &DiscoveredIssue) {
+            // Mirror the production sink's escalation shape so test
+            // assertions exercise the same structured fields.
+            let fields = RecoveryReconciler::<
+                crate::exec::wt::MockWt,
+                crate::exec::ghq::MockGhq,
+            >::orphan_directive_fields(discovered);
+            let entry = crate::orchestrator::escalation::EscalationEntry {
+                issue: issue.clone(),
+                repo: discovered
+                    .worktrees
+                    .first()
+                    .map(|w| w.repo_id.0.clone()),
+                kind: crate::orchestrator::escalation::EscalationKind::Orphan,
+                correlation_id: format!("recovery-test-{issue}"),
+                timestamp: time::OffsetDateTime::now_utc(),
+                structured_fields: fields,
+            };
+            self.escalations.enqueue(entry).await;
+        }
+
+        async fn noop(&self, issue: IssueId) {
+            self.noops.lock().await.push(issue);
+        }
+    }
+
+    /// Drive the same recovery scan + decide composition the production
+    /// `bootstrap` step performs, but record observations into in-memory
+    /// buffers instead of mutating an orchestrator actor map. Mirrors the
+    /// production code path so the integration tests exercise the same
+    /// `scan` + `decide` + dispatch pipeline.
+    pub async fn compose_recovery_for_test<W, G>(
+        reconciler: RecoveryReconciler<W, G>,
+        linear: Arc<LinearClient>,
+        judge: PreAdmissionJudge,
+        window: Duration,
+    ) -> Result<RecoverySeedHarness, RuntimeError>
+    where
+        W: WtTool,
+        G: GhqTool,
+    {
+        compose_recovery_for_test_with_extras(reconciler, linear, judge, window, Vec::new()).await
+    }
+
+    /// Variant accepting synthetic decisions appended after the on-disk
+    /// scan. Lets tests exercise the `FreshQueued` / `NoOp` cells without
+    /// having to coax the on-disk scan into emitting them (the scan only
+    /// emits issues observable on disk).
+    pub async fn compose_recovery_for_test_with_extras<W, G>(
+        reconciler: RecoveryReconciler<W, G>,
+        linear: Arc<LinearClient>,
+        judge: PreAdmissionJudge,
+        window: Duration,
+        extras: Vec<RecoveryDecision>,
+    ) -> Result<RecoverySeedHarness, RuntimeError>
+    where
+        W: WtTool,
+        G: GhqTool,
+    {
+        let admits = Arc::new(AsyncMutex::new(Vec::new()));
+        let escalations = Arc::new(EscalationQueue::new());
+        let noops = Arc::new(AsyncMutex::new(Vec::new()));
+        let sink = RecordingSink {
+            admits: admits.clone(),
+            escalations: escalations.clone(),
+            noops: noops.clone(),
+        };
+        drive_recovery_seed(&reconciler, &linear, &judge, &sink, window, extras).await?;
+        Ok(RecoverySeedHarness {
+            admits,
+            escalations,
+            noops,
+        })
     }
 }
 
