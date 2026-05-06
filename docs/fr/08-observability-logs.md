@@ -49,7 +49,7 @@ Operators must diagnose daemon behavior, admission decisions, cycle outcomes, an
 
 ### Tier 3: in-memory ring buffer
 
-- **Scope**: a daemon-internal ring of the most recent N structured events (N = `roki.toml [log].ring_size`, default `1000`).
+- **Scope**: a daemon-internal ring of the most recent N structured events (N = `roki.toml [log].ring_size`; canonical default in [`docs/reference/config.md`](../reference/config.md)).
 - **Use**: backs the HTTP API live event subscription (`GET /api/events`) and the TUI live view ([11-roki-tui](11-roki-tui.md)).
 - **Loss on restart**: the ring buffer is in-memory only. After daemon restart, the ring is empty; older events are recovered from the file destination if `[log].destination = "file" | "both"`.
 
