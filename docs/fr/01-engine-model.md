@@ -168,6 +168,7 @@ Daemon-detected internal failures during a cycle:
 | `unparseable` | Last JSON object on stdout failed to parse, or the `directive` field is missing |
 | `schema_drift` | `directive` value is outside the legal set for the current phase |
 | `repo_mismatch` | A pre response's `repo` field does not match the admission-resolved repo for the ticket ([05-worktree-and-session](05-worktree-and-session.md)) |
+| `fs_poison` | Filesystem error creating or recovering the worktree / session tempdir before a phase launch (permission denied, disk full, symlink escape, missing parent path, etc.). Cleanup-time fs errors are not routed here — they go to the escalation queue ([06-failure-handling §Escalation queue](06-failure-handling.md)) |
 | `stall` | Stall window exceeded; daemon SIGTERMed the subprocess |
 | `iter_exhausted` | Post directive requested another iteration while `cycle.iter == max_iterations`; daemon refused to start the next iteration |
 | `template_error` | Liquid render failure when preparing the phase prompt or command |

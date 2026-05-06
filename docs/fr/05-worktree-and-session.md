@@ -53,7 +53,7 @@ Cleanup is a cycle kind, not a daemon-tracked state.
 
 When `[[on_failure]]` does not match a daemon-detected failure, the worktree and session tempdir are **retained** for forensics. Operators that want them cleaned up after a failure write a `[[cleanup]]` entry that triggers on whatever signal they choose (e.g. a Linear comment / label produced inside the failure-handler cycle's run / post phase).
 
-When the daemon itself encounters a filesystem error during create or remove, it logs the offending path with `error_kind: fs_poison` and routes the event through `[[on_failure]] when.kind = "process_crash"` if the error happened during a phase launch, or as a structured event + escalation entry if the error happened during cleanup.
+When the daemon itself encounters a filesystem error during create or recover (worktree / session tempdir setup before a phase launch), it routes the failure through `[[on_failure]] when.kind = "fs_poison"` ([01-engine-model §Failure handling](01-engine-model.md)). Cleanup-time fs errors (worktree / session tempdir delete, orphan reconcile) do not match `[[on_failure]]` — they emit a structured event and add an escalation queue entry ([06-failure-handling §Escalation queue](06-failure-handling.md)).
 
 ### Multi-repo
 

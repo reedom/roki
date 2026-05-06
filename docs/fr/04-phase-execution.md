@@ -103,6 +103,7 @@ The daemon translates each phase's exit into a single signal returned to the cyc
 | Unparseable | No JSON object on stdout, or the last JSON object lacks `directive` | `{ kind: "failure", failure_kind: "unparseable" }` |
 | Schema drift | `directive` value is outside the legal set for the phase | `{ kind: "failure", failure_kind: "schema_drift" }` |
 | Repo mismatch | Pre's `repo` field does not match the admission-resolved repo | `{ kind: "failure", failure_kind: "repo_mismatch" }` |
+| Filesystem error | Worktree create or session-tempdir setup failed before subprocess launch | `{ kind: "failure", failure_kind: "fs_poison" }` |
 | Process crash | Subprocess exited via signal or non-zero exit code without producing any directive | `{ kind: "failure", failure_kind: "process_crash", exit_code: N }` |
 | Stall | Stdout silent for the configured stall window; daemon SIGTERMed the subprocess | `{ kind: "failure", failure_kind: "stall" }` |
 | Iteration cap | A post directive `pre` / `run` arrived while `cycle.iter == [engine].max_iterations`. Daemon refuses to start the next iteration; closes stdin for session-shape phases and waits for clean exit (SIGTERM after stall window if the subprocess does not exit) | `{ kind: "failure", failure_kind: "iter_exhausted" }` |
