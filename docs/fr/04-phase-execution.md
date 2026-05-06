@@ -121,13 +121,15 @@ The cycle engine routes all `failure_kind` values through `[[on_failure]]` first
 
 Each subprocess has a stall window:
 
-- Session shape: `roki.toml [default.ai.session].stall_seconds` (default `600`).
-- Command shape: `roki.toml [default.ai.command].stall_seconds` (default `300`).
+- Session shape: `roki.toml [default.ai.session].stall_seconds`.
+- Command shape: `roki.toml [default.ai.command].stall_seconds`.
 - Per-file override: workflow/*.md frontmatter `stall_seconds: <int>`.
+
+Canonical defaults and validation rules live in [`docs/reference/config.md`](../reference/config.md).
 
 The window is measured from the most recent stdout byte; if the subprocess emits a single byte every 100 ms it never stalls regardless of CPU work.
 
-When the window elapses, the daemon sends SIGTERM, waits up to a fixed grace period (currently 10 s), then sends SIGKILL if the process is still alive. The captured stdout/stderr remain on disk.
+When the window elapses, the daemon sends SIGTERM, waits up to a fixed grace period, then sends SIGKILL if the process is still alive. The captured stdout/stderr remain on disk.
 
 ### Tracker terminal handling
 

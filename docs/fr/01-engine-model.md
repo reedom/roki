@@ -120,7 +120,7 @@ Phases that need a complex prev-iter object not present in the table (e.g. an ol
 
 ### Iteration cap
 
-`roki.toml [engine].max_iterations` (default 10) caps a cycle's iteration count. The cap is enforced as a hard boundary on starting a new iteration:
+`roki.toml [engine].max_iterations` caps a cycle's iteration count (canonical default in [`docs/reference/config.md`](../reference/config.md)). The cap is enforced as a hard boundary on starting a new iteration:
 
 1. When a post directive `pre` or `run` arrives and `cycle.iter == max_iterations`, the daemon does **not** start iteration N+1. For session-shape phases the daemon closes stdin and waits for the AI subprocess to exit; the session stall window applies. For command-shape phases the cycle is already at process exit, so no further action is needed.
 2. The cycle is marked `iter_exhausted` failure and routes through `[[on_failure]] when.kind = "iter_exhausted"`.
@@ -152,9 +152,11 @@ The single exception is admission-filter failure mid-cycle (assignee revoked, re
 
 Each subprocess has a stall window:
 
-- `roki.toml [default.ai.session].stall_seconds` (default `600`) for session-mode phases.
-- `roki.toml [default.ai.command].stall_seconds` (default `300`) for command-mode phases.
+- `roki.toml [default.ai.session].stall_seconds` for session-mode phases.
+- `roki.toml [default.ai.command].stall_seconds` for command-mode phases.
 - The workflow/*.md frontmatter may override on a per-file basis.
+
+Canonical defaults and validation rules live in [`docs/reference/config.md`](../reference/config.md).
 
 If stdout is silent for the configured window, the daemon SIGTERMs the subprocess and routes the cycle through `[[on_failure]] when.kind = "stall"`. The discarded stdout/stderr remain in the iter capture for forensics.
 

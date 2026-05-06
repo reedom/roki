@@ -95,7 +95,7 @@ WebSocket / SSE push is deferred. Live tail is achieved by polling `since=<lates
 
 #### `GET /api/escalations`
 
-Escalation queue dump ([06-failure-handling §Escalation queue](06-failure-handling.md)). The queue surfaces daemon-stuck failures only — failure-handler cycles that themselves failed and daemon-internal errors with no cycle association. Per entry: ticket id (or null for cycle-less daemon errors), cycle id (or null), kind, phase, timestamp, error text. The list is bounded by ring size.
+Escalation queue dump ([06-failure-handling §Escalation queue](06-failure-handling.md)). The queue surfaces daemon-stuck failures only — failure-handler cycles that themselves failed and daemon-internal errors with no cycle association. Per entry: ticket id (or null for cycle-less daemon errors), cycle id (or null), kind, phase (or null for cycle-less daemon errors), timestamp, error text. The list is bounded by ring size.
 
 #### `POST /api/refresh`
 
