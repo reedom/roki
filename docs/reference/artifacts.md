@@ -27,13 +27,13 @@ One JSON object per file. UTF-8, no trailing newline required.
 | `ticket_id` | string | yes | Linear issue identifier the cycle belongs to |
 | `repo` | string | yes | Admission-resolved ghq path (e.g. `github.com/foo/bar`) |
 | `cycle_kind` | enum | yes | `rule` / `cleanup` / `failure` |
-| `cycle_trigger` | enum | yes | `webhook` / `cold_start` (extensible) |
+| `cycle_trigger` | enum | yes | `runtime` (any runtime-detected diff: webhook delivery, polling fallback, or refresh nudge) / `cold_start` (daemon startup enumeration). Extensible. |
 | `failed_cycle_id` | string (UUID v4) or null | when `cycle_kind == "failure"`, otherwise null | UUID of the cycle this failure handler is recovering |
 | `started_at` | RFC 3339 timestamp | yes | UTC; matches the `cycle_started` event timestamp |
 | `ended_at` | RFC 3339 timestamp or null | yes | Null while the cycle is in flight |
 | `iter_count` | int | yes | Number of completed iterations |
 | `terminal_directive` | enum or null | one of `terminal_directive` / `failure_kind` is non-null when `ended_at` is set | `run` / `end` / `pre` (the post directive that terminated the cycle), or null if the cycle ended through a failure |
-| `failure_kind` | enum or null | see above | `process_crash` / `unparseable` / `schema_drift` / `repo_mismatch` / `stall` / `iter_exhausted` / `template_error`, or null if the cycle terminated cleanly |
+| `failure_kind` | enum or null | see above | `process_crash` / `unparseable` / `schema_drift` / `repo_mismatch` / `fs_poison` / `stall` / `iter_exhausted` / `template_error`, or null if the cycle terminated cleanly |
 | `failure_phase` | enum or null | non-null only when `failure_kind` is set | `pre` / `run` / `post` |
 
 The file is written by the daemon at `cycle_started` time (with `ended_at` / terminal fields null) and replaced atomically when the cycle ends. Readers tolerate intermediate states. The on-disk shape is canonical for `roki log --meta` and the `GET /api/tickets/{id}/cycles` endpoint; the corresponding Rust type lives in the `roki-api-types` crate.
