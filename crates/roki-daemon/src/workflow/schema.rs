@@ -93,17 +93,6 @@ pub static WORKFLOW_SCHEMA: LazyLock<Value> = LazyLock::new(|| {
     })
 });
 
-/// Phase override `<name>` values legal in `extension.phase.<name>.*`.
-const LEGAL_PHASES: &[&str] = &[
-    "classify",
-    "implement",
-    "review",
-    "validate",
-    "open_pr",
-    "ci_fix",
-    "finalize_review",
-];
-
 /// Resolved orchestrator-namespace policy.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OrchestratorConfig {

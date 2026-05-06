@@ -10,9 +10,9 @@ refs:
     - req:roki-mvp:11.6
   related:
     - ref:config
-    - fr:01-daemon-lifecycle
-    - fr:07-worker-execution
-    - fr:13-observability-logs
+    - fr:12-daemon-lifecycle
+    - fr:04-phase-execution
+    - fr:08-observability-logs
 ---
 
 # Reference: CLI Flags
@@ -23,11 +23,11 @@ CLI flags accepted by `roki run`. Flags override the corresponding values in `ro
 
 | Flag | Argument | Overrides | Purpose | Used by | Requirements |
 |---|---|---|---|---|---|
-| `--config <path>` | path | (none; specifies the config file itself loaded at startup) | Path to `roki.toml`. The documented default is used when omitted | [01-daemon-lifecycle](../fr/01-daemon-lifecycle.md) | roki-mvp Req 1.6 |
-| `--bind <addr>` | bind addr | `[server].bind` | Bind host of the webhook receiver | [01-daemon-lifecycle](../fr/01-daemon-lifecycle.md) | roki-mvp Req 1.6, Req 2.5 |
-| `--port <num>` | port | `[server].port` | Bind port of the webhook receiver | [01-daemon-lifecycle](../fr/01-daemon-lifecycle.md) | roki-mvp Req 1.6, Req 2.5 |
-| `--dangerously-skip-permissions` | (boolean) | Pins the entire permission strategy to `--dangerously-skip-permissions` | Fallback for when Claude Code's allowlist cannot be trusted | [07-worker-execution](../fr/07-worker-execution.md) | roki-mvp Req 1.6, Req 9.4 |
-| `--debug` | (boolean) | Enables per-issue debug capture | Records each worker subprocess's stdout/stderr to a per-issue file | [13-observability-logs](../fr/13-observability-logs.md) | roki-mvp Req 1.6, Req 11.6 |
+| `--config <path>` | path | (none; specifies the config file itself loaded at startup) | Path to `roki.toml`. The documented default is used when omitted | [12-daemon-lifecycle](../fr/01-daemon-lifecycle.md) | roki-mvp Req 1.6 |
+| `--bind <addr>` | bind addr | `[server].bind` | Bind host of the webhook receiver | [12-daemon-lifecycle](../fr/01-daemon-lifecycle.md) | roki-mvp Req 1.6, Req 2.5 |
+| `--port <num>` | port | `[server].port` | Bind port of the webhook receiver | [12-daemon-lifecycle](../fr/01-daemon-lifecycle.md) | roki-mvp Req 1.6, Req 2.5 |
+| `--dangerously-skip-permissions` | (boolean) | Pins the entire permission strategy to `--dangerously-skip-permissions` | Fallback for when Claude Code's allowlist cannot be trusted | [04-phase-execution](../fr/07-worker-execution.md) | roki-mvp Req 1.6, Req 9.4 |
+| `--debug` | (boolean) | Enables per-issue debug capture | Records each worker subprocess's stdout/stderr to a per-issue file | [08-observability-logs](../fr/13-observability-logs.md) | roki-mvp Req 1.6, Req 11.6 |
 
 `roki --help` and each subcommand's `--help` document every flag together with **the configuration key it corresponds to**.
 

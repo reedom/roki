@@ -21,6 +21,11 @@ paths: **/*.md
 - Explaining standard project conventions readers can find elsewhere.
 - Narrating how the doc was authored or what it replaces.
 
+## Spec / design / FR docs
+
+1. **Facts and decisions only.** State the current contract. No historical narration ("previously", "used to", "was renamed from", "after the rewrite"), no comparison to prior designs, no migration commentary.
+2. **Out of scope: only when load-bearing.** Include an out-of-scope item only when a reader would otherwise assume it is in scope. Drop the rest.
+
 ## Test
 
 Cut every sentence. If the rule still applies correctly without it, leave it cut.
