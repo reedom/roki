@@ -90,7 +90,7 @@ Tasks are ordered to match implementation order: foundation first, then layers i
   - _Boundary: linear::webhook_
   - _Depends: 1.2, 2.1, 3.1_
 
-- [ ] 4. Engine: admission, rule, capture, runner pure / near-pure modules
+- [x] 4. Engine: admission, rule, capture, runner pure / near-pure modules
 - [x] 4.1 (P) Implement the admission filter
   - Pure function `Admission::accept(&NormalizedTicket, &WorkflowConfig, &MeId) -> Result<AdmittedTicket, AdmissionError>`.
   - Accept the ticket only when its assignee equals `WorkflowConfig::admission::assignee`, with `me` resolved by the caller to the viewer id passed via `MeId`.
@@ -119,7 +119,7 @@ Tasks are ordered to match implementation order: foundation first, then layers i
   - _Boundary: capture_
   - _Depends: 1.2, 2.1_
 
-- [ ] 4.4 Implement the command-form subprocess runner
+- [x] 4.4 Implement the command-form subprocess runner
   - Async function `Runner::spawn(cmd: &str, layout: &CaptureLayout) -> Result<RunOutcome, RunnerError>` invoking `tokio::process::Command::new("sh").arg("-c").arg(cmd)` with `Stdio::from(File)` redirects to the capture layout's stdout / stderr files.
   - Do not perform Liquid template rendering of `cmd`; do not run `pre` / `post` phases.
   - Record the subprocess `ExitStatus` in `RunOutcome`; capture-write failures during execution surface as `RunnerError`.
