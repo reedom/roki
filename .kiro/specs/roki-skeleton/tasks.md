@@ -91,7 +91,7 @@ Tasks are ordered to match implementation order: foundation first, then layers i
   - _Depends: 1.2, 2.1, 3.1_
 
 - [ ] 4. Engine: admission, rule, capture, runner pure / near-pure modules
-- [ ] 4.1 (P) Implement the admission filter
+- [x] 4.1 (P) Implement the admission filter
   - Pure function `Admission::accept(&NormalizedTicket, &WorkflowConfig, &MeId) -> Result<AdmittedTicket, AdmissionError>`.
   - Accept the ticket only when its assignee equals `WorkflowConfig::admission::assignee`, with `me` resolved by the caller to the viewer id passed via `MeId`.
   - Resolve the target repo as the first `[[admission.repos]]` entry only; when `WorkflowConfig::repo` is `None`, return `AdmissionError::NoRepos`.
