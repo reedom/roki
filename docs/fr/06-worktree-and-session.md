@@ -39,7 +39,9 @@ Concentrate worktree and session-tempdir lifecycle in the daemon so the operator
 
 ### Cleanup
 
-The daemon deletes the worktree + session tempdir under three conditions:
+Auto-delete is gated by cycle kind ([20-rule-and-cycle-engine §Cycle kinds](20-rule-and-cycle-engine.md)): only `cleanup` cycles trigger auto-delete on completion. `rule` and `failure` cycle completions do not.
+
+Three conditions actually invoke deletion:
 
 1. **Cleanup cycle completion** (`cycle.kind == "cleanup"`): after the cycle's terminal directive is observed, the daemon enumerates worktrees in the allowlist whose branch name matches the issue identifier and runs `wt remove`, then `rm -rf` on the session tempdir. The branch itself is **not** deleted.
 2. **Admission-filter eviction** (assignee revoked, repo allowlist match lost): the in-flight cycle (if any) runs to natural end first; afterward the daemon evicts and deletes as in (1).
