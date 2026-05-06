@@ -34,7 +34,7 @@ Tasks are ordered to match implementation order: foundation first, then layers i
   - Observable completion: `cargo build -p roki-daemon` and `cargo build -p roki-daemon --features test-support` both succeed; `cargo metadata` no longer reports the missing crate; the `[[test]]` entry is visible in `cargo metadata --format-version 1`.
   - _Requirements: 9.1_
 
-- [ ] 1.2 Define the typed error surface used across modules
+- [x] 1.2 Define the typed error surface used across modules
   - Introduce `error.rs` with a top-level `SkeletonError` enum aggregating typed module errors (`RokiConfigError`, `WorkflowError`, `LinearClientError`, `WebhookError`, `AdmissionError`, `CaptureError`, `RunnerError`).
   - Use `thiserror` for each module variant; carry the offending file path, key path, address, or endpoint as appropriate so the `tracing::error!` log line can identify the cause.
   - Observable completion: `cargo check -p roki-daemon` compiles the error module with no warnings; the variants enumerated in design Error Categories table are all present.
