@@ -53,6 +53,26 @@ Operators must diagnose daemon behavior, admission decisions, cycle outcomes, an
 - **Use**: backs the HTTP API live event subscription (`GET /api/events`) and the TUI live view ([16-roki-tui](16-roki-tui.md)).
 - **Loss on restart**: the ring buffer is in-memory only. After daemon restart, the ring is empty; older events are recovered from the file destination if `[log].destination = "file" | "both"`.
 
+### Event catalog (MVP)
+
+Canonical event names emitted on the structured pipeline. `roki events --kind <name>` filters on these. The full field schema lives in [`docs/reference/log-events.md`](../reference/log-events.md).
+
+| Event | When |
+|---|---|
+| `webhook_received` | Webhook arrives |
+| `webhook_skipped` | Admission failed or the diff produced no rule match |
+| `cycle_started` | Cycle begins (`cycle.kind` ∈ `rule` / `cleanup` / `failure`) |
+| `phase_started` | Phase subprocess spawned |
+| `phase_completed` | Phase clean exit; carries head/tail stderr summary |
+| `phase_failed` | Phase failure (`failure.kind` per [20-rule-and-cycle-engine](20-rule-and-cycle-engine.md) §Failure kinds) |
+| `cycle_completed` | Cycle ends with terminal directive |
+| `cycle_aborted` | Cycle aborted (failure or admission lost mid-cycle) |
+| `escalation_added` | Escalation queue entry added |
+| `worktree_created` / `worktree_deleted` | Worktree lifecycle |
+| `cold_start_began` / `cold_start_completed` | Daemon startup reconciliation |
+
+Subprocess advisory output (claude `stream-json` thinking turns, etc.) is not parsed by the daemon. It is captured as raw stdout / stderr in Tier 2 and accessible via `roki log`.
+
 ### What the daemon does **not** capture
 
 - **HTTP API request / response bodies**: only metadata (method, path, status, duration). Agent strings, secrets in headers, and request payloads do not enter the event log.
