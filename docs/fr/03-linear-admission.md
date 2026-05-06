@@ -56,6 +56,8 @@ Cadence is governed by `roki.toml [linear].polling.cadence_seconds` (default `30
 
 The diff cache decides what counts as a change ([07-recovery §Diff cache](07-recovery.md)). For the Linear-side surface, the daemon tracks `(status, labels, assignee)` per ticket. Webhook events that announce changes outside that triple (description edits, comments, reactions) update Linear's own state but do not start a cycle.
 
+`[[admission.repos]]` resolution (including its `title` / `body` matchers) runs **once per cache entry**, at first admission. The resolved `repo` and `workflow_path` are sticky for the lifetime of the cache entry. Subsequent title / body / label / assignee changes do not re-resolve admission.repos. Operators that need a ticket reassigned to a different repo evict the entry first (close-and-reopen the Linear ticket, or revoke-and-restore the assignee) so the next admission picks the new match.
+
 ### Reassignment
 
 When the assignee on a previously admitted ticket changes to someone other than `[admission].assignee`:
