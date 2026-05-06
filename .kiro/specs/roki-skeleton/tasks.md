@@ -40,7 +40,7 @@ Tasks are ordered to match implementation order: foundation first, then layers i
   - Observable completion: `cargo check -p roki-daemon` compiles the error module with no warnings; the variants enumerated in design Error Categories table are all present.
   - _Requirements: 1.2, 2.3, 3.4, 4.4, 5.3, 6.2, 7.3, 8.3_
 
-- [ ] 2. Config layer: load and validate the canonical `roki.toml` and `WORKFLOW.toml` slices
+- [x] 2. Config layer: load and validate the canonical `roki.toml` and `WORKFLOW.toml` slices
 - [x] 2.1 (P) Implement the `roki.toml` loader covering the six sections required by the skeleton
   - Deserialize `[linear]`, `[linear.webhook]`, `[default.ai.command]`, `[engine]`, `[paths]`, `[log]` per `ref:config`; tolerate unknown keys and accepted-without-applying keys (`[default.ai.session]`, `[linear.webhook].secret`, `[paths].worktree_root`).
   - Enforce the required-field set listed in design `config::roki` (`[linear].token`, `[linear.webhook].bind`, `[linear.webhook].port`, `[default.ai.command].cli`, `[paths].workflow`, `[paths].session_root`); on missing or type-mismatched fields, return a `RokiConfigError` whose message names the offending key path.
@@ -51,7 +51,7 @@ Tasks are ordered to match implementation order: foundation first, then layers i
   - _Boundary: config::roki_
   - _Depends: 1.2_
 
-- [ ] 2.2 (P) Implement the `WORKFLOW.toml` loader covering admission, first repo, and rules with strict `when.*` / `run.*` validation
+- [x] 2.2 (P) Implement the `WORKFLOW.toml` loader covering admission, first repo, and rules with strict `when.*` / `run.*` validation
   - Deserialize `[admission]` (`assignee`), the first `[[admission.repos]]` entry's `ghq` value (or `None` when missing/empty), and the `[[rule]]` array per design `config::workflow`.
   - Reject any `[[rule]] when.*` key other than `when.status` and `when.labels.has_all` with a load-time error; reject `run.path`, `run.prompt`, missing `run`, and any `pre.*` / `post.*` block on a `[[rule]]` entry.
   - Accept the presence of `[[cleanup]]`, `[[on_failure]]`, and per-repo `[[admission.repos]] workflow` overrides as opaque values without evaluating them.
