@@ -18,7 +18,7 @@ roki is a generic, config-driven engine for Linear-driven coding work. The daemo
 
 All workflow knowledge — phase catalog, retry policy, Linear write formatting, model selection, kiro skills — lives in operator-authored TOML and Markdown. The daemon does not know about kiro, codex, or claude specifics.
 
-Canonical design: `docs/superpowers/specs/2026-05-06-roki-config-driven-engine-design.md`. Feature requirements: `docs/fr/01-..-12-..md`.
+Feature requirements: `docs/fr/01-..-12-..md`.
 
 ## Approach
 
