@@ -61,7 +61,7 @@ Tasks are ordered to match implementation order: foundation first, then layers i
   - _Boundary: config::workflow_
   - _Depends: 1.2_
 
-- [ ] 3. Linear adapter: normalized ticket type, viewer resolver, webhook receiver
+- [x] 3. Linear adapter: normalized ticket type, viewer resolver, webhook receiver
 - [x] 3.1 Define the internal `NormalizedTicket` value object consumed by admission and rule evaluation
   - Carry the minimum fields downstream modules consult: `id`, `assignee_id` (`Option`), `status`, `labels`.
   - Mark the constructor as crate-internal; only `linear::webhook::normalize` may build instances.
@@ -79,7 +79,7 @@ Tasks are ordered to match implementation order: foundation first, then layers i
   - _Boundary: linear::client_
   - _Depends: 1.2, 2.1_
 
-- [ ] 3.3 (P) Implement the axum webhook receiver with the cycle-started backpressure pair
+- [x] 3.3 (P) Implement the axum webhook receiver with the cycle-started backpressure pair
   - Bind axum on `[linear.webhook].bind` and `[linear.webhook].port`; route `POST /*` to the handler.
   - Handler holds `Arc<tokio::sync::mpsc::Sender<NormalizedTicket>>` (channel capacity 1) and `Arc<AtomicBool> cycle_started` (init `false`); per accepted POST: parse body → load `cycle_started` (`Acquire`); if `true` → 503; else `sender.try_send(ticket)` → `Ok(())` = 202, `TrySendError::Full` = 503, `TrySendError::Closed` = 503.
   - Reject malformed JSON or payloads missing `id` / `assignee.id` / `state.name` / `labels.nodes[].name` with HTTP 400 + `tracing::warn!` parse-error log carrying an `error_id`; response body `{"error":"invalid_payload"}`.
