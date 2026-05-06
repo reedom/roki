@@ -30,7 +30,7 @@ An operator runs roki by launching the single `roki` binary with `roki run` and 
 
 ## User-visible Behavior
 
-- **Normal startup**: `roki run --config ./roki.toml` loads `roki.toml`, loads `WORKFLOW.toml` (and any per-repo TOMLs referenced through `[[admission.repos]] workflow`), validates both, brings up the Linear adapter, the diff cache, the cycle engine, and the webhook + HTTP API server, runs the cold-start enumeration ([04-state-machine-and-recovery §Cold start](07-recovery.md)), then logs that it is ready.
+- **Normal startup**: `roki run --config ./roki.toml` loads `roki.toml`, loads `WORKFLOW.toml` (and any per-repo TOMLs referenced through `[[admission.repos]] workflow`), validates both, brings up the Linear adapter, the diff cache, the cycle engine, and the Linear webhook receiver bound to `[linear.webhook]`, optionally brings up the observability HTTP API bound to `[api]` (only when `[api].port` is set; see [10-http-api §Server gating and bind](10-http-api.md)), runs the cold-start enumeration ([07-recovery §Cold start](07-recovery.md)), then logs that it is ready.
 - **Configuration error**: configuration file not found, schema validation failure for `roki.toml`, or schema validation failure for the initial `WORKFLOW.toml` load → non-zero exit, with the offending field name in the structured log.
 - **Missing dependency CLI**: if `wt` / `ghq` are not on `PATH` → refuse to start, with the missing binary name and a remediation hint in the structured log. The cli lines configured in `roki.toml [default.ai.session]` and `[default.ai.command]` are **not** validated at startup (the daemon does not parse them); their first failure surfaces as a `process_crash` failure on the first phase that uses them.
 - **Normal shutdown**: on SIGINT / SIGTERM, stop accepting new work, signal every active cycle (each in-flight pre / run / post subprocess) to terminate within the configured shutdown window, then exit cleanly. In-flight worktrees and session tempdirs are not deleted at shutdown — the next cold start reconciles them.
@@ -42,7 +42,7 @@ The cycle engine ([01-engine-model](01-engine-model.md)) decides when to spawn c
 
 - **Launch a cycle**: the engine signals "spawn pre/run/post for ticket X under matched entry Y". The daemon prepares the per-iter capture directory, renders the cli line, and invokes the launcher. Cycle kind (`rule` / `cleanup` / `failure`) and trigger (`webhook` / `cold_start`) are propagated through environment variables.
 - **Graceful termination**: when a cycle ends (terminal directive, failure routing, or admission eviction after natural end), the daemon writes the final structured event log entry for the cycle and, in the cleanup case, deletes the worktree + session tempdir.
-- **Forced termination on shutdown**: SIGINT / SIGTERM signals every in-flight subprocess. The shutdown window applies uniformly to session-shape and command-shape subprocesses ([07-worker-execution §Subprocess shapes](04-phase-execution.md)).
+- **Forced termination on shutdown**: SIGINT / SIGTERM signals every in-flight subprocess. The shutdown window applies uniformly to session-shape and command-shape subprocesses ([04-phase-execution §Subprocess shapes](04-phase-execution.md)).
 - **Restart non-persistence**: nothing about the cycle engine or the diff cache is persisted across daemon restarts. The next cold start re-enumerates Linear and reconciles disk residue.
 
 ## Capabilities

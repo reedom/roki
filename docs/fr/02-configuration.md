@@ -32,14 +32,15 @@ refs:
 
 Operators specify the path with `--config <path>` ([12-daemon-lifecycle](12-daemon-lifecycle.md)). The file groups into:
 
-- **Linear access**: API token, webhook secret. The assignee identifier lives in WORKFLOW.toml `[admission]`, not here.
-- **Network**: bind address and port shared by the webhook receiver and the HTTP API.
+- **Linear access**: API token, polling cadence. The assignee identifier lives in WORKFLOW.toml `[admission]`, not here.
+- **Linear webhook receiver** (`[linear.webhook]`, required): bind address, port, and HMAC secret for the **internet-facing** webhook ingress. Required because Linear strongly recommends webhook ingestion over polling.
+- **Observability HTTP API** (`[api]`, optional): bind address and port for the **read-only** observability surface consumed by `roki-tui` and `roki events`. Default loopback. If `[api].port` is unset the server does not start.
 - **AI default CLIs**: the cli line and stall window the daemon uses when a workflow phase declares `session = "session"` (long-lived stream-json AI reused within one cycle's pre/post chain) or `session = "command"` (one-shot subprocess) without specifying its own cli line.
 - **Engine knobs**: per-cycle iteration cap and (future) concurrency cap.
 - **Paths**: where to load WORKFLOW.toml from, where to put session tempdirs, where to put worktrees.
 - **Log destination**: the structured event log goes to stdout, a file, or both, with operator-set rotation policy.
 
-Any invalid value or resolution failure (`[admission].assignee` cannot be resolved against the Linear API token holder, `[default.ai.session].cli` missing, WORKFLOW.toml path missing, token missing, etc.) **refuses startup** and emits the offending field in the structured log.
+Any invalid value or resolution failure (`[admission].assignee` cannot be resolved against the Linear API token holder, `[default.ai.session].cli` missing, WORKFLOW.toml path missing, token missing, `[linear.webhook]` missing, etc.) **refuses startup** and emits the offending field in the structured log. `[api]` is optional and its absence is logged at info severity but does not refuse startup.
 
 `roki.toml` itself is not hot-reloaded; changing it requires a daemon restart. The exact name, default, and validation rule for each key live in the "roki.toml schema" table in [`docs/reference/config.md`](../reference/config.md).
 
@@ -48,10 +49,17 @@ A canonical layout:
 ```toml
 [linear]
 token = "lin_api_..."
-webhook_secret = "..."
+polling.cadence_seconds = 300   # default 300, validation min 60. Polling runs only as a fallback when webhook ingress is unavailable.
 
-[network]
-bind = "127.0.0.1"
+[linear.webhook]
+secret = "..."
+bind = "0.0.0.0"   # internet-facing ingress; Linear cloud must reach it
+port = 9090
+
+[api]
+# Optional read-only observability surface for roki-tui and `roki events`.
+# If `port` is omitted the API server does not start.
+bind = "127.0.0.1"   # loopback default; non-loopback emits a warn log at startup
 port = 8080
 
 [default.ai.session]
@@ -177,7 +185,9 @@ stall_seconds: 600     # optional override of default.ai.{session,command}.stall
 {Liquid body, rendered against the per-phase context envelope}
 ```
 
-The Liquid body is rendered against the variables documented in [20-rule-and-cycle-engine §Inter-phase data flow](01-engine-model.md). The rendered text is what the daemon passes to the subprocess: as the system / first-turn prompt for `session: "session"` mode, or as stdin for `session: "command"` mode. (Inline command-form phases bypass rendering; the operator's `cmd` string is itself rendered as a Liquid template, but no separate prompt body is supplied.)
+The Liquid body is rendered against the variables documented in [01-engine-model §Inter-phase data flow](01-engine-model.md). The rendered text is what the daemon passes to the subprocess: as the system / first-turn prompt for `session: "session"` mode, or as stdin for `session: "command"` mode.
+
+Inline `cmd` strings are rendered the same way: the daemon evaluates the `cmd` value as a Liquid template against the same variables before spawning the subprocess. The rendered string becomes the command line.
 
 ### Hot reload and validation
 

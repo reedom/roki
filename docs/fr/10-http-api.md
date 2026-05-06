@@ -39,15 +39,17 @@ Without it, an operator's only view of daemon state is `tail | grep` on the stru
 
 ### Server gating and bind
 
-- **`[network].port` not set in `roki.toml`** → the HTTP server does not start, no port is opened, and an `API disabled` info log is emitted.
+The observability HTTP API is **separate from the Linear webhook receiver** ([03-linear-admission §Webhook intake](03-linear-admission.md)). The webhook receiver listens on `[linear.webhook]` (internet-facing); the observability API listens on `[api]` (loopback by default). Sharing one port between the two would force the read-only observability surface onto the public ingress; keeping them separate prevents accidental exposure.
+
+- **`[api].port` not set in `roki.toml`** → the API server does not start, no port is opened, and an `api_disabled` info log is emitted.
 - **Port set** → at startup, start and bind the server, and log the bind address / port at info severity before reporting ready.
 - **Bind failure** (port in use, etc.) → log the offending port + underlying error as a structured error log; the daemon continues without the HTTP server (the daemon does not retry binding).
-- **`[network].bind` not set** → bind to `127.0.0.1` (loopback).
+- **`[api].bind` not set** → bind to `127.0.0.1` (loopback).
 - **Non-loopback bind** → emit a warn log noting the bind host and the absence of authentication, and continue.
-- **Hot reload**: changes to `[network].*` apply on the next daemon restart; no runtime re-bind.
+- **Hot reload**: changes to `[api].*` apply on the next daemon restart; no runtime re-bind.
 - **Configuration failure** (type / range validation): refuse to start the server + log the offending key + the daemon continues without the API.
 
-HTTP server settings live under `roki.toml [network]`. No `extension.<spec>.*` namespace is reserved.
+HTTP server settings live under `roki.toml [api]`.
 
 ### Endpoints
 
@@ -60,7 +62,7 @@ Liveness probe. HTTP 200 with a small JSON body (version, uptime, configured rep
 Cache snapshot of every ticket the daemon currently tracks.
 
 - **Response body** (per entry): ticket identifier, repo (admission-resolved), current status / labels / assignee, in-flight cycle id (or null), last event timestamp.
-- **Source**: in-memory diff cache ([04-state-machine-and-recovery §Diff cache](07-recovery.md)).
+- **Source**: in-memory diff cache ([07-recovery §Diff cache](07-recovery.md)).
 - **Bounded drift**: the snapshot is assembled in a single read pass; there is no cross-source merge.
 - **Headers**: `Content-Type: application/json; charset=utf-8`, `Cache-Control: no-store`.
 
@@ -80,20 +82,20 @@ Cycle history for the ticket.
 
 #### `GET /api/tickets/{id}/cycles/{cycle_id}/iters/{n}/{phase}/{stream}`
 
-HTTP wrapper around `roki log` ([21-log-access §`roki log`](09-log-access-cli.md)). `phase` ∈ `pre` / `run` / `post`. `stream` ∈ `stdout` / `stderr` / `response` / `terminal` / `exit_code`. `n` is an absolute iter number; relative iter (`-1`, etc.) is not supported on the HTTP path because URLs prefer absolute.
+HTTP wrapper around `roki log` ([09-log-access-cli §`roki log`](09-log-access-cli.md)). `phase` ∈ `pre` / `run` / `post`. `stream` ∈ `stdout` / `stderr` / `response` / `terminal` / `events` / `exit_code`. `n` is an absolute iter number; relative iter (`-1`, etc.) is not supported on the HTTP path because URLs prefer absolute.
 
 #### `GET /api/events`
 
 Structured event stream.
 
 - **Query parameters**: `since=<seq>` for cursor-based range, `kind=<event_kind>`, `ticket=<id>`, `cycle=<uuid>`. Filters compose with AND.
-- **Response body**: an ordered list of events from the in-memory ring buffer ([13-observability-logs §Tier 3](08-observability-logs.md)). When `since` is older than the ring's oldest sequence number, the response carries `gap: true` and the operator should consult the file destination for the missing range.
+- **Response body**: an ordered list of events from the in-memory ring buffer ([08-observability-logs §Tier 3](08-observability-logs.md)). When `since` is older than the ring's oldest sequence number, the response carries `gap: true` and the operator should consult the file destination for the missing range.
 
 WebSocket / SSE push is deferred. Live tail is achieved by polling `since=<latest_seq>` from the TUI or `roki events --tail`.
 
 #### `GET /api/escalations`
 
-Escalation queue dump ([14-operator-notifications §Escalation queue](06-failure-handling.md)). Per entry: ticket id, cycle id, kind, phase, timestamp, error text. The list is bounded by ring size.
+Escalation queue dump ([06-failure-handling §Escalation queue](06-failure-handling.md)). The queue surfaces daemon-stuck failures only — failure-handler cycles that themselves failed and daemon-internal errors with no cycle association. Per entry: ticket id (or null for cycle-less daemon errors), cycle id (or null), kind, phase, timestamp, error text. The list is bounded by ring size.
 
 #### `POST /api/refresh`
 
@@ -101,7 +103,7 @@ Linear refresh nudge.
 
 - **Response**: HTTP 202 + a JSON body indicating whether the request was coalesced and, if 429 backoff is in effect, an estimate of the earliest fire time.
 - **Mutation scope**: only rescheduling the tracker poll. No worker cancel / retry / reschedule / terminate.
-- **During 429 backoff**: the request is dropped (logged), not queued. (See [03-linear-integration §Refresh nudge](03-linear-admission.md).)
+- **During 429 backoff**: the request is dropped (logged), not queued. (See [03-linear-admission §Refresh nudge](03-linear-admission.md).)
 - **Coalescing**: bursts inside the cadence cap are aggregated into a single fire.
 - **Logging**: each request is logged at info severity (client address, coalescing decision).
 
@@ -117,7 +119,7 @@ Linear refresh nudge.
 - **Single source of truth**: every request / response shape is declared in the `roki-api-types` crate. The server module, `roki-tui`, and `roki log` / `roki events` / `roki repo` all import these types; no client-side redefinition.
 - **No URL versioning**: paths are `/api/...` directly. Breaking changes are driven by the `roki` binary release the operator runs; clients pinned to a `roki` version automatically pin the matching `roki-api-types` schema.
 - **Additive-by-default**: new optional response fields are added freely. Renames, removals, and type changes are landed alongside a `roki` release that bumps the server, the TUI, and the CLI surfaces atomically.
-- **roki-specific fields** (cycle id, cycle kind, cycle trigger, failure kind, escalation entry, multi-repo `(repo, ticket)` keying as separate `repo` / `ticket` fields) are documented per-field in `SPEC.md` under `## Observability HTTP API`.
+- **roki-specific fields** (cycle id, cycle kind, cycle trigger, failure kind, escalation entry, multi-repo `(repo, ticket)` keying as separate `repo` / `ticket` fields) are documented per-field via Rust doc comments on the corresponding types in the `roki-api-types` crate.
 
 ### Logging (no body leakage)
 

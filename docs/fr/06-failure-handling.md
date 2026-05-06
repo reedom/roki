@@ -28,7 +28,7 @@ Failure surfacing is operator-authored. The daemon fires a failure-handler cycle
 
 ### Daemon-detected failure kinds
 
-The daemon classifies internal failures into the kinds listed in [20-rule-and-cycle-engine §Failure handling](01-engine-model.md):
+The daemon classifies internal failures into the kinds listed in [01-engine-model §Failure handling](01-engine-model.md):
 
 | Kind | Trigger |
 |---|---|
@@ -48,10 +48,10 @@ When the daemon detects an internal failure during an in-flight cycle:
 
 1. The originating cycle is marked aborted; its current iteration is captured with the failure metadata.
 2. The daemon evaluates `[[on_failure]]` first-match against `failure.kind` (and optionally `failure.phase`).
-3. On match: spawn a new cycle with `cycle.kind = "failure"`. The cycle has its own UUID; the failed cycle's UUID is exposed as `{{ failure.failed_cycle_id }}` / `ROKI_FAILURE_FAILED_CYCLE_ID` so the failure handler can read the failed cycle's logs via `roki log --cycle <failed_cycle_id> ...`.
-4. On no match: the daemon does not write Linear. The failure surfaces only through the structured event log and the escalation queue.
+3. On match: spawn a new cycle with `cycle.kind = "failure"`. The cycle has its own UUID; the failed cycle's UUID is exposed as `{{ failure.failed_cycle_id }}` / `ROKI_FAILURE_FAILED_CYCLE_ID` so the failure handler can read the failed cycle's logs via `roki log --cycle <failed_cycle_id> ...`. A `phase_failed` event for the original failure is emitted as usual.
+4. On no match: the daemon emits a `failure_unhandled` event in the structured event log carrying the same `(ticket_id, cycle_id, failure.kind, phase, error_text)` payload as the escalation entry would carry. The escalation queue is **not** touched. Operators that want unhandled failures surfaced in the TUI grep / filter `roki events --kind failure_unhandled`. No Linear write occurs.
 
-A failure cycle that itself fails does **not** chain into another failure cycle. The default behavior (silent log + escalation entry) applies, bounding the recovery loop to one extra cycle per original failure.
+A failure cycle that itself fails does **not** chain into another failure cycle. Such recursive failures (and other daemon-stuck cases described below) flow into the escalation queue as the **only** route to operator attention.
 
 ### `[[on_failure]]` shape
 
@@ -67,13 +67,20 @@ post.prompt = "Output {directive: 'end'}"
 
 ### Escalation queue
 
-The daemon maintains an in-memory escalation queue keyed by `(ticket_id, cycle_id)` with the most recent failure category, structured fields, timestamp, and a short error text (typically the truncated last line of stderr or the parser's error message). The queue is populated **at the moment of failure detection**, before `[[on_failure]]` evaluation, so the TUI / HTTP API surface is unaffected by whether or not a failure handler ran.
+The daemon maintains an in-memory escalation queue surfacing **daemon-stuck failures** — the cases where every operator-authored recovery path has already been exhausted (or no path applies because the failure is daemon-internal). Specifically, an entry is added when:
+
+1. **A failure cycle itself fails.** `[[on_failure]]` matched, the handler cycle ran, the handler cycle hit its own internal failure. The recursion is intentionally bounded to one level, so this lands in the queue rather than spawning another failure cycle.
+2. **A daemon-internal error has no cycle association.** Examples: WORKFLOW.toml hot-reload validation failure (the offending entry is rejected and the failure is queued), filesystem error during cleanup, Liquid render failure before any subprocess is spawned, cold-start config load failure that does not refuse startup.
+
+Normal cycle failures with no `[[on_failure]]` match are surfaced via the `failure_unhandled` structured event ([08-observability-logs §Event catalog](08-observability-logs.md)) only — they do **not** enter the queue. This keeps the queue tightly scoped to "daemon needs human help" cases instead of ambient unhandled failures.
+
+Each entry carries `(ticket_id | null, cycle_id | null, failure.kind, phase | null, timestamp, error_text)`. `ticket_id` and `cycle_id` are null for daemon-internal errors not associated with a specific cycle.
 
 Consumers:
 
 - The HTTP API exposes the queue at `GET /api/escalations` ([10-http-api](10-http-api.md)).
-- The TUI renders the queue with a local-only acknowledgement affordance ([11-roki-tui](11-roki-tui.md)). It is the **primary surface** when no `[[on_failure]]` matches and the **secondary surface** otherwise.
-- Entries are cleared automatically when the ticket is evicted (cleanup-cycle completion, admission failure, orphan reconcile). They are also lost on daemon restart (the queue is in-memory only).
+- The TUI renders the queue with a local-only acknowledgement affordance ([11-roki-tui](11-roki-tui.md)).
+- Entries are cleared automatically when the ticket is evicted (cleanup-cycle completion, admission failure, orphan reconcile). Cycle-less daemon-internal entries persist until daemon restart. The queue is in-memory only and is reset on restart.
 
 ### Worktree retention
 
@@ -83,7 +90,7 @@ When `[[on_failure]]` does not match, the worktree and session tempdir are retai
 
 ### Configuration
 
-- There is no separate `extension.linear_updater.*` namespace and no `extension.orchestrator.*` namespace. Linear write capability is whatever the cli line the failure handler runs provides.
+- Linear write capability is whatever cli line the failure handler runs provides; the daemon holds no Linear write credential.
 - Slack / Email / PagerDuty / Discord channels are not built into the daemon. Operators that want them author a failure-handler cycle that calls the appropriate webhook / CLI / MCP from inside the run phase.
 
 ## Capabilities

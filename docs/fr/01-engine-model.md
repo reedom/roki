@@ -157,9 +157,9 @@ Sequence:
 1. The originating cycle is marked aborted; its current iteration is recorded with the failure metadata.
 2. The daemon evaluates `[[on_failure]]` first-match against `failure.kind` (and optionally `failure.phase`).
 3. On match: spawn a new cycle with `cycle.kind = "failure"`; populate `{{ failure.* }}` and the `ROKI_FAILURE_*` env vars. The handler can read the failed cycle's logs via `roki log --cycle <failed_cycle_id> ...`.
-4. On no match: silent log entry plus a TUI escalation queue entry. Worktree is retained for forensics.
+4. On no match: emit a `failure_unhandled` structured event ([06-failure-handling §Failure-handler cycle](06-failure-handling.md)) carrying the failure metadata. The escalation queue is **not** touched. Worktree is retained for forensics.
 
-A failure cycle that itself fails does **not** chain into another failure cycle. The default behavior (silent log + escalation) applies. This bounds the recovery loop to one extra cycle per original failure.
+A failure cycle that itself fails does **not** chain into another failure cycle. Such recursive failures land in the escalation queue ([06-failure-handling §Escalation queue](06-failure-handling.md)) instead, which bounds the recovery loop to one extra cycle per original failure.
 
 ### Cleanup
 
@@ -169,7 +169,7 @@ A cleanup entry with all three phases omitted is shorthand for "delete immediate
 
 ### Cold start
 
-On daemon process start, the engine runs the same evaluation flow but with `cycle.trigger = "cold_start"`. See [04-state-machine-and-recovery §Cold start](07-recovery.md) for the full enumeration / reconcile flow. Operators that need to suppress duplicate Linear comments on cold-start re-runs check `{% if cycle.trigger == "cold_start" %}` in their pre/post templates.
+On daemon process start, the engine runs the same evaluation flow but with `cycle.trigger = "cold_start"`. See [07-recovery §Cold start](07-recovery.md) for the full enumeration / reconcile flow. Operators that need to suppress duplicate Linear comments on cold-start re-runs check `{% if cycle.trigger == "cold_start" %}` in their pre/post templates.
 
 ## Capabilities
 

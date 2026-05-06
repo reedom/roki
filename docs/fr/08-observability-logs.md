@@ -42,7 +42,7 @@ Operators must diagnose daemon behavior, admission decisions, cycle outcomes, an
 
 ### Tier 2: per-ticket subprocess raw captures
 
-- **Layout**: `<session_root>/<ticket-id>/cycle-<uuid>/iter-<n>/{pre,run,post}.{stdout,stderr}`, plus parsed-derivative files (`pre.response.json`, `run.exit_code`, `run.terminal.json`, `post.response.json`) per [21-log-access §Storage layout](09-log-access-cli.md).
+- **Layout**: `<session_root>/<ticket-id>/cycle-<uuid>/iter-<n>/{pre,run,post}.{stdout,stderr}`, plus parsed-derivative files (`pre.response.json`, `run.exit_code`, `run.terminal.json`, `post.response.json`) and the per-line stream-json event files for session-shape pre / post (`pre.events.jsonl`, `post.events.jsonl`) per [09-log-access-cli §Storage layout](09-log-access-cli.md).
 - **Capture mode**: byte-for-byte. The daemon does not strip ANSI codes, does not redact, and does not impose a per-line tag.
 - **Lifetime**: deleted on cleanup-cycle completion, on admission-eviction orphan cleanup, and on cold-start orphan reconcile (matches [05-worktree-and-session](05-worktree-and-session.md)).
 - **Read access**: `roki log` (scope = same ticket); HTTP API mirrors via `GET /api/tickets/{id}/cycles/{cycle_id}/iters/{n}/{phase}/{stream}`.
@@ -65,9 +65,10 @@ Canonical event names emitted on the structured pipeline. `roki events --kind <n
 | `phase_started` | Phase subprocess spawned |
 | `phase_completed` | Phase clean exit; carries head/tail stderr summary |
 | `phase_failed` | Phase failure (`failure.kind` per [01-engine-model](01-engine-model.md) §Failure kinds) |
+| `failure_unhandled` | A `phase_failed` failure had no `[[on_failure]]` first-match. Carries `(ticket_id, cycle_id, failure.kind, phase, error_text)`. The daemon does not enqueue an escalation entry for these — operators that want a TUI surface filter `roki events --kind failure_unhandled` ([06-failure-handling §Failure-handler cycle](06-failure-handling.md)). |
 | `cycle_completed` | Cycle ends with terminal directive |
 | `cycle_aborted` | Cycle aborted (failure or admission lost mid-cycle) |
-| `escalation_added` | Escalation queue entry added |
+| `escalation_added` | Escalation queue entry added (daemon-stuck failure: failure-cycle inside failure-cycle, or daemon-internal error with no cycle) |
 | `worktree_created` / `worktree_deleted` | Worktree lifecycle |
 | `cold_start_began` / `cold_start_completed` | Daemon startup reconciliation |
 

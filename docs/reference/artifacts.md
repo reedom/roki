@@ -13,8 +13,30 @@ Paths and required elements of public artifacts that operators and downstream sp
 
 | Artifact | Path | Writer | Reader | Purpose | Used by | Requirements |
 |---|---|---|---|---|---|---|
+| `meta.json` | `<session_root>/<ticket-id>/cycle-<uuid>/meta.json` | roki daemon (cycle engine) | `roki log --meta`, HTTP API `GET /api/tickets/{id}/cycles`, [09-log-access-cli](../fr/09-log-access-cli.md) | Per-cycle summary durably co-located with per-iter captures so cycle history is queryable independent of structured event log retention | [09-log-access-cli](../fr/09-log-access-cli.md), [10-http-api](../fr/10-http-api.md) | TBD |
 | `requirements.md` | `<workspace_root>/<repo>/<issue>/.kiro/specs/<issue>/requirements.md` | `materialize_spec` phase subprocess (per [18-worker-skill-workflow](../fr/18-worker-skill-workflow.md) phase catalog), driven by `kiro-discovery` | the orchestrator session (structural validation per [19-orchestrator-session](../fr/19-orchestrator-session.md) §Artifact validation) / operator / future spec-sync | Per-issue acceptance criteria in EARS form | [18-worker-skill-workflow](../fr/18-worker-skill-workflow.md), [19-orchestrator-session](../fr/19-orchestrator-session.md) | roki-mvp Req 5.6 |
 | `review.md` | `<workspace_root>/<repo>/<issue>/.kiro/specs/<issue>/review.md` | `finalize_review` phase subprocess (per [18-worker-skill-workflow](../fr/18-worker-skill-workflow.md) phase catalog), synthesizing from prior-phase verdicts (per-task `kiro-review` APPROVED set, `kiro-validate-impl` GO, `kiro-verify-completion` VERIFIED stamps, worktree artefacts) before the orchestrator's `action=stop` | the orchestrator session (structural validation per [19-orchestrator-session](../fr/19-orchestrator-session.md) §Artifact validation) / operator | Per-criterion pass/fail + code references | [18-worker-skill-workflow](../fr/18-worker-skill-workflow.md), [19-orchestrator-session](../fr/19-orchestrator-session.md) | roki-mvp Req 5.6 |
+
+## Schema of `meta.json`
+
+One JSON object per file. UTF-8, no trailing newline required.
+
+| Field | Type | Required | Meaning |
+|---|---|---|---|
+| `cycle_id` | string (UUID v4) | yes | Cycle identifier matching the parent directory `cycle-<uuid>/` |
+| `ticket_id` | string | yes | Linear issue identifier the cycle belongs to |
+| `repo` | string | yes | Admission-resolved ghq path (e.g. `github.com/foo/bar`) |
+| `cycle_kind` | enum | yes | `rule` / `cleanup` / `failure` |
+| `cycle_trigger` | enum | yes | `webhook` / `cold_start` (extensible) |
+| `failed_cycle_id` | string (UUID v4) or null | when `cycle_kind == "failure"`, otherwise null | UUID of the cycle this failure handler is recovering |
+| `started_at` | RFC 3339 timestamp | yes | UTC; matches the `cycle_started` event timestamp |
+| `ended_at` | RFC 3339 timestamp or null | yes | Null while the cycle is in flight |
+| `iter_count` | int | yes | Number of completed iterations |
+| `terminal_directive` | enum or null | one of `terminal_directive` / `failure_kind` is non-null when `ended_at` is set | `run` / `end` / `pre` (the post directive that terminated the cycle), or null if the cycle ended through a failure |
+| `failure_kind` | enum or null | see above | `process_crash` / `unparseable` / `schema_drift` / `repo_mismatch` / `stall` / `iter_exhausted` / `template_error`, or null if the cycle terminated cleanly |
+| `failure_phase` | enum or null | non-null only when `failure_kind` is set | `pre` / `run` / `post` |
+
+The file is written by the daemon at `cycle_started` time (with `ended_at` / terminal fields null) and replaced atomically when the cycle ends. Readers tolerate intermediate states. The on-disk shape is canonical for `roki log --meta` and the `GET /api/tickets/{id}/cycles` endpoint; the corresponding Rust type lives in the `roki-api-types` crate.
 
 ## Required elements of `requirements.md`
 

@@ -54,7 +54,7 @@ A new webhook for a cached ticket triggers re-evaluation only when at least one 
 
 #### Cycle dispatch
 
-When a diff is detected and no cycle is in flight, the daemon evaluates lists in priority order ([20-rule-and-cycle-engine §Cycle kinds](01-engine-model.md)): `[[cleanup]]` first-match, then `[[rule]]` first-match. The first matching entry starts a cycle. If a cycle is already in flight for the ticket, the daemon sets `pending_recheck = true` instead of starting a new one (queue-mode preemption).
+When a diff is detected and no cycle is in flight, the daemon evaluates lists in priority order ([01-engine-model §Cycle kinds](01-engine-model.md)): `[[cleanup]]` first-match, then `[[rule]]` first-match. The first matching entry starts a cycle. If a cycle is already in flight for the ticket, the daemon sets `pending_recheck = true` instead of starting a new one (queue-mode preemption).
 
 #### Cycle in-flight semantics
 
@@ -73,7 +73,7 @@ Other components (HTTP API, TUI, structured event log) observe cache changes via
 On every daemon process start (cold or post-crash), the same flow runs and is the only path that re-populates the cache:
 
 1. Load `roki.toml` and `WORKFLOW.toml` (and any per-repo TOMLs referenced through `[[admission.repos]] workflow`). Validate. Refuse to start on validation failure.
-2. Query Linear API for tickets satisfying the admission filter (assignee match plus the union of `when.status` values across all `[[rule]]` and `[[cleanup]]` entries). Pagination is cursor-based; the daemon walks the full result set before continuing.
+2. Query Linear API for tickets satisfying the admission filter. The status filter is the union of `when.status` values across **every** `[[rule]]` and `[[cleanup]]` entry — both the top-level WORKFLOW.toml and every per-repo TOML resolved in step 1. Pagination is cursor-based; the daemon walks the full result set before continuing.
 3. For each ticket: resolve repo via `[[admission.repos]]` first-match. On no match, log `reason: repo_unresolvable` and skip. On match, register a cache entry with the current `(status, labels, assignee, repo, workflow_path)`.
 4. After the cache is populated, evaluate `[[cleanup]]` then `[[rule]]` first-match for each ticket. On match, start a cycle with `cycle.trigger = "cold_start"` (env var `ROKI_CYCLE_TRIGGER=cold_start`). Cycles for distinct tickets may run concurrently; same-ticket queue ordering still applies.
 5. Reconcile disk residue: enumerate session tempdirs under `[paths].session_root` and worktrees under `[paths].worktree_root`. Anything not corresponding to a Linear-API-hit ticket is treated as an orphan and auto-deleted (worktree + session_tempdir removed; one structured log entry per deletion with `reason: orphan`).
@@ -115,7 +115,7 @@ On orderly shutdown ([12-daemon-lifecycle](12-daemon-lifecycle.md)):
 
 ## Traceability
 
-- **Roadmap**: `roadmap.md` > Scope > In > "Per-issue session tempdir lifecycle ..."; Boundary Strategy > "in-memory orchestrator with no persistent database".
+- **Roadmap**: `roadmap.md` > Scope > In > "Per-issue session tempdir lifecycle ..."; Boundary Strategy > "in-memory diff cache, no persistent database".
 - **Requirements**:
   - `roki-mvp Req 8`: per-ticket bookkeeping covered by the diff cache plus the cycle engine ([01-engine-model](01-engine-model.md)).
   - `roki-mvp Req 10`: Restart Recovery Without Persistent Storage.

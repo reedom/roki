@@ -44,7 +44,7 @@ roki log --meta          # cycle meta: kind, trigger, started_at, ended_at
 roki log --cycle <uuid> --iter -1 --phase run --stream stdout
 ```
 
-Streams: `stdout`, `stderr`, `response` (the parsed `pre.response.json` / `post.response.json` — phase-specific), `terminal` (the parsed `run.terminal.json` from claude/codex stream-json `result` events), `exit_code` (the captured numeric exit for run).
+Streams: `stdout`, `stderr`, `response` (the parsed `pre.response.json` / `post.response.json` — phase-specific), `events` (the per-line `<phase>.events.jsonl` of advisory stream-json events; session-shape pre / post only), `terminal` (the parsed `run.terminal.json` from claude/codex stream-json `result` events), `exit_code` (the captured numeric exit for run).
 
 Scope: a `roki log` invocation is bound to a single ticket. The daemon refuses cross-ticket reads (by-design isolation; an operator-authored on_failure cycle for ticket A cannot accidentally read ticket B's logs). The `--ticket` flag exists for TUI / external tooling, not for cross-ticket reads from inside a phase: when invoked without environment, the operator must supply both `--ticket` and `--cycle`.
 
@@ -94,19 +94,25 @@ The CLIs encapsulate this layout. Operators that need raw file access for debugg
     iter-001/
       pre.stdout
       pre.stderr
+      pre.events.jsonl       (session-shape pre only)
       pre.response.json
       run.stdout
       run.stderr
       run.exit_code
-      run.terminal.json
+      run.terminal.json      (when run cli emits stream-json `result`)
       post.stdout
       post.stderr
+      post.events.jsonl      (session-shape post only)
       post.response.json
     iter-002/
       ...
 ```
 
-The structured event log destination is set in `roki.toml [log]` (stdout / file / both). The HTTP API mirrors the live ring buffer ([15-http-api §Endpoints](10-http-api.md)).
+`<phase>.events.jsonl` carries one parseable JSON object per line — the advisory stream-json events (thinking blocks, tool-use messages, etc.) emitted by the long-lived AI between turns. It is present only for session-shape pre / post phases ([04-phase-execution §Event handling](04-phase-execution.md)).
+
+`meta.json` is the per-cycle summary file (cycle id, kind, trigger, started_at, ended_at, terminal directive or failure kind). Schema is defined in [`docs/reference/artifacts.md`](../reference/artifacts.md).
+
+The structured event log destination is set in `roki.toml [log]` (stdout / file / both). The HTTP API mirrors the live ring buffer ([10-http-api §Endpoints](10-http-api.md)).
 
 This layout is **not** part of the operator-facing contract. Future versions may move some files into a SQLite database, compress old iters, or delegate to a remote store; only the CLIs are stable.
 
@@ -126,7 +132,7 @@ This layout is **not** part of the operator-facing contract. Future versions may
 - **Mutating the captures** is out of scope. The CLIs are read-only.
 - **Streaming protocols** (WebSocket, SSE) are deferred for `roki events`. MVP supports `--tail` over HTTP polling; richer push is post-MVP.
 - **Indexed search** (full-text, structured query DSL) is out of scope. MVP filters are equality / range / kind / ticket / cycle.
-- **Log retention / rotation** is the responsibility of external tools for the file destination ([13-observability-logs §Boundaries](08-observability-logs.md)). Per-ticket captures under the session root are deleted when the ticket is evicted (cleanup cycle, admission failure, or orphan reconcile).
+- **Log retention / rotation** is the responsibility of external tools for the file destination ([08-observability-logs §Boundaries](08-observability-logs.md)). Per-ticket captures under the session root are deleted when the ticket is evicted (cleanup cycle, admission failure, or orphan reconcile).
 - **Authentication and authorization** for the HTTP API are governed by [10-http-api](10-http-api.md); these CLIs do not introduce a separate auth path.
 
 ## Traceability

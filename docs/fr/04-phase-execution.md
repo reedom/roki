@@ -44,16 +44,20 @@ Run-phase subprocesses are typically command-shape (the run is the heavyweight c
 
 **Trigger**: the cycle engine signals "spawn phase X with envelope E". The daemon does not pick what to spawn — it follows the engine's directive.
 
-**Launch (session)**: at the start of a cycle, if any phase declares session-shape, the daemon spawns one subprocess running `[default.ai.session].cli` inside the issue's session tempdir, with a working directory set as documented in [05-worktree-and-session](05-worktree-and-session.md). The same process is reused across pre and post invocations of the cycle. The daemon writes a launch-envelope JSON to stdin once on first use, then writes one event JSON per turn after each cooperative `directive: "..."` reply.
+**Working directory**: every phase subprocess (session and command) is launched with cwd set to the ticket's worktree when one exists, otherwise to the ticket's session tempdir. The daemon resolves the worktree via `ghq list -p` plus the `wt` worktree convention ([05-worktree-and-session](05-worktree-and-session.md)); operators do not need to write `cd "$(roki repo)"` inside their cli line.
 
-**Launch (command)**: each invocation spawns a fresh subprocess. The daemon renders the cli line as a Liquid template (substituting `{{ pre.* }}` / `{{ post.* }}` / `{{ ticket.* }}` / `{{ cycle.* }}` per [20-rule-and-cycle-engine §Inter-phase data flow](01-engine-model.md)), spawns the process, writes the envelope JSON to stdin, closes stdin, and waits for exit.
+**Launch (session)**: at the start of a cycle, if any phase declares session-shape, the daemon spawns one subprocess running `[default.ai.session].cli` with the working directory described above. The same process is reused across pre and post invocations of the cycle. The daemon writes a launch-envelope JSON to stdin once on first use, then writes one event JSON per turn after each cooperative `directive: "..."` reply.
 
-**Capture**: stdout and stderr are copied to per-iter files under `<session_root>/<ticket-id>/cycle-<uuid>/iter-<n>/{phase}.{stdout,stderr}` ([21-log-access §Storage layout](09-log-access-cli.md)). The capture is byte-for-byte; the daemon does not strip ANSI codes or filter content.
+**Launch (command)**: each invocation spawns a fresh subprocess. The daemon renders the cli line as a Liquid template (substituting `{{ pre.* }}` / `{{ post.* }}` / `{{ ticket.* }}` / `{{ cycle.* }}` per [01-engine-model §Inter-phase data flow](01-engine-model.md)), spawns the process with the same working directory rule, writes the envelope JSON to stdin, closes stdin, and waits for exit.
 
-**Event handling**: stdout is also parsed as it arrives, line-by-line:
+**Capture**: stdout and stderr are copied byte-for-byte, as they arrive, to per-iter files under `<session_root>/<ticket-id>/cycle-<uuid>/iter-<n>/{phase}.{stdout,stderr}` ([09-log-access-cli §Storage layout](09-log-access-cli.md)). The daemon does not strip ANSI codes or filter content. Parsed-derivative files are written incrementally (described under §Event handling) rather than only at exit, so an in-flight phase already exposes its terminal directive to operator tooling the moment the agent emits it.
 
-- For session phases (pre / post) emitting stream-json: the daemon scans for the terminal JSON object that contains a `directive` field. Earlier JSON objects (advisory thinking blocks, tool-use messages, etc.) are recorded only in the iter capture file; they do not affect the cycle.
-- For command phases (run, or pre/post in command shape): the daemon reads the entire stdout, then on exit parses the **last** JSON object (for pre / post) or the terminal `result` event ([09-log-access-cli §`run.terminal.json`](09-log-access-cli.md)) (for run, when the command speaks claude/codex stream-json).
+**Event handling**:
+
+- **Session phases (pre / post in session shape)**: stream-json is read line-by-line. Each parseable JSON object is appended verbatim to `<phase>.events.jsonl` as it arrives (1 event per line). Advisory events (thinking blocks, tool-use messages, etc.) are kept only here; they do not affect the cycle. The first parseable object whose top-level shape carries a `directive` field is treated as the **terminal** for the iteration: the daemon writes it to `<phase>.response.json`, forwards it to the cycle engine, and stops scanning further events for that iteration. The session subprocess itself stays alive for the next pre / post turn (or until cycle end). Output that arrives after the terminal directive within the same turn is appended to `events.jsonl` for forensics but is not interpreted.
+- **Command-form pre / post**: the daemon reads stdout to completion (or until the subprocess exits). On exit it parses the **last** JSON object on stdout, writes it to `<phase>.response.json`, and forwards to the engine. There is no `events.jsonl` for command-form phases — advisory output stays in `<phase>.stdout` only.
+- **Run phase**: stdout is captured as bytes. When the cli speaks claude/codex stream-json, the daemon scans for the terminal `result` event mid-stream and writes `run.terminal.json` the moment it is identified (without waiting for exit). Other shapes leave `run.terminal.json` absent. The numeric exit code is written to `run.exit_code` after `wait()` returns, regardless of cli shape.
+- **Parse failures**: when no terminal directive is observed for a session / command-form pre or post phase, the corresponding `<phase>.response.json` is not written and the engine is notified of `unparseable` (or `schema_drift` if the directive value is illegal). The raw stdout / stderr captures stay on disk for forensics.
 
 ### Tool boundary and permissions (pass-through)
 
@@ -67,7 +71,7 @@ The daemon never registers, proxies, or wraps any agent-side tool. Every phase s
 
 ```toml
 [default.ai.session]
-cli = "claude --input-format stream-json --output-format stream-json --model claude-opus-4-7 --settings ~/.config/roki/orchestrator.settings.json"
+cli = "claude --input-format stream-json --output-format stream-json --model claude-opus-4-7 --settings ~/.config/roki/claude.settings.json"
 
 [default.ai.command]
 cli = "claude -p '{{ prompt }}' --output-format stream-json --max-turns 100 --dangerously-skip-permissions"
@@ -91,7 +95,7 @@ The daemon translates each phase's exit into a single signal returned to the cyc
 | Iteration cap (forced) | Same as above but the AI did not reply within the stall window | `{ kind: "failure", failure_kind: "iter_exhausted" }` |
 | Template render error | Liquid render of the cli line, prompt body, or envelope failed before launch | `{ kind: "failure", failure_kind: "template_error" }` |
 
-The cycle engine routes all `failure_kind` values through `[[on_failure]]` first-match ([20-rule-and-cycle-engine §Failure handling](01-engine-model.md)). The daemon does not retry a phase on its own and does not enforce exponential backoff; retries are operator-driven through post directives.
+The cycle engine routes all `failure_kind` values through `[[on_failure]]` first-match ([01-engine-model §Failure handling](01-engine-model.md)). The daemon does not retry a phase on its own and does not enforce exponential backoff; retries are operator-driven through post directives.
 
 ### Stall detection
 

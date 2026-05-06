@@ -30,9 +30,22 @@ A single-terminal view of daemon state at second-by-second granularity. The TUI'
 
 ### Startup and connection
 
-- **`roki-tui <api-url>`**: connects to the given API URL, fetches the initial ticket snapshot via `GET /api/tickets` ([10-http-api](10-http-api.md)), and renders a live view within the documented startup window (1 second on a developer-class machine against a loopback daemon; pinned in `SPEC.md`).
-- **Polling loop**: re-fetches `/api/tickets`, `/api/events?since=<latest_seq>`, and `/api/escalations` at the configured cadences. If the API returns non-2xx, an error is shown in the status bar; the TUI does not exit.
+- **`roki-tui <api-url>`**: connects to the given API URL, fetches the initial ticket snapshot via `GET /api/tickets` ([10-http-api](10-http-api.md)), and renders the initial live view promptly after connection.
+- **Polling loop**: re-fetches `/api/tickets`, `/api/events?since=<latest_seq>`, and `/api/escalations` at the cadences configured in the TUI config file (see §Configuration). If the API returns non-2xx, an error is shown in the status bar; the TUI does not exit.
 - **Quit key**: a clean exit on the documented quit key. Restores the terminal to its original mode.
+
+### Configuration
+
+`roki-tui` reads `~/.config/roki-tui/config.toml` at startup. The file is optional; absent values fall back to documented defaults.
+
+```toml
+[polling]
+tickets_seconds = 2        # default 2,  validation min 1
+events_seconds = 1         # default 1,  validation min 1
+escalations_seconds = 5    # default 5,  validation min 1
+```
+
+CLI flags (`roki-tui --tickets-cadence ... --events-cadence ... --escalations-cadence ...`) override config-file values. Validation failure refuses startup with an error written to stderr.
 
 ### Views
 
@@ -81,7 +94,7 @@ The ticket-detail view exposes "open in `roki log`" shortcuts that print the app
 
 ### Logging
 
-- At TUI startup, emit a structured event to **its own stderr** (not into the daemon log). Fields: the API URL it connected to, the refresh cadence, the chosen color palette.
+- At TUI startup, emit a structured event to **its own stderr** (not into the daemon log). Fields: the API URL it connected to, the resolved `[polling]` cadences, and the chosen color palette.
 
 ## Capabilities
 

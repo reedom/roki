@@ -25,7 +25,7 @@ Admit assigned tickets without drops, never touch others' tickets, and respect t
 
 ### Webhook intake
 
-- **HMAC verification**: every webhook is verified against `roki.toml [linear].webhook_secret`. Invalid signature → respond with the documented unauthorized status code without normalization.
+- **HMAC verification**: every webhook is verified against `roki.toml [linear.webhook].secret`. Invalid signature → respond with HTTP `401 Unauthorized` and discard the payload without normalization.
 - **Normalization**: a verified payload is normalized into the internal issue model (see Capabilities). The normalized model is the only thing later layers see.
 - **Forward to admission**: the normalized event is handed to the admission filter (next section). Admission decides whether to update the diff cache and re-evaluate rules.
 
@@ -40,7 +40,9 @@ Tickets that fail admission are not added to the cache. If the ticket was previo
 
 ### Polling fallback
 
-When the webhook is not usable (operator-disabled, network partition, transient failure), the daemon polls Linear for issues that satisfy the assignee filter and whose state is in the union of `when.status` values across all `[[rule]]` and `[[cleanup]]` entries from WORKFLOW.toml. Cadence is capped at no more than once every five minutes. The cap is enforced even when a refresh nudge arrives (see below).
+The webhook receiver is mandatory (`[linear.webhook]` is required in `roki.toml`). Polling exists only as a runtime fallback for transient webhook outages — Linear cloud unreachable, network partition, the webhook receiver port becoming temporarily unbindable. When the daemon detects such an outage, it polls Linear for issues that satisfy the assignee filter and whose state is in the union of `when.status` values across **every** `[[rule]]` and `[[cleanup]]` entry (top-level WORKFLOW.toml plus every per-repo TOML resolved at startup, [07-recovery §Cold start](07-recovery.md)).
+
+Cadence is governed by `roki.toml [linear].polling.cadence_seconds` (default `300`, validation minimum `60`). The cap is enforced even when a refresh nudge arrives (see below). Polling stops automatically once webhook delivery resumes (Linear delivers a fresh webhook the daemon successfully verifies).
 
 ### Rate limit
 

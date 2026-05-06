@@ -26,26 +26,26 @@ Concentrate worktree and session-tempdir lifecycle in the daemon so the operator
 
 ### Session tempdir
 
-- **Created at admission**: when the admission filter ([04-state-machine-and-recovery §Admission filter](07-recovery.md)) accepts a ticket, the daemon creates `<session_root>/<ticket-id>/` (where `<session_root>` is `roki.toml [paths].session_root`). This directory is the per-iter capture root ([21-log-access §Storage layout](09-log-access-cli.md)). It exists before any cycle starts so even pre-run inspection has somewhere to write logs.
+- **Created at admission**: when the admission filter ([03-linear-admission §Admission filter](03-linear-admission.md)) accepts a ticket, the daemon creates `<session_root>/<ticket-id>/` (where `<session_root>` is `roki.toml [paths].session_root`). This directory is the per-iter capture root ([09-log-access-cli §Storage layout](09-log-access-cli.md)). It exists before any cycle starts so even pre-run inspection has somewhere to write logs.
 - **Deleted on**: cleanup-cycle completion, admission-filter eviction (after any in-flight cycle terminates), and orphan reconciliation at cold start.
 
 ### Worktree
 
-- **Created lazily**: when a cycle's pre returns `directive: "run"` and the worktree does not yet exist, the daemon creates it before spawning the run subprocess. The pre response payload includes a `repo` field that names the ghq repo for this ticket. The daemon validates `repo` against the admission-resolved repo and rejects mismatches as a `repo_mismatch` failure ([20-rule-and-cycle-engine §Failure handling](01-engine-model.md)).
+- **Created lazily**: when a cycle's pre returns `directive: "run"` and the worktree does not yet exist, the daemon creates it before spawning the run subprocess. The pre response payload includes a `repo` field that names the ghq repo for this ticket. The daemon validates `repo` against the admission-resolved repo and rejects mismatches as a `repo_mismatch` failure ([01-engine-model §Failure handling](01-engine-model.md)).
 - **Tooling**: the daemon resolves the repo's local clone with `ghq list -p` and creates a worktree with `wt switch-create` (branch name = the Linear issue identifier verbatim). Idempotent on subsequent `directive: "run"` invocations: the daemon verifies the worktree's continued presence with `wt list` (or equivalent) without re-running `wt switch-create`. If the operator removed the worktree out-of-band between iterations, the daemon recreates it.
-- **Path exposure**: phase subprocesses obtain the path via `roki repo` ([21-log-access §`roki repo`](09-log-access-cli.md)). The daemon does not inject the worktree path into the cli line implicitly; operators write `cd "$(roki repo)"` (or equivalent) inside their command.
+- **Working directory**: phase subprocesses are launched by the daemon with cwd set to the worktree (or to the session tempdir before the worktree exists), per [04-phase-execution §Working directory](04-phase-execution.md). Operators do not need to write `cd ...` inside the cli line. `roki repo` ([09-log-access-cli §`roki repo`](09-log-access-cli.md)) is provided for explicit lookups (TUI, external scripts, debugging) where the path must be named.
 - **Reused across cycles**: the same worktree persists across cycles for the same ticket. New cycles inherit whatever git state the previous cycle left.
 - **Branch name**: equals the Linear issue identifier verbatim. The daemon does not parse, transform, or namespace it.
 
 ### Cleanup
 
-Auto-delete is gated by cycle kind ([20-rule-and-cycle-engine §Cycle kinds](01-engine-model.md)): only `cleanup` cycles trigger auto-delete on completion. `rule` and `failure` cycle completions do not.
+Auto-delete is gated by cycle kind ([01-engine-model §Cycle kinds](01-engine-model.md)): only `cleanup` cycles trigger auto-delete on completion. `rule` and `failure` cycle completions do not.
 
 Three conditions actually invoke deletion:
 
 1. **Cleanup cycle completion** (`cycle.kind == "cleanup"`): after the cycle's terminal directive is observed, the daemon enumerates worktrees in the allowlist whose branch name matches the issue identifier and runs `wt remove`, then `rm -rf` on the session tempdir. The branch itself is **not** deleted.
 2. **Admission-filter eviction** (assignee revoked, repo allowlist match lost): the in-flight cycle (if any) runs to natural end first; afterward the daemon evicts and deletes as in (1).
-3. **Orphan reconcile at cold start** ([04-state-machine-and-recovery §Cold start](07-recovery.md)): residue not corresponding to any admission-passing Linear ticket is auto-deleted with a `reason: orphan` log entry.
+3. **Orphan reconcile at cold start** ([07-recovery §Cold start](07-recovery.md)): residue not corresponding to any admission-passing Linear ticket is auto-deleted with a `reason: orphan` log entry.
 
 Cleanup is a cycle kind, not a daemon-tracked state.
 
