@@ -98,7 +98,7 @@ The daemon retains the **last completed iteration's** payloads and exposes them 
 | `{{ repo.ghq }}` | `ROKI_REPO` | Admission-resolved repo |
 | `{{ cycle.id }}` | `ROKI_CYCLE_ID` | UUID |
 | `{{ cycle.kind }}` | `ROKI_CYCLE_KIND` | `rule` / `cleanup` / `failure` |
-| `{{ cycle.trigger }}` | `ROKI_CYCLE_TRIGGER` | `webhook` / `cold_start` (extensible) |
+| `{{ cycle.trigger }}` | `ROKI_CYCLE_TRIGGER` | `runtime` (any runtime-detected diff: webhook delivery, polling fallback, or refresh nudge) / `cold_start` (daemon startup enumeration) |
 | `{{ cycle.iter }}` | `ROKI_CYCLE_ITER` | int (1-indexed) |
 | `{{ config.max_iterations }}` | `ROKI_CONFIG_MAX_ITERATIONS` | int — engine cap from `roki.toml [engine].max_iterations` |
 | `{{ pre.* }}` | `ROKI_PRE_<FIELD>` for top-level scalars only | Most recent pre response payload. Nested objects / arrays / null are reachable through Liquid only. |

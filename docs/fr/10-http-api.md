@@ -77,7 +77,7 @@ Per-ticket detail.
 
 Cycle history for the ticket.
 
-- **Response body** (per entry): cycle id, kind (`rule` / `cleanup` / `failure`), trigger (`webhook` / `cold_start`), started_at, ended_at, terminal directive or failure kind.
+- **Response body** (per entry): cycle id, kind (`rule` / `cleanup` / `failure`), trigger (`runtime` / `cold_start`), started_at, ended_at, terminal directive or failure kind.
 - **Source**: scan of the ticket's session tempdir under `[paths].session_root` (cycle metadata files).
 
 #### `GET /api/tickets/{id}/cycles/{cycle_id}/iters/{n}/{phase}/{stream}`

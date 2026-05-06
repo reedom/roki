@@ -36,7 +36,7 @@ Operators must diagnose daemon behavior, admission decisions, cycle outcomes, an
   - `destination = "file"` → daemon appends to `[log].file_path`. The daemon does not rotate; rotation is operator-managed (logrotate, journald, etc.).
   - `destination = "both"` → both stdout and the file.
 - **Level**: configurable via `[log].level` and the `--log-level` CLI override.
-- **Per-cycle / per-iter / per-ticket / per-repo fields**: automatically attached based on tracing spans. Cycle id (`cycle.id`), iteration (`cycle.iter`), phase (`pre` / `run` / `post`), ticket id, repo, and trigger (`webhook` / `cold_start`) are present where relevant.
+- **Per-cycle / per-iter / per-ticket / per-repo fields**: automatically attached based on tracing spans. Cycle id (`cycle.id`), iteration (`cycle.iter`), phase (`pre` / `run` / `post`), ticket id, repo, and trigger (`runtime` / `cold_start`) are present where relevant.
 - **Secret redaction**: Linear API token, webhook secret, and any operator-declared secrets in `roki.toml` are redacted before emit. Secrets in capture files (Tier 2) are not redacted because the daemon does not parse their contents — operators that want redacted captures route their cli line's output through their own redactor.
 - **Read access**: `roki events` ([09-log-access-cli](09-log-access-cli.md)) reads from the HTTP API ring buffer (live tail / range filter) and, with `--offline --file <path>`, from a JSON Lines file directly.
 

@@ -39,7 +39,7 @@ An operator runs roki by launching the single `roki` binary with `roki run` and 
 
 The cycle engine ([01-engine-model](01-engine-model.md)) decides when to spawn cycles; subprocess supervision is owned by [04-phase-execution](04-phase-execution.md). Daemon responsibilities at the lifecycle layer:
 
-- **Launch a cycle**: the engine signals "spawn pre/run/post for ticket X under matched entry Y". The daemon prepares the per-iter capture directory, renders the cli line, and invokes the launcher. Cycle kind (`rule` / `cleanup` / `failure`) and trigger (`webhook` / `cold_start`) are propagated through environment variables.
+- **Launch a cycle**: the engine signals "spawn pre/run/post for ticket X under matched entry Y". The daemon prepares the per-iter capture directory, renders the cli line, and invokes the launcher. Cycle kind (`rule` / `cleanup` / `failure`) and trigger (`runtime` / `cold_start`) are propagated through environment variables.
 - **Graceful termination**: when a cycle ends (terminal directive, failure routing, or admission eviction after natural end), the daemon writes the final structured event log entry for the cycle and, in the cleanup case, deletes the worktree + session tempdir.
 - **Forced termination on shutdown**: SIGINT / SIGTERM signals every in-flight subprocess. The shutdown window applies uniformly to session-shape and command-shape subprocesses ([04-phase-execution §Subprocess shapes](04-phase-execution.md)).
 - **Restart non-persistence**: nothing about the cycle engine or the diff cache is persisted across daemon restarts. The next cold start re-enumerates Linear and reconciles disk residue.
