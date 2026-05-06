@@ -81,7 +81,7 @@ Subprocess advisory output (claude `stream-json` thinking turns, etc.) is not pa
 
 ### Surfacing subprocess stderr in the event log
 
-For every phase iteration, the daemon emits one structured event when the subprocess exits, with summary fields including the truncated head/tail of stderr (configurable size; default first 256 bytes + last 256 bytes). The full stderr is in the per-iter capture file (Tier 2).
+For every phase iteration, the daemon emits one structured event when the subprocess exits, with summary fields including a truncated head + tail slice of stderr (size configurable in `roki.toml [log]`; canonical key names and default sizes in [`docs/reference/config.md`](../reference/config.md)). The full stderr is in the per-iter capture file (Tier 2).
 
 ## Capabilities
 

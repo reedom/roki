@@ -6,11 +6,10 @@ refs:
   spec: roki-mvp
   implements:
     - req:roki-mvp:1
-  depends_on:
-    - fr:02-configuration
-    - fr:08-observability-logs
   related:
     - ref:cli
+    - fr:02-configuration
+    - fr:08-observability-logs
     - fr:07-recovery
     - fr:04-phase-execution
     - fr:01-engine-model

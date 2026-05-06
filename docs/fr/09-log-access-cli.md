@@ -83,6 +83,8 @@ roki repo --worktree               # require worktree (exit 1 if not yet created
 
 When the requested repo matches the admission-resolved repo for the current ticket and the daemon has created the worktree (i.e. the cycle has reached at least one `pre.directive: "run"`), `roki repo` returns the worktree path. Otherwise it returns the ghq base path so pre-run inspection still has somewhere to read from. `--auto-clone` enables `ghq get` for the ghq base; the daemon never auto-clones implicitly.
 
+Pre-run callers receive the ghq base path — the operator's main checkout — and any write operation there (`git commit`, `git checkout`, etc.) pollutes the shared clone. Treat the default `roki repo` result as **read-only** unless `--worktree` confirms a per-ticket worktree has been materialized. Pre / pre-cycle templates that need to write should either return `directive: "run"` first (so the daemon materializes the worktree), or pass `--worktree` and handle the exit-1 case explicitly.
+
 ### Storage layout (current implementation)
 
 The CLIs encapsulate this layout. Operators that need raw file access for debugging can find captures under the session root:
