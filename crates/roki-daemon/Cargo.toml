@@ -1,0 +1,37 @@
+[package]
+name = "roki-daemon"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "roki walking-skeleton daemon: single-cycle Linear-driven phase runner"
+
+[[bin]]
+name = "roki"
+path = "src/main.rs"
+
+[[test]]
+name = "skeleton_smoke"
+path = "tests/e2e/skeleton_smoke.rs"
+
+[features]
+# Test-only seam: gates the `ROKI_LINEAR_GRAPHQL_URL` env-var override inside
+# `linear::client` so the release binary always targets the hardcoded endpoint.
+test-support = []
+
+[dependencies]
+anyhow = "1"
+axum = "0.7"
+clap = { version = "4", features = ["derive"] }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
+serde = { version = "1", features = ["derive"] }
+thiserror = "2"
+tokio = { version = "1", features = ["full"] }
+toml = "0.8"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["fmt"] }
+uuid = { version = "1", features = ["v4"] }
+
+[lints]
+workspace = true

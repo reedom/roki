@@ -25,7 +25,7 @@ refs:
 Tasks are ordered to match implementation order: foundation first, then layers in the dependency direction declared in `design.md` (`error → config → linear → admission → rule → capture → runner → runtime → cli → main → validation`). `(P)` marks sub-tasks that may run concurrently with their immediate peers because their boundaries do not overlap and their prerequisites are already complete.
 
 - [ ] 1. Foundation: reintroduce the `roki-daemon` crate so the workspace builds and downstream module work has a home
-- [ ] 1.1 Create the `roki-daemon` crate manifest, dependency set, and binary entry skeleton
+- [x] 1.1 Create the `roki-daemon` crate manifest, dependency set, and binary entry skeleton
   - Add `crates/roki-daemon/Cargo.toml` declaring the binary `roki`, edition 2024, MSRV 1.85, the workspace lints, and the dependencies named in design Technology Stack (`tokio` full, `axum`, `clap` 4 derive, `serde`, `toml`, `reqwest` rustls+json, `uuid` v4, `tracing`, `tracing-subscriber`, `anyhow`, `thiserror`).
   - Declare an optional `test-support` Cargo feature gated only over the `linear::client` env-var seam.
   - Add `crates/roki-daemon/src/main.rs` with a minimal `#[tokio::main]` entry that installs the default `tracing-subscriber` (`fmt`, stdout, `INFO` max level) as the very first action and returns `ExitCode::SUCCESS`.
