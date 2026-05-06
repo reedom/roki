@@ -35,7 +35,6 @@ The daemon classifies internal failures into the kinds listed in [01-engine-mode
 | `process_crash` | Subprocess SIGSEGV or non-zero exit without a parseable terminal response |
 | `unparseable` | Last JSON object on stdout failed to parse, or `directive` missing |
 | `schema_drift` | `directive` value outside the legal set for the current phase |
-| `repo_mismatch` | Pre's `repo` field does not match the admission-resolved repo ([05-worktree-and-session](05-worktree-and-session.md)) |
 | `fs_poison` | Filesystem error creating or recovering the worktree / session tempdir before a phase launch ([05-worktree-and-session](05-worktree-and-session.md)). Cleanup-time fs errors land in the escalation queue, not `[[on_failure]]`. |
 | `stall` | Stall window exceeded; daemon SIGTERMed the subprocess |
 | `iter_exhausted` | Post directive requested another iteration while `cycle.iter == max_iterations`; daemon refused to start the next iteration |

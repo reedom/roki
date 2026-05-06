@@ -72,7 +72,6 @@ Each pre and post invocation emits exactly one terminal JSON object on its stdou
 {
   "directive": "run" | "end" | "pre",
   "outcome": "<operator string, optional>",
-  "repo": "<github.com/foo/bar, optional>",
   "<operator field>": "..."
 }
 ```
@@ -84,7 +83,6 @@ Field semantics:
   - post: `pre` | `run` | `end`.
   - An out-of-set value is a `schema_drift` failure (§Failure handling).
 - `outcome` (optional): a free-form operator string used as a structured-log discriminator and TUI label. Conventional values include `success`, `failure`, `needs_operator`, `needs_split`, `cancelled`, `no_action`. The daemon does not interpret it.
-- `repo` (optional, pre only): the resolved repo for this ticket, used by the daemon to create the worktree on the first `directive: "run"`. The daemon ignores it on subsequent iterations once the worktree exists.
 - Any additional operator-defined fields are exposed to the next phase as `{{ pre.* }}` (after a pre invocation) and `{{ post.* }}` (after a post invocation).
 
 ### Inter-phase data flow
@@ -169,7 +167,6 @@ Daemon-detected internal failures during a cycle:
 | `process_crash` | Subprocess exited via signal or non-zero exit code without a parseable terminal response |
 | `unparseable` | Last JSON object on stdout failed to parse, or the `directive` field is missing |
 | `schema_drift` | `directive` value is outside the legal set for the current phase |
-| `repo_mismatch` | A pre response's `repo` field does not match the admission-resolved repo for the ticket ([05-worktree-and-session](05-worktree-and-session.md)) |
 | `fs_poison` | Filesystem error creating or recovering the worktree / session tempdir before a phase launch (permission denied, disk full, symlink escape, missing parent path, etc.). Cleanup-time fs errors are not routed here — they go to the escalation queue ([06-failure-handling §Escalation queue](06-failure-handling.md)) |
 | `stall` | Stall window exceeded; daemon SIGTERMed the subprocess |
 | `iter_exhausted` | Post directive requested another iteration while `cycle.iter == max_iterations`; daemon refused to start the next iteration |

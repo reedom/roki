@@ -111,7 +111,7 @@ Recognized fields:
 | `labels` | Linear label list |
 | `assignee` | Linear assignee (rule-level only; `[admission].assignee` does the coarse filter) |
 | `repo` | admission-resolved ghq path (rule-level only) |
-| `kind` | failure kind (`[[on_failure]]` only): `process_crash` / `unparseable` / `schema_drift` / `repo_mismatch` / `fs_poison` / `stall` / `iter_exhausted` / `template_error` |
+| `kind` | failure kind (`[[on_failure]]` only): `process_crash` / `unparseable` / `schema_drift` / `fs_poison` / `stall` / `iter_exhausted` / `template_error` |
 | `phase` | phase name (`[[on_failure]]` only): `pre` / `run` / `post` |
 | `title`, `body` | Linear ticket strings (`[[admission.repos]]` only) |
 

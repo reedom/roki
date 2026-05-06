@@ -144,7 +144,6 @@ when.labels.has_none = ["roki:ready"]
 #   process_crash   subprocess SIGSEGV / non-zero exit without parseable terminal
 #   unparseable     last JSON object on stdout failed to parse / `directive` missing
 #   schema_drift    `directive` value outside the legal set for the phase
-#   repo_mismatch   pre's `repo` field disagrees with admission resolution
 #   fs_poison       worktree / session-tempdir setup error before phase launch
 #   stall           stall window exceeded; daemon SIGTERMed the subprocess
 #   iter_exhausted  post directive requested another iter past max_iterations

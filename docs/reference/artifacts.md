@@ -66,7 +66,7 @@ One JSON object per file. UTF-8, no trailing newline required. Written at `cycle
 | `ended_at` | RFC 3339 timestamp or null | yes | Null while the cycle is in flight |
 | `iter_count` | int | yes | Number of completed iterations |
 | `terminal_directive` | enum or null | one of `terminal_directive` / `failure_kind` is non-null when `ended_at` is set | `run` / `end` / `pre` (the post directive that terminated the cycle), or null if the cycle ended through a failure |
-| `failure_kind` | enum or null | see above | `process_crash` / `unparseable` / `schema_drift` / `repo_mismatch` / `fs_poison` / `stall` / `iter_exhausted` / `template_error`, or null if the cycle terminated cleanly |
+| `failure_kind` | enum or null | see above | `process_crash` / `unparseable` / `schema_drift` / `fs_poison` / `stall` / `iter_exhausted` / `template_error`, or null if the cycle terminated cleanly |
 | `failure_phase` | enum or null | non-null only when `failure_kind` is set | `pre` / `run` / `post` (always concrete for cycle-routed failures per [fr:02 §Recognized fields](../fr/02-configuration.md)) |
 
 The Rust shape lives in the `roki-api-types` crate.
@@ -79,7 +79,6 @@ One JSON object per file. UTF-8, no trailing newline required. Written when the 
 |---|---|---|---|
 | `directive` | enum | yes | Phase-specific legal set: pre returns `run` / `end`; post returns `pre` / `run` / `end` ([fr:01 §Directive schema](../fr/01-engine-model.md)) |
 | `outcome` | string | no | Free-form operator string (TUI label, structured log discriminator). Daemon does not interpret |
-| `repo` | string | no | (pre only) Admission-resolved repo for this ticket; daemon validates against `[[admission.repos]]` resolution |
 | (any operator-defined field) | any JSON | no | Exposed to the next phase as `{{ pre.* }}` / `{{ post.* }}` Liquid variables; top-level scalars also exported as `ROKI_PRE_*` / `ROKI_POST_*` env vars per [fr:01 §Inter-phase data flow](../fr/01-engine-model.md) |
 
 ## Schema of `run.terminal.json`
