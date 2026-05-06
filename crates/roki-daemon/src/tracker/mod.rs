@@ -6,6 +6,5 @@
 
 pub mod linear;
 pub mod model;
-pub mod pre_admission;
 pub mod refresh;
 pub mod webhook;
