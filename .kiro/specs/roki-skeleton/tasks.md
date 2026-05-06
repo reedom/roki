@@ -156,7 +156,7 @@ Tasks are ordered to match implementation order: foundation first, then layers i
   - _Boundary: main, cli_
   - _Depends: 5.2_
 
-- [ ] 6. Validation: end-to-end smoke gate and graph integrity
+- [x] 6. Validation: end-to-end smoke gate and graph integrity
 - [x] 6.1 Implement the end-to-end smoke test as the acceptance gate
   - Add `crates/roki-daemon/tests/e2e/skeleton_smoke.rs` that drives the binary as a subprocess via `env!("CARGO_BIN_EXE_roki")` and posts one Linear-shaped JSON body over loopback HTTP.
   - Setup: a `tempfile::TempDir` workspace containing a generated `roki.toml` (port chosen by `TcpListener::bind("127.0.0.1:0")` and written into the file), and a `WORKFLOW.toml` with `[admission].assignee = "u1"`, one `[[admission.repos]]`, and one `[[rule]]` whose `run.cmd` is `sh -c 'printf out; printf err 1>&2; exit 0'`.
@@ -166,7 +166,7 @@ Tasks are ordered to match implementation order: foundation first, then layers i
   - _Requirements: 7.2, 8.2, 8.4, 9.1, 9.2, 9.3_
   - _Depends: 5.3_
 
-- [ ] 6.2 Resolve the pre-existing dangling-module entries surfaced by `roki-doctools validate`
+- [x] 6.2 Resolve the pre-existing dangling-module entries surfaced by `roki-doctools validate`
   - Run `roki-doctools validate` and confirm `fr:12`'s `crates/roki-daemon/src/runtime.rs` and `crates/roki-daemon/src/config/mod.rs` entries resolve now that the crate and stubbed module tree exist (created in task 1.1).
   - Reconcile `fr:02`'s `modules:` list with the design's chosen file layout: design places workflow under `src/config/workflow.rs`, so update `docs/fr/02-configuration.md` `refs.modules:` to drop `crates/roki-daemon/src/workflow/` (and add `crates/roki-daemon/src/config/workflow.rs` if appropriate). Make this the only fr-doc edit; do not retitle or restructure `fr:02`.
   - Confirm `design:roki-skeleton` and `tasks:roki-skeleton` `modules:` entries (`crates/roki-daemon/` and `crates/roki-daemon/tests/e2e/skeleton_smoke.rs`) resolve once the crate and the smoke test file exist.

@@ -12,7 +12,7 @@ refs:
     - fr:01-engine-model
   modules:
     - crates/roki-daemon/src/config/
-    - crates/roki-daemon/src/workflow/
+    - crates/roki-daemon/src/config/workflow.rs
 ---
 
 # FR 02: Configuration
