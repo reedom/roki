@@ -130,7 +130,7 @@ Tasks are ordered to match implementation order: foundation first, then layers i
   - _Depends: 4.3_
 
 - [ ] 5. Runtime, CLI, and binary entry: wire the pipeline and own shutdown
-- [ ] 5.1 Implement the runtime orchestrator
+- [x] 5.1 Implement the runtime orchestrator
   - Pipeline: load `RokiConfig` → load `WorkflowConfig` → resolve `me` via `LinearClient` when `[admission].assignee == "me"` → create `mpsc::channel::<NormalizedTicket>(1)` + `Arc<AtomicBool> cycle_started` (init `false`) → bind webhook listener (handler holds `Sender` clone + atomic clone) → loop `receiver.recv().await` → admission (on reject: info log + `continue`) → rule first-match (on no-match: info log + `continue`) → on match: `cycle_started.store(true, Release)` → drop receiver → `Capture::create` → `Runner::spawn` → await exit → flush capture files → break → `axum::serve(...).with_graceful_shutdown(...)` drains in-flight handler → return `ExitCode::SUCCESS`.
   - Treat startup-bound failures (`RokiConfig`, `WorkflowConfig`, `me` resolve, bind) and cycle-bound failures (capture, runner) as `Err(SkeletonError)` causing `ExitCode::FAILURE`; admission rejection and rule no-match are not failures and re-arm the loop.
   - Hold `Option<MeId>` plus the `Sender` / `Receiver` / `cycle_started` triple as the entire runtime state; no mutex, no swap, no placeholder window.
