@@ -74,7 +74,7 @@ The daemon maintains an in-memory escalation queue surfacing **daemon-stuck fail
 
 Normal cycle failures with no `[[on_failure]]` match are surfaced via the `failure_unhandled` structured event ([08-observability-logs §Event catalog](08-observability-logs.md)) only — they do **not** enter the queue. This keeps the queue tightly scoped to "daemon needs human help" cases instead of ambient unhandled failures.
 
-Each entry carries `(ticket_id | null, cycle_id | null, failure.kind, phase | null, timestamp, error_text)`. `ticket_id` and `cycle_id` are null for daemon-internal errors not associated with a specific cycle.
+Each entry carries `(ticket_id | null, cycle_id | null, failure.kind, phase | null, timestamp, error_text)`. `ticket_id`, `cycle_id`, and `phase` are null only for daemon-internal errors not associated with a specific cycle. Cycle-routed failures (everything that reaches `[[on_failure]]`) always carry concrete `phase` ∈ {`pre`, `run`, `post`} per [02-configuration §Recognized fields](02-configuration.md).
 
 Consumers:
 

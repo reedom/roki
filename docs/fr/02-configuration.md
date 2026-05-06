@@ -161,7 +161,7 @@ Recognized fields:
 - `assignee` — Linear assignee (rule-level only; `[admission].assignee` does the coarse filter).
 - `repo` — admission-resolved ghq path (rule-level only; admission resolves it before rule evaluation).
 - `kind` — failure kind (on_failure entries only).
-- `phase` — phase name (on_failure entries only; values `pre` / `run` / `post`).
+- `phase` — phase name (on_failure entries only; values `pre` / `run` / `post`). Every `[[on_failure]]`-routed failure has a phase context: `process_crash` / `unparseable` / `schema_drift` / `repo_mismatch` / `stall` / `template_error` carry the phase that emitted them; `iter_exhausted` carries `post` (the phase whose directive requested the prohibited next iteration).
 - `title`, `body` — Linear ticket strings (admission.repos only, used for repo discrimination).
 
 #### Phase specification
