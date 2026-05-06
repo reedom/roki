@@ -20,5 +20,5 @@ async fn main() -> ExitCode {
         .with_max_level(tracing::Level::INFO)
         .try_init();
 
-    ExitCode::SUCCESS
+    cli::run().await
 }

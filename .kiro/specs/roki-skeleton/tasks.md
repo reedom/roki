@@ -129,7 +129,7 @@ Tasks are ordered to match implementation order: foundation first, then layers i
   - _Boundary: runner_
   - _Depends: 4.3_
 
-- [ ] 5. Runtime, CLI, and binary entry: wire the pipeline and own shutdown
+- [x] 5. Runtime, CLI, and binary entry: wire the pipeline and own shutdown
 - [x] 5.1 Implement the runtime orchestrator
   - Pipeline: load `RokiConfig` → load `WorkflowConfig` → resolve `me` via `LinearClient` when `[admission].assignee == "me"` → create `mpsc::channel::<NormalizedTicket>(1)` + `Arc<AtomicBool> cycle_started` (init `false`) → bind webhook listener (handler holds `Sender` clone + atomic clone) → loop `receiver.recv().await` → admission (on reject: info log + `continue`) → rule first-match (on no-match: info log + `continue`) → on match: `cycle_started.store(true, Release)` → drop receiver → `Capture::create` → `Runner::spawn` → await exit → flush capture files → break → `axum::serve(...).with_graceful_shutdown(...)` drains in-flight handler → return `ExitCode::SUCCESS`.
   - Treat startup-bound failures (`RokiConfig`, `WorkflowConfig`, `me` resolve, bind) and cycle-bound failures (capture, runner) as `Err(SkeletonError)` causing `ExitCode::FAILURE`; admission rejection and rule no-match are not failures and re-arm the loop.
@@ -148,7 +148,7 @@ Tasks are ordered to match implementation order: foundation first, then layers i
   - _Boundary: cli_
   - _Depends: 5.1_
 
-- [ ] 5.3 Wire the binary entry point
+- [x] 5.3 Wire the binary entry point
   - Replace the `main.rs` stub from task 1.1 with the production wiring: install the default `tracing-subscriber` as the very first action, then call `cli::run().await` and propagate its `ExitCode`.
   - Return `anyhow::Result<ExitCode>` from `cli::run` and let `main` exit via the returned `ExitCode` so internal daemon errors surface as a non-zero exit.
   - Observable completion: `cargo run -p roki-daemon -- run --config /nonexistent` exits with a non-zero status and emits a startup error naming the missing path; a happy-path invocation prints no panics.
