@@ -110,7 +110,7 @@ Tasks are ordered to match implementation order: foundation first, then layers i
   - _Boundary: rule_
   - _Depends: 2.2, 3.1_
 
-- [ ] 4.3 (P) Implement the per-cycle capture layout
+- [x] 4.3 (P) Implement the per-cycle capture layout
   - Sync function `Capture::create(session_root: &Path, ticket_id: &str) -> Result<CaptureLayout, CaptureError>` that creates `<session_root>/cycle-<uuid>/` and opens stdout / stderr file handles inside it.
   - On any directory-create or file-open failure, return `CaptureError` carrying the offending path.
   - Add unit tests covering: happy-path layout creation under a `tempfile::TempDir`; error when `session_root` is unwritable.
