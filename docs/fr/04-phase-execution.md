@@ -105,8 +105,7 @@ The daemon translates each phase's exit into a single signal returned to the cyc
 | Repo mismatch | Pre's `repo` field does not match the admission-resolved repo | `{ kind: "failure", failure_kind: "repo_mismatch" }` |
 | Process crash | Subprocess exited via signal or non-zero exit code without producing any directive | `{ kind: "failure", failure_kind: "process_crash", exit_code: N }` |
 | Stall | Stdout silent for the configured stall window; daemon SIGTERMed the subprocess | `{ kind: "failure", failure_kind: "stall" }` |
-| Iteration cap (cooperative) | The daemon wrote `iteration_exhausted` to the session's stdin and the AI replied with `directive: "end"` | `{ kind: "directive", directive: "end" }` (handled as ordinary clean termination) |
-| Iteration cap (forced) | Same as above but the AI did not reply within the stall window | `{ kind: "failure", failure_kind: "iter_exhausted" }` |
+| Iteration cap | A post directive `pre` / `run` arrived while `cycle.iter == [engine].max_iterations`. Daemon refuses to start the next iteration; closes stdin for session-shape phases and waits for clean exit (SIGTERM after stall window if the subprocess does not exit) | `{ kind: "failure", failure_kind: "iter_exhausted" }` |
 | Template render error | Liquid render of the cli line or phase body failed before launch | `{ kind: "failure", failure_kind: "template_error" }` |
 
 The cycle engine routes all `failure_kind` values through `[[on_failure]]` first-match ([01-engine-model §Failure handling](01-engine-model.md)). The daemon does not retry a phase on its own and does not enforce exponential backoff; retries are operator-driven through post directives.

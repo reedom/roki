@@ -98,7 +98,8 @@ The daemon retains the **last completed iteration's** payloads and exposes them 
 | `{{ cycle.id }}` | `ROKI_CYCLE_ID` | UUID |
 | `{{ cycle.kind }}` | `ROKI_CYCLE_KIND` | `rule` / `cleanup` / `failure` |
 | `{{ cycle.trigger }}` | `ROKI_CYCLE_TRIGGER` | `webhook` / `cold_start` (extensible) |
-| `{{ cycle.iter }}` | `ROKI_CYCLE_ITER` | int |
+| `{{ cycle.iter }}` | `ROKI_CYCLE_ITER` | int (1-indexed) |
+| `{{ config.max_iterations }}` | `ROKI_CONFIG_MAX_ITERATIONS` | int — engine cap from `roki.toml [engine].max_iterations` |
 | `{{ pre.* }}` | `ROKI_PRE_<FIELD>` for scalars | Most recent pre response payload |
 | `{{ post.* }}` | `ROKI_POST_<FIELD>` for scalars | Most recent post response payload (visible from iteration N+1 onward) |
 | `{{ run.exit_code }}` | `ROKI_RUN_EXIT_CODE` | int |
@@ -116,11 +117,21 @@ Phases that need a complex prev-iter object not present in the table (e.g. an ol
 
 ### Iteration cap and cooperative termination
 
-`roki.toml [engine].max_iterations` (default 10) caps a cycle's iteration count. When the cap is hit before the cycle terminates naturally:
+`roki.toml [engine].max_iterations` (default 10) caps a cycle's iteration count. The cap is enforced as a hard boundary on starting a new iteration:
 
-1. If the active session has a long-lived AI subprocess (the `session = "session"` mode), the daemon writes an `iteration_exhausted` directive to the session's stdin and waits for the AI to emit `directive: "end"` cooperatively. The session's stall window applies.
-2. If the session does not exit cooperatively within the stall window, the daemon SIGTERMs it and routes the cycle through `[[on_failure]] when.kind = "iter_exhausted"`.
-3. For one-shot command-form phases there is no cooperative path. The daemon ends the cycle and routes through `[[on_failure]] when.kind = "iter_exhausted"`.
+1. When a post directive `pre` or `run` arrives and `cycle.iter == max_iterations`, the daemon does **not** start iteration N+1. For session-shape phases the daemon closes stdin and waits for the AI subprocess to exit; the session stall window applies. For command-shape phases the cycle is already at process exit, so no further action is needed.
+2. The cycle is marked `iter_exhausted` failure and routes through `[[on_failure]] when.kind = "iter_exhausted"`.
+3. If the session subprocess does not exit within the stall window after stdin close, the daemon SIGTERMs it; the failure kind stays `iter_exhausted`.
+
+Operators encode cooperative wrap-up entirely in their templates. `{{ cycle.iter }}` and `{{ config.max_iterations }}` are exposed (see §Inter-phase data flow) so a pre / post body can preempt the cap:
+
+```liquid
+{% if cycle.iter >= config.max_iterations | minus: 1 %}
+This is your final iteration. Output a final summary then `{"directive":"end"}`.
+{% endif %}
+```
+
+Daemon never writes a magic-bytes signal to stdin; stdin is reserved for rendered phase bodies (see [04-phase-execution §Input channels](04-phase-execution.md)).
 
 There is no daemon-side retry budget for failed runs. Operators encode retry policy by inspecting `{{ run.exit_code }}` / `{{ run.terminal.* }}` in their post template and returning `directive: "run"` (re-run the same phase) or `directive: "pre"` (restart from pre with a different payload). Backoff is the operator's responsibility — a post template can sleep before returning, or the operator can sleep inside the next pre.
 
@@ -155,7 +166,7 @@ Daemon-detected internal failures during a cycle:
 | `schema_drift` | `directive` value is outside the legal set for the current phase |
 | `repo_mismatch` | A pre response's `repo` field does not match the admission-resolved repo for the ticket ([05-worktree-and-session](05-worktree-and-session.md)) |
 | `stall` | Stall window exceeded; daemon SIGTERMed the subprocess |
-| `iter_exhausted` | `max_iterations` exceeded and the AI did not cooperate (or the phase was command-form) |
+| `iter_exhausted` | Post directive requested another iteration while `cycle.iter == max_iterations`; daemon refused to start the next iteration |
 | `template_error` | Liquid render failure when preparing the phase prompt or command |
 
 Sequence:
@@ -183,7 +194,7 @@ On daemon process start, the engine runs the same evaluation flow but with `cycl
 - **Three phases per cycle, optional**: pre / run / post. Each one independently picks long-lived AI session or one-shot command. The daemon does not enforce a phase catalog.
 - **Structured directive contract**: pre returns `run` / `end`; post returns `pre` / `run` / `end`. The daemon parses only the last JSON object on stdout per invocation; reasoning text is never interpreted.
 - **Last-iteration data flow**: `{{ pre.* }}` / `{{ post.* }}` / `{{ run.* }}` expose the most recent iteration to subsequent phases. Older iterations live on disk only.
-- **Cooperative iteration cap**: max_iterations is daemon-counted. The daemon attempts a cooperative termination (stdin directive) before SIGTERM.
+- **Iteration cap**: max_iterations is a hard daemon-enforced boundary on starting a new iteration. Operators can preempt cooperatively by inspecting `{{ cycle.iter }}` and `{{ config.max_iterations }}` in their pre / post body. When a post extends the cycle past the cap, daemon closes stdin and routes through `[[on_failure]] when.kind = "iter_exhausted"`.
 - **Operator-driven retry/backoff**: there is no daemon retry budget. Post returns `run` to retry, with whatever delay the operator implements inside the template.
 - **Queue-mode webhook serialization**: at most one cycle per ticket at a time. New webhooks update the diff cache and re-evaluate after the in-flight cycle ends.
 - **Failure handler cycle as first-class**: `[[on_failure]]` runs as a cycle, with `{{ failure.* }}` and forensics access via `roki log --cycle <failed_id>`. Failures inside a failure cycle fall back to the default escalation behavior.

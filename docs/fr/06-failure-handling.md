@@ -37,7 +37,7 @@ The daemon classifies internal failures into the kinds listed in [01-engine-mode
 | `schema_drift` | `directive` value outside the legal set for the current phase |
 | `repo_mismatch` | Pre's `repo` field does not match the admission-resolved repo ([05-worktree-and-session](05-worktree-and-session.md)) |
 | `stall` | Stall window exceeded; daemon SIGTERMed the subprocess |
-| `iter_exhausted` | `max_iterations` exceeded with no cooperative termination |
+| `iter_exhausted` | Post directive requested another iteration while `cycle.iter == max_iterations`; daemon refused to start the next iteration |
 | `template_error` | Liquid render failure when preparing a phase prompt or command |
 
 Operator-facing outcomes (e.g. `needs_operator`, `needs_split`, `allowlist_rejected`) are operator-authored `outcome` strings on a normal cycle's terminal post directive. Operator-driven Linear writes happen inside the run / post of those cycles.
