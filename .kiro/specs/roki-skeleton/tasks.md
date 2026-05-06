@@ -157,7 +157,7 @@ Tasks are ordered to match implementation order: foundation first, then layers i
   - _Depends: 5.2_
 
 - [ ] 6. Validation: end-to-end smoke gate and graph integrity
-- [ ] 6.1 Implement the end-to-end smoke test as the acceptance gate
+- [x] 6.1 Implement the end-to-end smoke test as the acceptance gate
   - Add `crates/roki-daemon/tests/e2e/skeleton_smoke.rs` that drives the binary as a subprocess via `env!("CARGO_BIN_EXE_roki")` and posts one Linear-shaped JSON body over loopback HTTP.
   - Setup: a `tempfile::TempDir` workspace containing a generated `roki.toml` (port chosen by `TcpListener::bind("127.0.0.1:0")` and written into the file), and a `WORKFLOW.toml` with `[admission].assignee = "u1"`, one `[[admission.repos]]`, and one `[[rule]]` whose `run.cmd` is `sh -c 'printf out; printf err 1>&2; exit 0'`.
   - Stub Linear `viewer { id }` with a `wiremock` server returning `u1`; set `ROKI_LINEAR_GRAPHQL_URL` to the wiremock base URL before spawning the binary so the `test-support`-gated seam takes effect.
