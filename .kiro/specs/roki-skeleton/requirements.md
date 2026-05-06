@@ -61,7 +61,7 @@ Naming, CLI surface, and config keys follow the canonical references `ref:cli` (
   - Polling fallback, refresh nudge, 429 backoff (deferred to later Wave 3 specs).
   - HMAC, hot reload, observability HTTP API (`[api]`), tracing pipeline, ring buffer, TUI, and any CLI subcommand other than `roki run`.
 - **Adjacent expectations**:
-  - Later specs may extend each scope item but must not regress the skeleton smoke test `tests/e2e/skeleton_smoke.rs`.
+  - Later specs may extend each scope item but must not regress the skeleton smoke test `crates/roki-daemon/tests/e2e/skeleton_smoke.rs`.
   - The skeleton does not own worktree lifecycle, the canonical capture-file layout, the structured event catalog, polling, signature verification, or recovery semantics; later specs introduce them.
   - Per `fr:02`, `[linear].token`, `[linear.webhook].secret`, `[linear.webhook].bind`, `[linear.webhook].port`, `[default.ai.session].cli`, `[default.ai.command].cli`, `[paths].workflow`, `[paths].session_root`, and `[paths].worktree_root` are required keys at the canonical schema level. The skeleton may relax `[linear.webhook].secret`, `[default.ai.session].cli`, and `[paths].worktree_root` requirement enforcement so deferred specs can tighten them later without contradiction.
 
@@ -92,7 +92,7 @@ Naming, CLI surface, and config keys follow the canonical references `ref:cli` (
 1. When configuration loading succeeds, the roki daemon shall bind an HTTP listener to `[linear.webhook].bind` and `[linear.webhook].port`.
 2. When an HTTP POST arrives at the webhook path with a JSON body, the roki daemon shall normalize the body into the internal issue model per `fr:03` and forward it to the admission filter.
 3. The roki daemon shall not verify any HMAC or signature header during the skeleton phase, even if `[linear.webhook].secret` is configured.
-4. If the HTTP body cannot be parsed as a Linear webhook payload, then the roki daemon shall reject the request with a client error response and emit a parse error.
+4. If the HTTP body cannot be parsed as a Linear webhook payload, then the roki daemon shall reject the request with a client error response (HTTP 4xx) and emit a parse-error log entry. Severity tagging is deferred to the canonical structured event catalog (`roki-obs-event-catalog`); the skeleton may use any operator-visible level.
 
 ### Requirement 4: Admission Filtering
 **Objective:** As an operator, I want a minimal admission filter so that only my own tickets in a single allowed repository proceed to rule evaluation.
@@ -139,12 +139,12 @@ Naming, CLI surface, and config keys follow the canonical references `ref:cli` (
 1. When the run subprocess of the first matched cycle exits, the roki daemon shall finalize capture files and terminate the process.
 2. The roki daemon shall exit with status zero when the cycle completed without an internal daemon error, regardless of the subprocess exit code.
 3. If an internal daemon error prevented cycle completion, then the roki daemon shall exit with a non-zero status.
-4. The roki daemon shall not accept additional webhooks after the first cycle reaches process exit during the skeleton phase.
+4. Once the first admitted-and-matched cycle has begun execution, the roki daemon shall reject all subsequent webhooks (HTTP 5xx) until process exit, during the skeleton phase. (Literal "after process exit" is trivially true; this acceptance criterion captures the operational cutoff that the smoke test asserts.)
 
 ### Requirement 9: Smoke Test as Acceptance Gate
 **Objective:** As a maintainer, I want a single end-to-end smoke test that exercises the skeleton path, so that every later spec is forced to preserve the backbone.
 
 #### Acceptance Criteria
-1. The roki repository shall include `tests/e2e/skeleton_smoke.rs` exercising the path from `roki run --config <path>` through one webhook, one admitted ticket, one matched `[[rule]]`, one inline `run.cmd` execution, captured stdout/stderr, and clean process exit.
+1. The roki repository shall include `crates/roki-daemon/tests/e2e/skeleton_smoke.rs` exercising the path from `roki run --config <path>` through one webhook, one admitted ticket, one matched `[[rule]]`, one inline `run.cmd` execution, captured stdout/stderr, and clean process exit. The smoke test lives inside the daemon crate's `tests/` directory because Cargo's virtual workspace does not expose a workspace-root `tests/` directory and `env!("CARGO_BIN_EXE_roki")` only resolves inside the binary's own crate.
 2. When the smoke test runs against the skeleton implementation, the roki test suite shall report it as passing.
 3. While later specs add functionality, the roki test suite shall continue to report `tests/e2e/skeleton_smoke.rs` as passing.

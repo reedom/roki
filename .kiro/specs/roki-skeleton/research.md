@@ -220,3 +220,63 @@ The other requirements' asset gaps are unchanged from the original analysis.
 - **Effort**: still S (1–3 days) for happy path + crate scaffold, +1 day for the smoke harness. Alignment removed design-phase decision overhead by collapsing four ambiguities up front.
 - **Risk**: still Low. The one genuinely open ordering call is whether the design lands the workspace `Cargo.toml` fix-up before the skeleton crate or as the skeleton's first task — both work, the choice affects PR shape only.
 
+---
+
+# Design Synthesis Outcomes
+
+Recorded after `/kiro-spec-design roki-skeleton`. The design draft is at `.kiro/specs/roki-skeleton/design.md`.
+
+## Generalization
+
+No generalization is warranted. The nine requirements all hang on a single linear pipeline (CLI → config load → bind listener → admit → first-match rule → spawn run.cmd → capture → exit). Req 5.3 explicitly forbids generalizing the matcher engine beyond `when.status` + `when.labels.has_all`; Req 6.2 explicitly forbids generalizing the phase form beyond `run.cmd`. Generalizing further would invite scope creep into Wave 1+ specs.
+
+## Build vs Adopt
+
+Adopt for every external concern:
+
+| Concern | Adopted | Rejected | Why |
+|---|---|---|---|
+| Async runtime | `tokio` (full features) | `async-std`, `smol` | Roadmap names tokio. axum and reqwest both align with tokio. |
+| HTTP server | `axum` | `hyper` direct, `actix-web`, `warp` | Roadmap names axum for the future `/api/v1/`; aligning the skeleton ahead of `roki-http-server` removes a later rewrite. |
+| HTTP client | `reqwest` (rustls-tls + json) | `ureq` (sync), raw `hyper` | One sync-feeling JSON POST + tokio integration; rustls keeps the binary self-contained. |
+| CLI parsing | `clap` v4 derive | `argh`, hand-rolled | Already in `roki-doctools`; matching the existing crate keeps the workspace consistent. |
+| Config parsing | `serde` + `toml` | `toml_edit`, JSON5 | Canonical TOML; serde derives are sufficient for the skeleton's hand-rolled validators. |
+| Subprocess | `tokio::process::Command` | `std::process` blocking | Subprocess wait sits inside the tokio runtime. |
+| Capture file IO | `std::fs::File` (sync create) + `Stdio::from` | async `tokio::fs::File` for stdio | Child stdio pipes read fine into a sync `File`; async only adds noise. |
+| UUID | `uuid` v4 | timestamps | Per-cycle dir name unambiguity; deterministic output is not required for the smoke. |
+| Logging | `tracing` + default `tracing-subscriber` | bespoke logger | Same crate the canonical pipeline picks; the skeleton uses the default formatter only and lets `roki-obs-tracing-pipeline` install a real subscriber. |
+| Errors | `thiserror` (per-module) + `anyhow` (top-level) | one `Box<dyn Error>` enum | Typed module errors keep boundaries; anyhow only at the binary edge. |
+
+## Simplification
+
+- **No actor / event-bus surface.** The cycle is single-shot, so the runtime is a sequential function: `parse argv → load configs → resolve me → bind listener → await one webhook → admit → match → run → exit`. Wave-1 engine specs introduce concurrency where it is needed.
+- **No `Tracker` trait abstraction.** `linear::client::resolve_viewer` is a free async function over `reqwest::Client`. A trait could be introduced when a second tracker (Wave 3+) actually needs it.
+- **No Liquid renderer.** Req 6.4 forbids it; the skeleton spawns `sh -c <run.cmd>` verbatim.
+- **No diff cache.** Req 8 (single-cycle exit) means the cache has at most one entry; modeled as a one-shot channel + atomic flag.
+- **No structured event catalog.** `tracing::error!` / `warn!` / `info!` calls only; the canonical event names land with `roki-obs-event-catalog`.
+- **Capture layout flattened.** `<session_root>/cycle-<uuid>/{stdout,stderr}` instead of the canonical `<session_root>/<ticket-id>/cycle-<uuid>/iter-<n>/{phase}.{stdout,stderr}`. The canonical layout is owned by `roki-runtime-capture-layout`. Documented in design Out of Boundary.
+
+## Decision: Linear GraphQL endpoint test seam
+
+- **Context**: smoke test (`tests/e2e/skeleton_smoke.rs`) must redirect the Linear `viewer { id }` request to a `wiremock` server. `ref:config` does not own a Linear endpoint key (Linear's GraphQL URL is fixed at `https://api.linear.app/graphql`).
+- **Alternatives considered**:
+  1. Add a canonical `[linear].graphql_url` key — pollutes the schema with a test-only knob; rejected.
+  2. Inject via a public test trait — extra plumbing for one purpose; rejected.
+  3. Hidden env var `ROKI_LINEAR_GRAPHQL_URL`, read only by `linear::client`, undocumented in `ref:config`. **Selected.**
+- **Trade-off**: a small undocumented surface, but it is a single env var owned by one module and disclosed in `design.md`. Removing it requires a code change in one place.
+- **Follow-up**: Wave 3 specs that touch Linear may formalize a real configuration knob if a non-test use case emerges.
+
+## Risks & Mitigations
+
+- **Module-path validation noise** — the skeleton `design.md` and the existing `fr:02` / `fr:12` module entries point at `crates/roki-daemon/...` paths that do not exist yet. `roki-doctools validate` reports six errors against this state. Mitigation: skeleton implementation tasks recreate the crate in one PR; all six clear together. The design intentionally retains the `modules:` block so that the daemon crate has its design-of-record once it lands.
+- **axum graceful shutdown ordering** — the smoke test asserts a 503 from a second POST after the cycle. Mitigation: `axum::serve(...).with_graceful_shutdown(...)` waits for in-flight handlers before binary exit; the runtime flips the rejecting flag before flushing capture and signaling shutdown.
+- **`run.cmd` shell semantics** — invoking `sh -c <cmd>` ties the skeleton to POSIX shell. Roadmap targets macOS + Linux only, so this is acceptable. Documented.
+
+## References
+
+- `docs/reference/cli.md` — canonical CLI surface (`roki run --config`).
+- `docs/reference/config.md` — canonical `roki.toml` and `WORKFLOW.toml` schemas.
+- `docs/fr/01-engine-model.md`, `docs/fr/02-configuration.md`, `docs/fr/03-linear-admission.md`, `docs/fr/04-phase-execution.md`, `docs/fr/12-daemon-lifecycle.md`.
+- Linear GraphQL webhooks: `https://developers.linear.app/docs/graphql/webhooks` (envelope shape; skeleton parses by path with `serde_json::Value`).
+- Linear API auth: `https://developers.linear.app/docs/graphql/working-with-the-graphql-api` (personal API token in the `Authorization` header verbatim).
+
