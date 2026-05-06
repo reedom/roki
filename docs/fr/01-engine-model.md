@@ -21,7 +21,7 @@ refs:
 
 ## Purpose
 
-All workflow knowledge lives in the operator's WORKFLOW.toml + workflow/*.md. The daemon is a thin event-driven engine: webhook → admission → diff → first-match dispatch → cycle of subprocess phases → directive-driven loop → termination.
+All workflow knowledge lives in the operator's WORKFLOW.toml + workflow/*.md. The daemon is a thin event-driven engine: a runtime diff (webhook delivery, polling fallback, or refresh nudge) or cold-start enumeration → admission → first-match dispatch → cycle of subprocess phases → directive-driven loop → termination.
 
 ## User-visible Behavior
 
@@ -62,7 +62,7 @@ Phase optionality:
 - **post is optional** — when omitted the daemon synthesizes `directive: "end"` and the cycle terminates after the run phase.
 - **`[[cleanup]]` shorthand**: an entry with **all three** phases omitted means "delete immediately, no cycle starts" (see §Cleanup). This is the only case in which `run` may be absent.
 
-Pre and post are subprocesses, just like run. They may be long-lived AI sessions (when declared `session = "session"`) reused across pre/post invocations within the same cycle, or one-shot commands. The choice is per-phase via the workflow/*.md frontmatter or the inline `pre.cmd` / `pre.prompt` / `post.cmd` / `post.prompt` form. See [02-configuration §Phase specification](02-configuration.md).
+Pre, run, and post are independent phase invocations. Wire shape is per-phase: a session-shape phase (`session = "session"`) shares one long-lived subprocess across all pre / post invocations of the cycle (each invocation is a turn inside that single process), while a command-shape phase spawns a fresh subprocess per invocation. The choice is per-phase via the workflow/*.md frontmatter or the inline `pre.cmd` / `pre.prompt` / `post.cmd` / `post.prompt` form. See [02-configuration §Phase specification](02-configuration.md).
 
 ### Directive schema
 
@@ -118,7 +118,7 @@ Phases that need a complex prev-iter object not present in the table (e.g. an ol
 
 **Env-var naming rule for `ROKI_PRE_*` / `ROKI_POST_*`**: only top-level scalar fields (string, number, bool) are exported. Each operator-defined key `<key>` becomes `ROKI_PRE_<KEY>` / `ROKI_POST_<KEY>` where `<KEY>` is the field name uppercased verbatim (no snake-case rewriting; non-`[A-Z0-9_]` characters cause the entry to be skipped with an info-level log naming the offending key). Nested objects, arrays, and null fields are not exported and are reachable through Liquid (`{{ pre.payload.foo }}`) or stdin only.
 
-### Iteration cap and cooperative termination
+### Iteration cap
 
 `roki.toml [engine].max_iterations` (default 10) caps a cycle's iteration count. The cap is enforced as a hard boundary on starting a new iteration:
 

@@ -142,7 +142,7 @@ The daemon never writes Linear directly. Failures detected by the daemon (stall,
 - **One subprocess per phase invocation, two shapes**: session (one process per cycle, reused across pre/post turns) and command (one process per phase iteration). Both use the same engine adapter for capture, stall detection, and exit translation.
 - **Pass-through cli lines**: the operator-authored cli is what runs. The daemon does not parse or rewrite permission flags.
 - **Structured directive parsing**: pre / post terminal JSON object on stdout is the only "thinking" surface the daemon parses. Earlier output is captured but does not influence the cycle.
-- **Engine-agnostic**: anything that follows the wire shape (stream-json bidirectional for session, exit-code + last-JSON-on-stdout for command) works. The daemon is not claude-specific.
+- **Engine-agnostic**: any cli that (a) reads stdin bytes as input, (b) emits a parseable JSON object on stdout as the terminal directive, and (c) for session-shape stays alive until stdin closes (for command-shape exits per invocation) works. The daemon imposes no specific wire format; stream-json is one supported instance among many. The daemon is not claude-specific.
 - **Per-launch logging**: every subprocess launch records the phase, cli, env vars, working dir, and (on completion) outcome and exit code in the structured event log.
 - **Stall handling**: per-shape default with per-file override. SIGTERM + grace + SIGKILL.
 - **Operator-driven retry**: post directives `pre` / `run` are how the operator retries. The daemon does not retry on its own.
