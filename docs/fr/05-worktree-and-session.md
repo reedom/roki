@@ -3,9 +3,7 @@ refs:
   id: fr:05-worktree-and-session
   kind: fr
   title: "Worktree and Session Lifecycle"
-  spec: roki-mvp
-  implements:
-    - req:roki-mvp:4
+  spec: roki-skeleton
   related:
     - fr:02-configuration
     - fr:07-recovery

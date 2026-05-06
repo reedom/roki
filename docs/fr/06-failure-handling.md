@@ -3,10 +3,7 @@ refs:
   id: fr:06-failure-handling
   kind: fr
   title: "Failure Handling"
-  spec: roki-mvp
-  implements:
-    - req:roki-mvp:12
-    - req:roki-mvp:5.10
+  spec: roki-skeleton
   related:
     - fr:07-recovery
     - fr:04-phase-execution
@@ -110,11 +107,6 @@ When `[[on_failure]]` does not match, the worktree and session tempdir are retai
 - **Failure-cycle inside a failure cycle** does not chain. The default behavior (escalation entry only) bounds the recovery depth.
 - **Persistent escalation queue** is out of scope; the queue is in-memory only and is reset on daemon restart.
 
-## Traceability
+## Related
 
-- **Roadmap**: `roadmap.md` > Constraints > Operator notifications.
-- **Requirements**:
-  - `req:roki-mvp:12`: Daemon-Only Failure Surfacing — covered by `[[on_failure]]` + escalation queue.
-  - `req:roki-mvp:5.10`: Retry-budget exhaustion — covered by `[[on_failure]] when.kind = "iter_exhausted"`.
-- **Reference**: [`docs/reference/log-events.md`](../reference/log-events.md) (pending rewrite for the new failure event catalog).
-- **Related FR**: [07-recovery](07-recovery.md), [04-phase-execution](04-phase-execution.md), [08-observability-logs](08-observability-logs.md), [10-http-api](10-http-api.md), [11-roki-tui](11-roki-tui.md), [01-engine-model](01-engine-model.md).
+[`docs/reference/log-events.md`](../reference/log-events.md), [07-recovery](07-recovery.md), [04-phase-execution](04-phase-execution.md), [08-observability-logs](08-observability-logs.md), [10-http-api](10-http-api.md), [11-roki-tui](11-roki-tui.md), [01-engine-model](01-engine-model.md).

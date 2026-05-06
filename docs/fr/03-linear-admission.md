@@ -3,9 +3,7 @@ refs:
   id: fr:03-linear-admission
   kind: fr
   title: "Linear Admission"
-  spec: roki-mvp
-  implements:
-    - req:roki-mvp:3
+  spec: roki-skeleton
   related:
     - fr:02-configuration
     - fr:07-recovery

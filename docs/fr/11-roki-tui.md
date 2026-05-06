@@ -3,14 +3,7 @@ refs:
   id: fr:11-roki-tui
   kind: fr
   title: "roki-tui"
-  spec: roki-observability
-  implements:
-    - req:roki-observability:8
-    - req:roki-observability:9
-    - req:roki-observability:10
-    - req:roki-observability:11
-    - req:roki-observability:6.4
-    - req:roki-observability:14.4
+  spec: roki-tui-foundation
   related:
     - fr:08-observability-logs
     - fr:06-failure-handling

@@ -3,19 +3,7 @@ refs:
   id: fr:10-http-api
   kind: fr
   title: "HTTP API"
-  spec: roki-observability
-  implements:
-    - req:roki-observability:1
-    - req:roki-observability:2
-    - req:roki-observability:3
-    - req:roki-observability:4
-    - req:roki-observability:5
-    - req:roki-observability:6
-    - req:roki-observability:7
-    - req:roki-observability:12
-    - req:roki-observability:13
-    - req:roki-observability:14
-    - req:roki-observability:15
+  spec: roki-http-server
   related:
     - fr:02-configuration
     - fr:03-linear-admission

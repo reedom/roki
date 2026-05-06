@@ -3,10 +3,7 @@ refs:
   id: fr:02-configuration
   kind: fr
   title: "Configuration"
-  spec: roki-mvp
-  implements:
-    - req:roki-mvp:2
-    - req:roki-mvp:6
+  spec: roki-skeleton
   depends_on:
     - ref:config
   related:

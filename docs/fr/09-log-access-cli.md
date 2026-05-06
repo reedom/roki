@@ -3,7 +3,7 @@ refs:
   id: fr:09-log-access-cli
   kind: fr
   title: "Log Access CLIs"
-  spec: roki-mvp
+  spec: roki-cli-log
   related:
     - fr:08-observability-logs
     - fr:10-http-api

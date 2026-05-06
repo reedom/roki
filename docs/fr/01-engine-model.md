@@ -3,7 +3,7 @@ refs:
   id: fr:01-engine-model
   kind: fr
   title: "Rule and Cycle Engine"
-  spec: roki-mvp
+  spec: roki-engine-iteration-loop
   related:
     - fr:02-configuration
     - fr:03-linear-admission

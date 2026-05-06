@@ -3,12 +3,7 @@ refs:
   id: fr:04-phase-execution
   kind: fr
   title: "Phase Subprocess Execution"
-  spec: roki-mvp
-  implements:
-    - req:roki-mvp:5
-    - req:roki-mvp:5.10
-    - req:roki-mvp:7
-    - req:roki-mvp:9
+  spec: roki-skeleton
   related:
     - fr:12-daemon-lifecycle
     - fr:02-configuration
@@ -159,14 +154,6 @@ The daemon never writes Linear directly. Failures detected by the daemon (stall,
 - **Linear writes from the daemon** are out of scope; the daemon never writes Linear directly. Operators that want Linear feedback inside a phase pass the appropriate MCP / CLI through their cli line.
 - **Daemon-side retry budgets and exponential backoff** are out of scope; operators express retry / backoff in their post directive (e.g. by sleeping inside the subsequent pre).
 
-## Traceability
+## Related
 
-- **Roadmap**: `roadmap.md` > Scope > In > "Phase subprocesses for code-changing work".
-- **Requirements**:
-  - `req:roki-mvp:5`: Bounded Subprocess Adapters (covers both session and command shapes).
-  - `req:roki-mvp:5.10`: Retry budget exhaustion → operators express via `[[on_failure]] when.kind = "iter_exhausted"`.
-  - `req:roki-mvp:7`: Agent Tooling Boundary (the daemon registers, proxies, or wraps no agent-side tool).
-  - `req:roki-mvp:9`: Permission Strategy — pass-through; operator owns the safety posture by choosing cli lines.
-- **Design**:
-  - `Engine Adapter` section of `.kiro/specs/roki-mvp/design.md` (pending rewrite).
-- **Related FR**: [12-daemon-lifecycle](12-daemon-lifecycle.md), [07-recovery](07-recovery.md), [05-worktree-and-session](05-worktree-and-session.md), [06-failure-handling](06-failure-handling.md), [01-engine-model](01-engine-model.md), [09-log-access-cli](09-log-access-cli.md).
+[12-daemon-lifecycle](12-daemon-lifecycle.md), [07-recovery](07-recovery.md), [05-worktree-and-session](05-worktree-and-session.md), [06-failure-handling](06-failure-handling.md), [01-engine-model](01-engine-model.md), [09-log-access-cli](09-log-access-cli.md).

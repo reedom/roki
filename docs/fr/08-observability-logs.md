@@ -3,9 +3,7 @@ refs:
   id: fr:08-observability-logs
   kind: fr
   title: "Observability Logs"
-  spec: roki-mvp
-  implements:
-    - req:roki-mvp:11
+  spec: roki-skeleton
   related:
     - ref:log-events
     - ref:cli

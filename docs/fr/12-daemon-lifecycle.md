@@ -3,9 +3,7 @@ refs:
   id: fr:12-daemon-lifecycle
   kind: fr
   title: "Daemon Lifecycle"
-  spec: roki-mvp
-  implements:
-    - req:roki-mvp:1
+  spec: roki-cli-daemon
   related:
     - ref:cli
     - fr:02-configuration

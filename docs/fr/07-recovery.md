@@ -3,10 +3,7 @@ refs:
   id: fr:07-recovery
   kind: fr
   title: "Diff Cache and Recovery"
-  spec: roki-mvp
-  implements:
-    - req:roki-mvp:8
-    - req:roki-mvp:10
+  spec: roki-skeleton
   related:
     - fr:12-daemon-lifecycle
     - fr:02-configuration
