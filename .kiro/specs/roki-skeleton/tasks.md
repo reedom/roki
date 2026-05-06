@@ -62,7 +62,7 @@ Tasks are ordered to match implementation order: foundation first, then layers i
   - _Depends: 1.2_
 
 - [ ] 3. Linear adapter: normalized ticket type, viewer resolver, webhook receiver
-- [ ] 3.1 Define the internal `NormalizedTicket` value object consumed by admission and rule evaluation
+- [x] 3.1 Define the internal `NormalizedTicket` value object consumed by admission and rule evaluation
   - Carry the minimum fields downstream modules consult: `id`, `assignee_id` (`Option`), `status`, `labels`.
   - Mark the constructor as crate-internal; only `linear::webhook::normalize` may build instances.
   - Observable completion: the type compiles; admission and rule modules can later import it without exposing the Linear envelope shape.
