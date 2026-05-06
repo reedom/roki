@@ -67,7 +67,7 @@ cli = "claude --input-format stream-json --output-format stream-json --model cla
 stall_seconds = 600
 
 [default.ai.command]
-cli = "claude -p '{{ prompt }}' --output-format stream-json --max-turns 100"
+cli = "claude -p --output-format stream-json --max-turns 100"
 stall_seconds = 300
 
 [engine]
@@ -179,15 +179,21 @@ Each file referenced from a `*.path` field has YAML frontmatter and a Liquid bod
 ```yaml
 ---
 session: session       # or "command" (default = "session")
-cli: ""                # session: ignored. command: optional override; falls back to roki.toml [default.ai.command].cli
+cli: ""                # optional override; falls back to roki.toml [default.ai.{session,command}].cli
 stall_seconds: 600     # optional override of default.ai.{session,command}.stall_seconds
 ---
-{Liquid body, rendered against the per-phase context envelope}
+{Liquid body}
 ```
 
-The Liquid body is rendered against the variables documented in [01-engine-model §Inter-phase data flow](01-engine-model.md). The rendered text is what the daemon passes to the subprocess: as the system / first-turn prompt for `session: "session"` mode, or as stdin for `session: "command"` mode.
+The Liquid body and the cli line are both rendered against the variables documented in [01-engine-model §Inter-phase data flow](01-engine-model.md). Daemon delivers the rendered output to the subprocess on three fixed channels (full mechanics in [04-phase-execution §Input channels](04-phase-execution.md)):
 
-Inline `cmd` strings are rendered the same way: the daemon evaluates the `cmd` value as a Liquid template against the same variables before spawning the subprocess. The rendered string becomes the command line.
+- **argv** — the rendered cli line.
+- **environment variables** — `ROKI_*` scalars from the data-flow table.
+- **stdin** — the rendered Liquid body for `path` and `prompt` phases. Inline `cmd` phases write nothing and stdin is closed immediately.
+
+For `session: "session"` mode, stdin stays open across the cycle and the daemon writes one rendered body per pre / post turn. The cli's own input flags (e.g. claude `--input-format stream-json`) decide how those bytes are framed; the daemon does not impose a wire format. For `session: "command"` mode, the body is written once and stdin is closed.
+
+Inline `prompt = "..."` is a one-line workflow body delivered via stdin as above. Inline `cmd = "..."` is a one-line cli substitute delivered via argv with stdin closed.
 
 ### Hot reload and validation
 

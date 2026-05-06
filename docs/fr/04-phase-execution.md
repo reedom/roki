@@ -35,20 +35,34 @@ Both subprocess shapes go through this FR's launch / observe / translate path. P
 
 | Shape | Declared by | cli source | Lifetime | Stdin protocol |
 |---|---|---|---|---|
-| Session | `session: "session"` in workflow/*.md frontmatter, or any inline `*.prompt` field | `roki.toml [default.ai.session].cli` | Reused across all pre and post invocations of the **same cycle** (one process per cycle, terminated when the cycle ends) | Bidirectional stream-json: the daemon writes one event JSON per turn; the AI replies with one terminal JSON per turn |
-| Command | `session: "command"` in workflow/*.md frontmatter, or any inline `*.cmd` field | `roki.toml [default.ai.command].cli`, or the workflow/*.md `cli` frontmatter, or the inline `*.cmd` string itself | Single invocation per phase iteration — fresh subprocess every time | Unidirectional: the daemon writes one launch envelope JSON to stdin and closes |
+| Session | `session: "session"` in workflow/*.md frontmatter, or any inline `*.prompt` field | `roki.toml [default.ai.session].cli` | Reused across all pre and post invocations of the **same cycle** (one process per cycle, terminated when the cycle ends) | stdin stays open across the cycle; daemon writes the rendered phase body once per pre / post turn. The cli's own input flags (e.g. claude `--input-format stream-json`) decide how those bytes are parsed. The cli replies with one terminal JSON per turn on stdout. |
+| Command | `session: "command"` in workflow/*.md frontmatter, or any inline `*.cmd` field | `roki.toml [default.ai.command].cli`, or the workflow/*.md `cli` frontmatter, or the inline `*.cmd` string itself | Single invocation per phase iteration — fresh subprocess every time | stdin gets the rendered phase body once and closes (or closes immediately for inline `*.cmd` phases). |
 
 Run-phase subprocesses are typically command-shape (the run is the heavyweight code-changing subprocess and benefits from a fresh sandbox each time). Pre and post are typically session-shape so the AI keeps in-cycle reasoning state across iterations. Operators are free to mix and match.
 
 ### Launch and observation
 
-**Trigger**: the cycle engine signals "spawn phase X with envelope E". The daemon does not pick what to spawn — it follows the engine's directive.
+**Trigger**: the cycle engine signals "spawn phase X for cycle iteration N". The daemon does not pick what to spawn — it follows the engine's directive.
 
 **Working directory**: every phase subprocess (session and command) is launched with cwd set to the ticket's worktree when one exists, otherwise to the ticket's session tempdir. The daemon resolves the worktree via `ghq list -p` plus the `wt` worktree convention ([05-worktree-and-session](05-worktree-and-session.md)); operators do not need to write `cd "$(roki repo)"` inside their cli line.
 
-**Launch (session)**: at the start of a cycle, if any phase declares session-shape, the daemon spawns one subprocess running `[default.ai.session].cli` with the working directory described above. The same process is reused across pre and post invocations of the cycle. The daemon writes a launch-envelope JSON to stdin once on first use, then writes one event JSON per turn after each cooperative `directive: "..."` reply.
+#### Input channels
 
-**Launch (command)**: each invocation spawns a fresh subprocess. The daemon renders the cli line as a Liquid template (substituting `{{ pre.* }}` / `{{ post.* }}` / `{{ ticket.* }}` / `{{ cycle.* }}` per [01-engine-model §Inter-phase data flow](01-engine-model.md)), spawns the process with the same working directory rule, writes the envelope JSON to stdin, closes stdin, and waits for exit.
+Daemon delivers per-phase input on three fixed channels:
+
+| Channel | Content | Notes |
+|---|---|---|
+| **argv** | Liquid-rendered cli line | The cli line itself is a Liquid template; operators substitute any field from [01-engine-model §Inter-phase data flow](01-engine-model.md) with `{{ ... }}`. For `path` / `prompt` phases the cli line comes from `[default.ai.{session,command}].cli` (or the workflow/*.md `cli` frontmatter override). For inline `cmd` phases the cli line is the `cmd` string itself. |
+| **env** | `ROKI_*` scalars | One env var per scalar entry in the data-flow table. Complex objects are not flattened. |
+| **stdin** | Rendered phase body | `path` phases write the rendered Liquid body. Inline `prompt` phases write the rendered inline string. Inline `cmd` phases write nothing (stdin is closed immediately). |
+
+For session-shape phases stdin stays open across the cycle and the daemon writes the rendered body of each pre / post turn as a separate write; the cli's own input format (`--input-format stream-json`, plain-text stdin, etc.) decides how the bytes are framed. For command-shape phases stdin is written once and closed.
+
+Operators that need a complex prev-iter object not present as a Liquid variable read it through `roki log --stream response --iter -N` ([09-log-access-cli](09-log-access-cli.md)).
+
+**Launch (session)**: at the start of a cycle, if any phase declares session-shape, the daemon Liquid-renders `[default.ai.session].cli` and spawns one subprocess with the working directory described above. The same process is reused across all pre and post invocations of the cycle. On every pre / post turn, the daemon writes the rendered Liquid body for that turn to stdin; stdin stays open until the cycle ends.
+
+**Launch (command)**: each invocation spawns a fresh subprocess. The daemon (a) Liquid-renders the cli line, (b) exports the `ROKI_*` scalar env vars, (c) spawns the process with the working-directory rule above, (d) writes the rendered phase body to stdin (for `path` / `prompt` phases) or closes stdin immediately (for inline `cmd` phases), and (e) waits for exit.
 
 **Capture**: stdout and stderr are copied byte-for-byte, as they arrive, to per-iter files under `<session_root>/<ticket-id>/cycle-<uuid>/iter-<n>/{phase}.{stdout,stderr}` ([09-log-access-cli §Storage layout](09-log-access-cli.md)). The daemon does not strip ANSI codes or filter content. Parsed-derivative files are written incrementally (described under §Event handling) rather than only at exit, so an in-flight phase already exposes its terminal directive to operator tooling the moment the agent emits it.
 
@@ -74,7 +88,7 @@ The daemon never registers, proxies, or wraps any agent-side tool. Every phase s
 cli = "claude --input-format stream-json --output-format stream-json --model claude-opus-4-7 --settings ~/.config/roki/claude.settings.json"
 
 [default.ai.command]
-cli = "claude -p '{{ prompt }}' --output-format stream-json --max-turns 100 --dangerously-skip-permissions"
+cli = "claude -p --output-format stream-json --max-turns 100 --dangerously-skip-permissions"
 ```
 
 Operators that want a fail-closed mode omit `[default.ai.session]` / `[default.ai.command]` and require each rule's per-phase cli to be set explicitly.
@@ -93,7 +107,7 @@ The daemon translates each phase's exit into a single signal returned to the cyc
 | Stall | Stdout silent for the configured stall window; daemon SIGTERMed the subprocess | `{ kind: "failure", failure_kind: "stall" }` |
 | Iteration cap (cooperative) | The daemon wrote `iteration_exhausted` to the session's stdin and the AI replied with `directive: "end"` | `{ kind: "directive", directive: "end" }` (handled as ordinary clean termination) |
 | Iteration cap (forced) | Same as above but the AI did not reply within the stall window | `{ kind: "failure", failure_kind: "iter_exhausted" }` |
-| Template render error | Liquid render of the cli line, prompt body, or envelope failed before launch | `{ kind: "failure", failure_kind: "template_error" }` |
+| Template render error | Liquid render of the cli line or phase body failed before launch | `{ kind: "failure", failure_kind: "template_error" }` |
 
 The cycle engine routes all `failure_kind` values through `[[on_failure]]` first-match ([01-engine-model §Failure handling](01-engine-model.md)). The daemon does not retry a phase on its own and does not enforce exponential backoff; retries are operator-driven through post directives.
 

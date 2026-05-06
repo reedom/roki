@@ -106,7 +106,13 @@ The daemon retains the **last completed iteration's** payloads and exposes them 
 | `{{ run.terminal.* }}` | (inline only) | Parsed claude/codex stream-json `result` event when applicable; null for shell commands |
 | `{{ failure.kind }}`, `{{ failure.failed_cycle_id }}`, `{{ failure.phase }}`, `{{ failure.iter }}`, `{{ failure.exit_code }}`, `{{ failure.error_text }}` | `ROKI_FAILURE_*` | Failure cycles only |
 
-For `{{ ticket.* }}` and complex objects, only the inline Liquid form is provided; reading them in shell-form phases requires `roki repo`-style accessor CLIs (see [09-log-access-cli](09-log-access-cli.md)) or piping the launch envelope from stdin (the daemon writes a JSON envelope to every subprocess's stdin at launch).
+The daemon exposes these variables to every subprocess on three fixed channels (see [04-phase-execution §Input channels](04-phase-execution.md)):
+
+- **argv** — the cli line is itself a Liquid template; operators reference any field with `{{ ... }}`.
+- **environment variables** — scalar-only `ROKI_*` entries per the table above. Complex objects are never flattened into env.
+- **stdin** — the rendered phase body (`path` body or inline `prompt` string). Inline `cmd` phases write nothing to stdin.
+
+Phases that need a complex prev-iter object not present in the table (e.g. an older iteration's parsed response) read it through `roki log --stream response --iter -N` ([09-log-access-cli](09-log-access-cli.md)).
 
 ### Iteration cap and cooperative termination
 
