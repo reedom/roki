@@ -42,6 +42,17 @@ workflow = "repos/bar.toml"
 ghq = "github.com/your-org/repo-baz"
 when.title.regex = "^\\[baz\\]"
 
+# Title prefix matcher (admission.repos only)
+[[admission.repos]]
+ghq = "github.com/your-org/repo-frontend"
+when.title.starts_with = "[ui]"
+
+# Title / body substring matcher (admission.repos only)
+[[admission.repos]]
+ghq = "github.com/your-org/repo-infra"
+when.title.contains = "infra"
+when.body.contains = "deployment"
+
 # Fallback (no when.*): catches tickets that match no other repo entry
 [[admission.repos]]
 ghq = "github.com/your-org/repo-default"
@@ -81,6 +92,21 @@ pre.path = "workflow/judge.md"
 run.path = "workflow/impl.md"
 post.path = "workflow/verdict.md"
 
+# Negation (scalar fields), rule-level assignee + repo matchers
+# (assignee is also gated coarsely by [admission].assignee; the rule-level
+#  matcher refines further. repo is the admission-resolved ghq path, useful
+#  when the same WORKFLOW.toml dispatches multiple repos via repo-discriminating
+#  rules.)
+# `when.<field>.not` works on scalar fields (status / assignee / repo / kind /
+#  phase). For label list negation use `when.labels.has_none = [...]`.
+[[rule]]
+when.status.not = "Done"
+when.assignee = "me"
+when.repo = "github.com/your-org/repo-bar"
+when.labels.has_any = ["roki:experimental"]
+when.labels.has_none = ["roki:hold"]
+run.cmd = "claude -p --output-format stream-json --max-turns 50"
+
 # ============================================================
 # [[cleanup]] — Cleanup-cycle rules (0+, ordered, first-match)
 # ============================================================
@@ -113,6 +139,17 @@ when.labels.has_none = ["roki:ready"]
 
 # `when.kind` matches a daemon-detected failure kind; `when.phase` matches
 # the phase that emitted the failure (always concrete: pre / run / post).
+#
+# Legal failure kinds:
+#   process_crash   subprocess SIGSEGV / non-zero exit without parseable terminal
+#   unparseable     last JSON object on stdout failed to parse / `directive` missing
+#   schema_drift    `directive` value outside the legal set for the phase
+#   repo_mismatch   pre's `repo` field disagrees with admission resolution
+#   fs_poison       worktree / session-tempdir setup error before phase launch
+#   stall           stall window exceeded; daemon SIGTERMed the subprocess
+#   iter_exhausted  post directive requested another iter past max_iterations
+#   template_error  Liquid render of cli line / phase body failed before launch
+# Full table: docs/fr/01-engine-model.md §Failure handling
 [[on_failure]]
 when.kind.in = ["unparseable", "schema_drift"]
 run.cmd = "claude -p '/post-mortem {{ failure.failed_cycle_id }}' --output-format stream-json"
@@ -169,3 +206,23 @@ Output `{"directive":"end","outcome":"failure_logged"}`.
 #   {{ failure.iter }} {{ failure.exit_code }} {{ failure.error_text }}
 #
 # Full table: docs/fr/01-engine-model.md §Inter-phase data flow
+
+# ============================================================
+# Per-repo TOML override (referenced via [[admission.repos]] workflow = "...")
+# ============================================================
+# When [[admission.repos]] sets `workflow = "<path>"`, that file replaces this
+# repo's [[rule]] / [[cleanup]] / [[on_failure]] lists entirely. Top-level
+# admission stays in WORKFLOW.toml.
+#
+# Schema is identical to the top-level WORKFLOW.toml minus the [admission]
+# block (admission lives only at the top level). A minimal per-repo TOML:
+#
+#   # repos/bar.toml
+#   [[rule]]
+#   when.status = "Todo"
+#   when.labels.has_all = ["roki:ready"]
+#   run.path = "../workflow/impl-bar.md"
+#
+#   [[cleanup]]
+#   when.status.in = ["Done", "Cancelled"]
+#   # all phases omitted → immediate-delete
