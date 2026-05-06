@@ -8,89 +8,133 @@ refs:
 # Roadmap
 
 ## Overview
-roki is a Rust scheduler/runner for Linear-driven coding work. Per ticket: launches an isolated implementation run, lets Claude Code (kiro + superpowers skills) do the work, enforces EARS-shaped acceptance criteria via the orchestrator session's artifact-validation logic at admission and PR-readiness. Goal: near-one-way path from Linear ticket to PR.
 
-Symphony-aligned (openai/symphony): no persistent DB, daemon-as-scheduler, agent-does-everything-else, `WORKFLOW.md` as user-repo policy boundary. Per admitted ticket the daemon launches a long-lived **orchestrator session** (`claude --input-format stream-json --output-format stream-json`) that decides admission, plans phases, validates `requirements.md` and `review.md` (`Read` + `Bash` for `stat` / EARS regex / per-criterion shape), and writes to Linear via the operator's Linear MCP. Tool surface: Linear MCP (write) + `Read` + `Bash` (read-only sandbox) — no Edit, Write, or Agent dispatch. Responses: strict JSON (after extended-thinking block) over a small action enum. The orchestrator emits phase requests; the daemon spawns short-lived `claude -p '/kiro-* <args>' --output-format stream-json` subprocesses for code-changing work. Phase catalog: `materialize_spec` (kiro-discovery, produces `requirements.md`), `implement` (kiro-impl), `validate` (kiro-validate-impl), `open_pr` (custom prompt, no skill), `ci_fix` (kiro-debug + kiro-verify-completion), `finalize_review` (review.md synthesis prompt).
+roki is a generic, config-driven engine for Linear-driven coding work. The daemon has four responsibilities and no domain logic:
 
-Divergences from symphony: (1) daemon-side Linear assignee admission filter gates orchestrator launch; (2) orchestrator constrains each ticket to a single allowlisted repo, rejecting multi-repo tickets with a `needs-split` Linear label + comment; (3) orchestrator-driven artifact validation between phases — `requirements.md` after `materialize_spec` gates `implement`; `review.md` after `finalize_review` gates `action=stop`. Substantive judgment lives in kiro skills inside phase subprocesses; orchestrator is structural witness.
+1. Receive Linear webhooks, gate via admission filter (assignee + `[[admission.repos]]`), detect ticket-property changes against an in-memory diff cache.
+2. Match each diff against operator-authored `[[cleanup]]` / `[[rule]]` / `[[on_failure]]` lists and run a cycle composed of three phases: pre → run → post.
+3. Create per-ticket worktrees and session tempdirs, capture each phase's stdout/stderr to disk, parse a structured `directive` from the last JSON object on stdout, loop or terminate accordingly.
+4. Expose log / event / repo-path access through `roki log`, `roki events`, `roki repo`, and an HTTP API.
 
-Daemon-only failures (stall, retry exhaustion, fs poison, multi-repo rejection) are surfaced to the operator by the orchestrator via Linear MCP when alive. When dead — crash, persistent schema drift, `max_phases` exhausted — the daemon routes to `Inactive(reason=orchestrator_crash | orchestrator_unparseable | orchestrator_budget_exhausted)`, logs the event, and populates the TUI escalation queue. The daemon never writes Linear directly and never judges artifact pass/fail.
+All workflow knowledge — phase catalog, retry policy, Linear write formatting, model selection, kiro skills — lives in operator-authored TOML and Markdown. The daemon does not know about kiro, codex, or claude specifics.
 
-## Approach Decision
-- **Chosen**: Clean restart, vertical slices, Rust + skill-first, symphony-informed daemon shape.
-- **Why**: Prior monorail reached "skill-first, small daemon" pivot but did not finish it. Symphony validates the small-daemon thesis and provides a battle-tested process model. Vertical slices keep each spec end-to-end deliverable.
-- **Rejected alternatives**:
-  - Tight monorail port — carries forward unnecessary decisions (SQLite persistence, per-task shell-out, single-repo assumptions).
-  - Hybrid port — same problem at lower volume.
-  - Daemon-first orchestration (Rust drives phases) — conflicts with skill-first pivot.
-  - Single bounded `claude` per ticket with auxiliary setup-judge / linear-updater subprocesses — no structured handle for per-phase budgets or thinking-effort caps. Replaced by long-lived orchestrator session emitting JSON phase requests, absorbing both auxiliary roles.
-  - Daemon-enforced mechanical "kiro gates" on `Judging → Active` and `Active → Inactive` — duplicated work the orchestrator does itself with `Read` + `Bash`, costing a second config namespace, second `Inactive.reason` set, two `kiro_*_status` agent tools. Replaced by orchestrator reading artifacts post-phase and emitting `action=run_phase` or `action=stop`.
+Canonical design: `docs/superpowers/specs/2026-05-06-roki-config-driven-engine-design.md`. Feature requirements: `docs/fr/01-..-12-..md`.
+
+## Approach
+
+Walking-skeleton + breadth-first. Wave 0 ships a minimal end-to-end backbone: CLI start → webhook receive → assignee filter → hardcoded repo resolve → first-match `[[rule]]` → cmd-form phase → exit. Wave 0 pins `tests/e2e/skeleton_smoke.rs`; every later wave adds one capability and must keep that smoke green.
+
+Each spec is small enough to land in one PR. Within a wave, specs are mutually independent unless a `Deps:` line says otherwise, so `kiro-spec-batch` can dispatch a wave in parallel.
 
 ## Scope
-- **In**:
-  - Linear-ticket-driven implementation runs against an operator-declared allowlist of repos
-  - Daemon-side Linear assignee admission filter (config value `me` resolves against the configured Linear API token); only issues in the configured `admit_states` set (default `["Todo"]`) are admitted
-  - Long-lived **orchestrator session** per admitted issue: a `claude --input-format stream-json --output-format stream-json` process driven by a `prompt_template_orchestrator` system prompt. Tool surface restricted to Linear MCP (write) + `Read` + `Bash` (read-only filesystem sandbox) — no Edit, no Write, no Agent dispatch. Responses are strict JSON (after any extended-thinking block) over a small action enum
-  - Orchestrator-driven admission decision: on receiving an `admission_request` event the orchestrator classifies an admitted issue and returns `judge: act | noop | needs_split | allowlist_rejected`. Tickets that touch more than one allowlisted repo are rejected back to the operator (`needs-split`) by the orchestrator via Linear MCP (label + comment)
-  - Daemon-driven worktree materialization (single repo per issue) via `wt` + `ghq` once the orchestrator returns `judge: act` for a single allowlisted repo (per-issue state keyed by Linear issue id alone)
-  - Phase subprocesses for code-changing work: each phase = one bounded `claude -p '/kiro-* <args>' --output-format stream-json` invocation with its own `--max-turns` budget and slash-command-driven kiro skill. Phase catalog: `materialize_spec` (kiro-discovery, produces per-issue `requirements.md`), `implement` (kiro-impl), `validate` (kiro-validate-impl), `open_pr` (custom prompt, no skill), `ci_fix` (kiro-debug + kiro-verify-completion), `finalize_review` (review.md synthesis prompt). Phase results return to the orchestrator as the next `phase_complete` (clean exit) or `phase_nonclean` (stall / non-zero exit / `--max-turns` exhaustion) input event
-  - Orchestrator-driven artifact validation: the orchestrator reads `requirements.md` (after `materialize_spec` phase) and `review.md` (after `finalize_review` phase) using `Read` + `Bash` (`stat`, `test -f`, EARS regex, per-criterion shape, code-reference reachability). On structural failure with retry budget remaining, the orchestrator re-nominates the producing phase with `additional_context` constructed from the failure detail. On retry-budget exhaustion, the orchestrator surfaces the failure to Linear via Linear MCP and emits `action=stop` with `outcome=failure`. Substantive judgment (does the code satisfy the criterion) is owned by the kiro skill set inside the prior phase subprocesses; the orchestrator is the structural witness
-  - Orchestrator processes `daemon_directive` events (stall, retry exhaustion, fs poison, orphan recovery, multi-repo rejection, etc.) and writes labels + comments to Linear via Linear MCP within its own session — replacing the previous one-shot linear-updater subprocess
-  - `WORKFLOW.md` loader (Liquid + Markdown, hot reload) with one named template block for the orchestrator: `prompt_template_orchestrator`. Phase subprocesses are driven by their slash commands plus a small daemon-controlled context envelope and do not consume named WORKFLOW.md template blocks
-  - Per-issue session tempdir lifecycle, daemon-driven worktree cleanup on terminal Linear state or assignment loss
-  - Configurable permission strategy (`--settings` allowlist with `--dangerously-skip-permissions` fallback); default agent sandbox `workspace-write` with elicitations rejected for phase subprocesses; orchestrator session runs with a read-only filesystem sandbox regardless of operator overrides
-  - Bounded thinking budget for the orchestrator: `extension.orchestrator.{model, effort, max_phases, allowed_tools}` namespace. Defaults `model = "claude-opus-4-7"`, `effort = "middle"` (extended-thinking budget; values `low | middle | high`), `max_phases = 20`, `allowed_tools` permits Linear MCP (write) + `Read` + `Bash`
-  - Optional HTTP API + ratatui TUI for observability (escalation queue is the secondary surface for daemon-only failures the orchestrator could not surface itself, i.e. the three orchestrator-dead `Inactive.reason` paths)
 
-- **Out**:
-  - Persistent database (deliberately; restart-recovery via Linear + filesystem)
-  - Linear write logic in Rust (the orchestrator session does all Linear writes via the operator's installed Linear MCP integration; the daemon never registers, proxies, or wraps any Linear write path)
-  - Daemon-registered, daemon-proxied, or daemon-wrapped agent-side tools of any kind (orchestrator session and phase subprocesses inherit the operator's local Claude Code tool surface as-is, restricted only by per-process `allowed_tools` lists the daemon assembles from config)
-  - PR creation / commit / push logic in Rust (the `open_pr` phase subprocess owns these via `gh` / `git` CLIs reachable through Bash)
-  - Container or VM isolation (rely on Claude Code's `workspace-write` sandbox + filesystem path safety for phase subprocesses; orchestrator runs read-only)
-  - Auto-merge orchestration (deferred; v1 stops at PR open / human review)
-  - Multi-host SSH workers (symphony has it; roki defers)
-  - Multi-tenant orchestration (one daemon per developer)
-  - Per-repo `WORKFLOW.md` overrides (single workspace-level policy artifact only)
-  - Multi-repo tickets (one ticket = one repo; multi-repo tickets are rejected back to the operator by the orchestrator with a `needs-split` Linear label and an explanatory comment via Linear MCP)
-  - Generic team / label / project admission filtering beyond the configured assignee constraint
-  - Slack and other push-style operator notification channels (covered by orchestrator-driven Linear writes + TUI escalation queue for the orchestrator-dead failure paths; can be re-introduced if Linear-routed feedback proves insufficient)
-  - Orchestrator-side context compaction (long tickets risk Claude Code's context-window exhaustion mid-session; deferred — for MVP the `max_phases` budget bounds the session length and operators retry from scratch when it is hit)
-  - Multi-engine portability (orchestrator session and phase subprocesses are written against Claude Code stream-json; cross-engine adapters are deferred)
-  - Post-merge flow-document distill / archive sweep performed by the daemon (handled in CI; not a roki concern)
-  - Windows support
+- **In** (per design §2.3):
+  - Webhook intake + admission gate (assignee filter, `[[admission.repos]]` first-match repo resolve).
+  - Rule dispatch: `[[cleanup]]` then `[[rule]]` first-match per diff; cycle = pre → run → post loop driven by structured `directive` JSON.
+  - Phase subprocess lifecycle: long-lived AI session reused across one cycle's pre/post, or one-shot command form. stdout/stderr capture to files. Stall detection + SIGTERM. `iteration_exhausted` cooperative termination.
+  - Per-ticket worktree (lazy on first `pre.directive=run`) + session tempdir (eager at admission). Cleanup on `[[cleanup]]` cycle, admission-filter eviction, or cold-start orphan reconciliation.
+  - In-memory diff cache `(ticket_id) → {status, labels, assignee, repo, workflow_path}`; no persistent DB.
+  - `[[on_failure]]` first-match for daemon-detected failures (`process_crash`, `unparseable`, `schema_drift`, `stall`, `iter_exhausted`, `template_error`); failure cycles do not chain.
+  - TUI escalation queue (in-memory ring) for failures with no operator handler.
+  - Hot reload of `WORKFLOW.toml` + `workflow/*.md`; in-flight cycles unaffected; reload failure keeps previous policy.
+  - Per-repo TOML override via `[[admission.repos]] workflow = "repos/<repo>.toml"`.
+  - Liquid template variables (`ticket.* / repo.* / cycle.* / pre.* / post.* / run.* / failure.*`) with matching `ROKI_*` env vars.
+  - Tracing-based structured event log (stdout / file / both); ring buffer for HTTP and TUI.
+  - HTTP API under `/api/v1/` (axum); ratatui TUI client.
+  - `roki repo` CLI for phases that need worktree / ghq base path.
+
+- **Out** (per design §2.2):
+  - Persistent database. State lives in Linear + filesystem; restart re-derives.
+  - Daemon-driven Linear writes. Operators write to Linear from inside their phases.
+  - Daemon-known phase catalog (`classify`, `implement`, `review`, `validate`, `open_pr`, `ci_fix`, `finalize_review`).
+  - 5-state per-issue state machine; 12-variant `Inactive.reason`.
+  - `SPEC_DRIVEN` / `NEEDS_CLASSIFY` mode flag.
+  - Daemon-side retry budget / exponential backoff. Encoded in operator post directives.
+  - Long-lived per-ticket orchestrator session spanning multiple cycles. AI sessions are scoped to one cycle.
+  - `materialize_spec` / pre-admission-judge concepts.
+  - Daemon-registered agent-side tools. Phases inherit the operator's local Claude Code / MCP installation as-is.
+  - Container or VM isolation; multi-host SSH workers; multi-tenant orchestration.
+  - Auto-merge orchestration; PR creation logic. Operators encode via their phases.
+  - Multi-repo tickets handled by the daemon. The operator's pre can detect and emit `directive: end, outcome: needs_split` with a Linear write of its own.
+  - Windows support.
 
 ## Constraints
-- **Language**: Rust 2024, tokio async runtime.
-- **Engine**: Claude Code in two distinct invocation shapes per ticket.
-  - Orchestrator session (long-lived): `claude --input-format stream-json --output-format stream-json` driven by `prompt_template_orchestrator`. Defaults: `model = "claude-opus-4-7"`, `effort = "middle"` (extended-thinking budget; `low | middle | high`), `max_phases = 20`, `allowed_tools` permits Linear MCP (write) + `Read` + `Bash` (read-only filesystem sandbox). Strict JSON responses (after any extended-thinking block) over a small action enum; no Edit, no Write, no Agent dispatch.
-  - Phase subprocess (short-lived, one per phase): `claude -p '/kiro-* <args>' --output-format stream-json` with its own `--max-turns` budget. Slash commands are supported in headless `-p` mode and drive the chosen kiro skill. The orchestrator is bounded by `max_phases` instead of per-process `--max-turns`.
-- **Skills**: kiro skills depended on as personal skills under `~/.claude/skills/kiro-*` (not vendored, not plugin-namespaced; namespacing breaks slash-command resolution). Phase subprocesses use the runtime kiro skills `kiro-impl`, `kiro-validate-impl`, `kiro-debug`, `kiro-verify-completion`, `kiro-review`; authoring-time skills (`kiro-spec-*`, `kiro-discovery`, `kiro-validate-design`, `kiro-validate-gap`, `kiro-steering`, `kiro-steering-custom`) are operator-side only and are never invoked by the daemon.
-- **Agent tool surface**: orchestrator and phase subprocesses inherit the operator's local Claude Code installation verbatim — its built-in tool set plus the operator's installed MCP servers (including the operator's Linear MCP for Linear reads/writes). The daemon adds nothing to that surface; it only narrows it via per-process `allowed_tools`.
-- **External CLIs**: operator must install `wt` (worktrunk) and `ghq` and ensure both are on `$PATH`; the daemon shells out to them for worktree materialization and cleanup.
-- **Admission**: only issues whose Linear assignee matches the configured assignee filter and whose Linear workflow state is in the configured `admit_states` set (default `["Todo"]`) are admitted. The orchestrator's admission decision (`act | noop | needs_split | allowlist_rejected`) runs only after both checks pass.
-- **Linear API**: rate limit 5,000 req/hr; Linear discourages polling — webhook receiver is the hot path, polling is the fallback for admitted tickets at <=5min cadence with 429 backoff. Daemon-side Linear access is read-only.
-- **Permissions**: `permissions.allow` allowlist is flaky in 2026; daemon supports config-driven fallback to `--dangerously-skip-permissions` for phase subprocesses. The orchestrator session always runs with a read-only filesystem sandbox regardless of operator overrides; its `Bash` access executes inside that sandbox so commands cannot mutate the worktree (`stat`, `test -f`, `grep` on `requirements.md` / `review.md` etc. are intended use). Its access to write-capable Linear MCP tools is governed by the operator's MCP allowlist. A future Rust-native read-only artifact-validation tool may replace the orchestrator's `Bash` use post-MVP, allowing the allowlist to drop `Bash` again.
-- **Operator notifications**: when alive, the orchestrator session is itself responsible for routing daemon-only failure directives (stall, max-turns exhaustion, unknown `result.subtype`, retry-budget exhaustion, judge final failure, filesystem poison, orphaned recovery residue, multi-repo rejection) to Linear via Linear MCP. When the orchestrator is dead — process crash, persistent JSON schema drift, or `max_phases` exhausted — the daemon does **not** fall back to direct Linear writes; instead it routes the issue to `Inactive(reason=orchestrator_crash | orchestrator_unparseable | orchestrator_budget_exhausted)`, emits a structured log event, and populates the TUI escalation queue. Operators notice via the TUI in those three cases.
-- **Platform**: macOS + Linux. Terminal compatibility for TUI: iTerm2 / Ghostty / WezTerm / Alacritty primary; macOS Terminal.app limited (RGB color caveats).
 
-## Boundary Strategy
-- **Why this split**: roki-mvp is the symphony-parity vertical slice; nothing else has anywhere to plug in without it. Artifact validation belongs to the orchestrator session (its `Read` + `Bash` surface suffices); a separate daemon-side mechanical layer was redundant. Observability (HTTP + TUI) is one cohesive UX.
-- **Orchestrator-vs-phase boundary**: orchestrator session = only "thinking" component per ticket; owns admission, phase planning, artifact validation, daemon-directive interpretation, Linear writes. Uses `Read` + `Bash` in a read-only sandbox; no Edit, Write, Agent dispatch. Phase subprocesses = only code-changing components; each is bounded by `--max-turns`, drives a slash-command kiro skill (or daemon-internal prompt fragment for `open_pr` / `finalize_review`), returns `phase_complete` (clean exit) or `phase_nonclean` (stall / non-zero / max-turns) and exits. The orchestrator absorbs the prior setup-judge / linear-updater roles plus the prior daemon-side kiro-spec / kiro-review gates; their WORKFLOW.md template blocks, config sections, and `Inactive.reason` values are removed.
-- **Daemon role**: mechanical observation only. Enforces admission filters, materializes worktrees, supervises subprocess lifecycles (stall detection, stream-json parsing, exit handling), translates events into orchestrator directives, routes the three orchestrator-dead failure paths to `Inactive(reason=*)` + TUI escalation queue. Never decides "what should happen next" or whether an artifact passes.
-- **Orchestrator-driven artifact validation**: substantive judgment of acceptance criteria lives in kiro skills inside phase subprocesses (`kiro-discovery` synthesizes `requirements.md`; per-task `kiro-review` + `kiro-validate-impl` accumulate verdicts; `finalize_review` synthesizes `review.md`). After each producing phase clean-exits, the orchestrator reads the artifact (`Read` + `Bash` for `stat` / `test -f` / EARS regex / per-criterion shape / reference reachability) and decides: pass → next phase or `action=stop(success)`; structural failure with retry budget → re-nominate the phase via `action=run_phase` with `additional_context`; budget exhausted → write Linear feedback via Linear MCP and emit `action=stop(failure)`. Retry budget is orchestrator-internal (from `prompt_template_orchestrator`), bounded by `max_phases`; no separate per-gate `max_attempts`.
-- **Shared seams to watch**:
-  - **State machine extension points**: roki-mvp publishes a read-only `OrchestratorRead` snapshot trait and structured transition events that observability subscribes to. The 6-state machine (Pending/Judging/Active/Backoff/Inactive/Cleaning) is preserved; three `Inactive.reason` values are added: `orchestrator_crash`, `orchestrator_unparseable`, `orchestrator_budget_exhausted`. There are no vetoable transitions — the prior `Judging → Active` (spec gate) and `Active → Inactive` (review gate) hooks are removed alongside the gates themselves.
-  - **Tracker nudge**: roki-mvp publishes a `TrackerRefresh` trait that lets external callers request an out-of-cycle Linear poll without bypassing the cadence cap or the 429 backoff state.
-  - **Phase context envelope**: the engine adapter accepts an additive optional `additional_context` field on the per-phase context and forwards it verbatim to the phase subprocess through a stable, machine-extractable section of its prompt envelope. The orchestrator populates `additional_context` directly on `action=run_phase` directives — including the artifact-validation retry path (e.g. failing per-criterion entries from `review.md` injected into the next `implement` phase). The orchestrator session itself is bounded only by `max_phases` and its own JSON action enum.
-  - **Subprocess invocation taxonomy**: the engine adapter supervises one long-lived orchestrator session (`--input-format stream-json --output-format stream-json`) plus a series of short-lived phase subprocesses (`-p '/kiro-* <args>' --output-format stream-json`) per ticket, using the same lifecycle, stall detection, and stream-json parsing for each.
-  - **Agent-side tool surface (no daemon registration)**: the orchestrator and phase subprocesses reach Linear / git / gh / shell through the operator's installed MCP servers and Bash, not through daemon-registered tools — the daemon does not expose any agent-facing tool registry.
-  - **`WORKFLOW.md` schema**: the loader reserves `extension.orchestrator.*` and `extension.server.*` namespaces and round-trips unknown keys without interpretation. The previous `extension.linear_updater.*`, `extension.gates.spec.*`, and `extension.gates.review.*` namespaces are removed alongside the subprocess shapes / gates they served. The `[judge]` block in `roki.toml` is also removed (model selection now lives in `extension.orchestrator.model`).
-  - **Workspace path layout**: `.kiro/specs/<issue>/` lives inside the workspace; the `materialize_spec` phase writes `requirements.md` there and the `finalize_review` phase writes `review.md` there.
+- **Language**: Rust 2024, tokio async runtime.
+- **Engine surface**: the daemon spawns subprocesses described by operator config (`cli` strings, `path` Liquid templates, `prompt` / `cmd` inline forms). Claude Code is one possible engine, not hardcoded; codex or any CLI that emits stream-json or a final JSON line on stdout works.
+- **Linear API**: webhook hot path (HMAC verify against `[linear].webhook_secret`); polling fallback ≤5min cadence with 429 backoff. Daemon-side Linear access is read-only.
+- **External CLIs**: operator must install `wt` (worktrunk) and `ghq` for worktree materialization and cleanup.
+- **Permissions / sandboxing**: phases inherit the operator's Claude Code / shell permissions. The daemon does not impose its own sandbox.
+- **Operator notifications**: when an `[[on_failure]]` handler matches, the handler writes Linear (or wherever) itself. When no handler matches, the daemon emits a tracing event and an in-memory escalation entry visible via TUI / HTTP.
+- **Platform**: macOS + Linux. TUI primary terminals: iTerm2, Ghostty, WezTerm, Alacritty. Terminal.app limited (RGB caveats).
 
 ## Specs (dependency order)
-- [x] roki-mvp -- symphony-parity vertical slice: Rust skeleton + Linear poll + orchestrator session + phase subprocess lifecycle + workspace + run loop + orchestrator-driven artifact validation (`requirements.md` after `materialize_spec`, `review.md` after `finalize_review`). Single repo per ticket; multi-repo tickets are rejected by the orchestrator's admission decision with a `needs-split` Linear label and comment posted via Linear MCP. Dependencies: none
-- [x] roki-observability -- optional HTTP API (axum) + ratatui TUI client; versioned JSON schema under `/api/v1/` centralized in a shared `roki-api-types` crate. Dependencies: roki-mvp
-- ~~roki-spec-gate~~ -- removed from roki scope; absorbed into roki-mvp as orchestrator-driven artifact validation. The historical spec under `.kiro/specs/roki-spec-gate/` is removed.
-- ~~roki-review-gate~~ -- removed from roki scope; absorbed into roki-mvp as orchestrator-driven artifact validation. The historical spec under `.kiro/specs/roki-review-gate/` is removed.
-- ~~roki-distill-postmerge~~ -- removed from roki scope; flow-document distill / archive sweep is now handled in CI, not by the daemon. The historical spec under `.kiro/specs/roki-distill-postmerge/` is retained for reference but is not active.
+
+Specs marked `[ ]` are scaffold-only (`brief.md` + `spec.json`). Requirements / design / tasks come from `/kiro-spec-*` skills.
+
+### Wave 0 — backbone
+
+- [ ] roki-skeleton — CLI start + roki.toml read + webhook receive (no signature verify) + assignee filter + hardcoded single-repo resolve + `[[rule]]` first-match + cmd-form phase + stdout/stderr capture + process exit. Pins `tests/e2e/skeleton_smoke.rs`.
+
+### Wave 1 — engine breadth
+
+- [ ] roki-engine-iteration-loop — pre → run → post directive loop; legal directive sets per phase. Deps: roki-skeleton.
+- [ ] roki-engine-iter-cap — `[engine].max_iterations`; cooperative `iteration_exhausted` directive; SIGTERM fallback; `iter_exhausted` failure routing for command form. Deps: roki-engine-iteration-loop.
+- [ ] roki-engine-cleanup-cycle — `[[cleanup]]` first-match; immediate-delete shorthand; cleanup-before-rule eval order. Deps: roki-engine-iteration-loop.
+- [ ] roki-engine-failure-cycle — `[[on_failure]]` first-match; six failure kinds; no recursive failure. Deps: roki-engine-iteration-loop.
+- [ ] roki-engine-stall — per-phase stall window; SIGTERM; routes via `kind=stall`. Deps: roki-engine-iteration-loop.
+- [ ] roki-engine-queue-preemption — webhook arriving mid-cycle defers re-eval; final-state-only semantics; admission-filter loss does not preempt. Deps: roki-engine-iteration-loop.
+
+### Wave 2 — runtime breadth
+
+- [ ] roki-runtime-session-mode — long-lived `--input-format stream-json --output-format stream-json` session for `session`-mode phases; CLI from `[default.ai.session].cli` or frontmatter override. Deps: roki-engine-iteration-loop.
+- [ ] roki-runtime-worktree-lazy — session_tempdir at admission; worktree on first `pre.directive=run`; cleanup on cycle / eviction / orphan. Deps: roki-skeleton.
+- [ ] roki-runtime-template-vars — Liquid render of phase bodies; `ticket.* / repo.* / cycle.* / pre.* / post.* / run.* / failure.*`; matching `ROKI_*` env vars. Deps: roki-skeleton.
+- [ ] roki-runtime-capture-layout — per-cycle / per-phase stdout/stderr capture file layout under session_tempdir; the read surface for `roki log`. Deps: roki-skeleton.
+
+### Wave 3 — Linear adapter breadth
+
+- [ ] roki-linear-signature-verify — `[linear].webhook_secret` HMAC check; reject unsigned / invalid. Deps: roki-skeleton.
+- [ ] roki-linear-diff-cache — in-memory ticket cache; diff-on-webhook drives rule eval; eviction on assignee loss. Deps: roki-skeleton.
+- [ ] roki-linear-admission-repos — full `[[admission.repos]]` matcher set (`when.labels.*`, `when.title.regex|starts_with|contains`, `when.body.*`, fallback no-`when` entry); resolves repo + optional per-repo workflow path. Deps: roki-skeleton.
+- [ ] roki-linear-cold-start — at daemon start, fetch all assigned admitted tickets; reconcile against on-disk worktrees; orphan cleanup. Deps: roki-linear-admission-repos, roki-runtime-worktree-lazy.
+
+### Wave 4 — config breadth
+
+- [ ] roki-config-workflow-toml-full — full `WORKFLOW.toml` schema (admission + rule + cleanup + on_failure); first-match semantics; AND-within-entry, OR-via-entries; condition vocabulary. Deps: roki-skeleton.
+- [ ] roki-config-workflow-md — `workflow/*.md` loader: YAML frontmatter (`session` / `command`, `cli`, `stall_seconds` override) + Liquid body. Deps: roki-config-workflow-toml-full.
+- [ ] roki-config-hot-reload — file watcher triggers reload + schema validate; in-flight cycles unaffected; reload failure keeps previous policy. Deps: roki-config-workflow-toml-full.
+- [ ] roki-config-per-repo-toml — `[[admission.repos]] workflow="repos/bar.toml"` replaces top-level rule / cleanup / on_failure for that repo; no merge. Deps: roki-config-workflow-toml-full.
+
+### Wave 5 — observability
+
+- [ ] roki-obs-tracing-pipeline — tracing layer config (level, destination=stdout|file|both, file_path); JSONL line format. Deps: roki-skeleton.
+- [ ] roki-obs-event-catalog — structured event names + fields per design §8.5; emitted by daemon, not by phases. Deps: roki-obs-tracing-pipeline.
+- [ ] roki-obs-ring-buffer — in-memory ring (`[log].ring_size`); read-only feed for HTTP / TUI. Deps: roki-obs-tracing-pipeline.
+- [ ] roki-obs-redaction — `[linear].token` and other secrets redacted before tracing emission. Deps: roki-obs-tracing-pipeline.
+
+### Wave 6 — CLI sub-commands
+
+- [ ] roki-cli-daemon — `roki` (start daemon), graceful shutdown, config-path resolution. Deps: roki-skeleton.
+- [ ] roki-cli-log — `roki log --cycle <id> [--phase ...]`; reads capture-layout files. Deps: roki-runtime-capture-layout.
+- [ ] roki-cli-events — `roki events --since <ts>`; reads ring buffer or file. Deps: roki-obs-ring-buffer.
+- [ ] roki-cli-repo — `roki repo [<ghq>] [--auto-clone] [--worktree]`; reads `ROKI_TICKET_ID` / `ROKI_REPO`. Deps: roki-runtime-worktree-lazy.
+
+### Wave 7 — HTTP API
+
+- [ ] roki-http-server — axum bind + `[network].bind/port`; `/api/v1/*` versioned. Deps: roki-skeleton.
+- [ ] roki-http-tickets — GET active tickets + cycle state. Deps: roki-http-server.
+- [ ] roki-http-events — GET event stream / since-cursor; backed by ring buffer. Deps: roki-http-server, roki-obs-ring-buffer.
+- [ ] roki-http-escalations — GET escalation queue entries. Deps: roki-http-server, roki-engine-failure-cycle.
+
+### Wave 8 — TUI
+
+- [ ] roki-tui-foundation — ratatui app shell, view router, key map; HTTP API client. Deps: roki-http-tickets.
+- [ ] roki-tui-tickets-view — ticket list / cycle state. Deps: roki-tui-foundation.
+- [ ] roki-tui-detail-view — ticket detail + recent phase output. Deps: roki-tui-foundation, roki-http-events.
+- [ ] roki-tui-events-view — live event stream. Deps: roki-tui-foundation, roki-http-events.
+- [ ] roki-tui-escalations-view — escalation queue read; operator dismiss = close Linear ticket. Deps: roki-tui-foundation, roki-http-escalations.
+
+## Filling each spec
+
+`/kiro-spec-init <name>` → `/kiro-spec-requirements <name>` → `/kiro-spec-design <name>` → `/kiro-spec-tasks <name>` → `/kiro-impl <name>`. Or `/kiro-spec-quick <name> --auto` to fast-track. `/kiro-spec-batch` dispatches a whole wave at once.
