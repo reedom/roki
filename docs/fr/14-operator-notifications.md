@@ -35,6 +35,7 @@ The daemon classifies internal failures into the kinds listed in [20-rule-and-cy
 | `process_crash` | Subprocess SIGSEGV or non-zero exit without a parseable terminal response (covers former `fs_poison` during launch) |
 | `unparseable` | Last JSON object on stdout failed to parse, or `directive` missing |
 | `schema_drift` | `directive` value outside the legal set for the current phase (covers former `orchestrator_unparseable`) |
+| `repo_mismatch` | Pre's `repo` field does not match the admission-resolved repo ([06-worktree-and-session](06-worktree-and-session.md)) |
 | `stall` | Stall window exceeded; daemon SIGTERMed the subprocess (covers former phase-stall and orchestrator-stall) |
 | `iter_exhausted` | `max_iterations` exceeded with no cooperative termination (covers former `orchestrator_budget_exhausted` and `retry_exhausted`) |
 | `template_error` | Liquid render failure when preparing a phase prompt or command |

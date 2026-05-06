@@ -77,6 +77,7 @@ The daemon translates each phase's exit into a single signal returned to the cyc
 | Clean directive | The terminal JSON object on stdout has a legal `directive` value for the phase | `{ kind: "directive", directive: <value>, payload: <parsed JSON> }` |
 | Unparseable | No JSON object on stdout, or the last JSON object lacks `directive` | `{ kind: "failure", failure_kind: "unparseable" }` |
 | Schema drift | `directive` value is outside the legal set for the phase | `{ kind: "failure", failure_kind: "schema_drift" }` |
+| Repo mismatch | Pre's `repo` field does not match the admission-resolved repo | `{ kind: "failure", failure_kind: "repo_mismatch" }` |
 | Process crash | Subprocess exited via signal or non-zero exit code without producing any directive | `{ kind: "failure", failure_kind: "process_crash", exit_code: N }` |
 | Stall | Stdout silent for the configured stall window; daemon SIGTERMed the subprocess | `{ kind: "failure", failure_kind: "stall" }` |
 | Iteration cap (cooperative) | The daemon wrote `iteration_exhausted` to the session's stdin and the AI replied with `directive: "end"` | `{ kind: "directive", directive: "end" }` (handled as ordinary clean termination) |

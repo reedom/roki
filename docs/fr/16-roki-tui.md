@@ -30,8 +30,8 @@ A single-terminal view of daemon state at second-by-second granularity. The TUI'
 
 ### Startup and connection
 
-- **`roki-tui <api-url>`**: connects to the given API URL, fetches the initial ticket snapshot via `GET /api/v1/tickets` ([15-http-api](15-http-api.md)), and renders a live view within the documented startup window (1 second on a developer-class machine against a loopback daemon; pinned in `SPEC.md`).
-- **Polling loop**: re-fetches `/api/v1/tickets`, `/api/v1/events?since=<latest_seq>`, and `/api/v1/escalations` at the configured cadences. If the API returns non-2xx, an error is shown in the status bar; the TUI does not exit.
+- **`roki-tui <api-url>`**: connects to the given API URL, fetches the initial ticket snapshot via `GET /api/tickets` ([15-http-api](15-http-api.md)), and renders a live view within the documented startup window (1 second on a developer-class machine against a loopback daemon; pinned in `SPEC.md`).
+- **Polling loop**: re-fetches `/api/tickets`, `/api/events?since=<latest_seq>`, and `/api/escalations` at the configured cadences. If the API returns non-2xx, an error is shown in the status bar; the TUI does not exit.
 - **Quit key**: a clean exit on the documented quit key. Restores the terminal to its original mode.
 
 ### Views
@@ -39,7 +39,7 @@ A single-terminal view of daemon state at second-by-second granularity. The TUI'
 The TUI renders four views; the operator switches between them with documented keys:
 
 - **Tickets**: list of admitted tickets (id, repo, status, labels, assignee, in-flight cycle id, last event timestamp). Sortable by last event time.
-- **Ticket detail**: cycle history for the selected ticket (cycle id, kind, trigger, started_at, ended_at, terminal directive or failure kind), plus a tail view that streams the most recent iter's run stdout via `GET /api/v1/tickets/{id}/cycles/{cycle_id}/iters/{n}/run/stdout`.
+- **Ticket detail**: cycle history for the selected ticket (cycle id, kind, trigger, started_at, ended_at, terminal directive or failure kind), plus a tail view that streams the most recent iter's run stdout via `GET /api/tickets/{id}/cycles/{cycle_id}/iters/{n}/run/stdout`.
 - **Events**: cross-ticket structured event stream (live tail of the event ring buffer). Filterable by kind, ticket, cycle.
 - **Escalations**: outstanding escalation queue entries (kind, phase, ticket id, cycle id, error text). Local-only acknowledgement clears the visual highlight without notifying the daemon.
 
@@ -54,7 +54,7 @@ There is no daemon-side state-machine view because there is no five-state machin
 
 ### Refresh action
 
-- **Refresh key**: the documented refresh key fires `POST /api/v1/refresh`, and the response status is shown in the status bar.
+- **Refresh key**: the documented refresh key fires `POST /api/refresh`, and the response status is shown in the status bar.
 - **In-flight indicator**: snapshot updates keep rendering while a refresh request is in flight (non-blocking).
 - **Error display**: on failure / non-2xx, the HTTP status + a short error message appears in the status bar; the TUI does not exit.
 - **Debounce**: respects the API-side minimum refresh interval; bursts are coalesced into a single in-flight request.

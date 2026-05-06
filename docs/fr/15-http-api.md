@@ -41,21 +41,21 @@ Without it, an operator's only view of daemon state is `tail | grep` on the stru
 
 - **`[server].port` not set in `roki.toml`** → the HTTP server does not start, no port is opened, and an `API disabled` info log is emitted.
 - **Port set** → at startup, start and bind the server, and log the bind address / port at info severity before reporting ready.
-- **Bind failure** (port in use, etc.) → log the offending port + underlying error as a structured error log; the daemon continues without the HTTP server (v1 does not retry binding).
+- **Bind failure** (port in use, etc.) → log the offending port + underlying error as a structured error log; the daemon continues without the HTTP server (the daemon does not retry binding).
 - **`[server].bind` not set** → bind to `127.0.0.1` (loopback).
 - **Non-loopback bind** → emit a warn log noting the bind host and the absence of authentication, and continue.
-- **Hot reload**: changes to `[server].*` apply on the next daemon restart (v1 does not perform runtime re-bind; the change is only logged).
+- **Hot reload**: changes to `[server].*` apply on the next daemon restart; no runtime re-bind.
 - **Configuration failure** (type / range validation): refuse to start the server + log the offending key + the daemon continues without the API.
 
 The previous `extension.server.*` namespace is collapsed into `roki.toml [server]` — no `extension.<spec>.*` namespace is reserved anymore ([12-extension-surface](12-extension-surface.md)).
 
 ### Endpoints
 
-#### `GET /api/v1/healthz`
+#### `GET /api/healthz`
 
 Liveness probe. HTTP 200 with a small JSON body (version, uptime, configured repositories, daemon-internal API request counter). No per-ticket data.
 
-#### `GET /api/v1/tickets`
+#### `GET /api/tickets`
 
 Cache snapshot of every ticket the daemon currently tracks.
 
@@ -64,25 +64,25 @@ Cache snapshot of every ticket the daemon currently tracks.
 - **Bounded drift**: the snapshot is assembled in a single read pass; there is no cross-source merge.
 - **Headers**: `Content-Type: application/json; charset=utf-8`, `Cache-Control: no-store`.
 
-#### `GET /api/v1/tickets/{id}`
+#### `GET /api/tickets/{id}`
 
 Per-ticket detail.
 
 - **Response body**: same fields as the list view plus the most recent N events for the ticket (drawn from the event ring buffer; N is bounded; on overflow the response carries `truncated: true`).
 - **Not found** → HTTP 404 with a JSON error body.
 
-#### `GET /api/v1/tickets/{id}/cycles`
+#### `GET /api/tickets/{id}/cycles`
 
 Cycle history for the ticket.
 
 - **Response body** (per entry): cycle id, kind (`rule` / `cleanup` / `failure`), trigger (`webhook` / `cold_start`), started_at, ended_at, terminal directive or failure kind.
 - **Source**: scan of the ticket's session tempdir under `[paths].session_root` (cycle metadata files).
 
-#### `GET /api/v1/tickets/{id}/cycles/{cycle_id}/iters/{n}/{phase}/{stream}`
+#### `GET /api/tickets/{id}/cycles/{cycle_id}/iters/{n}/{phase}/{stream}`
 
 HTTP wrapper around `roki log` ([21-log-access §`roki log`](21-log-access.md)). `phase` ∈ `pre` / `run` / `post`. `stream` ∈ `stdout` / `stderr` / `response` / `terminal` / `exit_code`. `n` is an absolute iter number; relative iter (`-1`, etc.) is not supported on the HTTP path because URLs prefer absolute.
 
-#### `GET /api/v1/events`
+#### `GET /api/events`
 
 Structured event stream.
 
@@ -91,11 +91,11 @@ Structured event stream.
 
 WebSocket / SSE push is deferred. Live tail is achieved by polling `since=<latest_seq>` from the TUI or `roki events --tail`.
 
-#### `GET /api/v1/escalations`
+#### `GET /api/escalations`
 
 Escalation queue dump ([14-operator-notifications §Escalation queue](14-operator-notifications.md)). Per entry: ticket id, cycle id, kind, phase, timestamp, error text. The list is bounded by ring size.
 
-#### `POST /api/v1/refresh`
+#### `POST /api/refresh`
 
 Linear refresh nudge.
 
@@ -112,17 +112,17 @@ Linear refresh nudge.
 - **Defense in depth on the TUI side**: `roki-tui` also strips ANSI / control characters from received strings ([16-roki-tui](16-roki-tui.md)).
 - **Sanitize failure** (invalid UTF-8, etc.) → replace the string with a sanitized placeholder marker and log the offending field name.
 
-### Schema stability and versioning
+### Schema stability
 
-- **Single source of truth**: every request / response shape is declared in the `roki-api-types` crate. The server module, `roki-tui`, and `roki log` / `roki events` / `roki repo` all import these types; neither side may redefine them locally.
-- **`api_version` field**: every JSON response body carries an `api_version` field whose value matches `roki_api_types::API_VERSION` (currently `"v1"`).
-- **Versioning**: currently `/api/v1/`. Within `/api/v1/`, additions are additive only (new optional fields). Breaking changes (renames, removals, type changes) introduce `/api/v2/` without breaking existing `/api/v1/` consumers.
+- **Single source of truth**: every request / response shape is declared in the `roki-api-types` crate. The server module, `roki-tui`, and `roki log` / `roki events` / `roki repo` all import these types; no client-side redefinition.
+- **No URL versioning**: paths are `/api/...` directly. Breaking changes are driven by the `roki` binary release the operator runs; clients pinned to a `roki` version automatically pin the matching `roki-api-types` schema.
+- **Additive-by-default**: new optional response fields are added freely. Renames, removals, and type changes are landed alongside a `roki` release that bumps the server, the TUI, and the CLI surfaces atomically.
 - **roki-specific fields** (cycle id, cycle kind, cycle trigger, failure kind, escalation entry, multi-repo `(repo, ticket)` keying as separate `repo` / `ticket` fields) are documented per-field in `SPEC.md` under `## Observability HTTP API`.
 
 ### Logging (no body leakage)
 
 - **Per-request structured log**: method / path / response status / request duration / client address / per-request correlation identifier.
-- **Bodies are not emitted**: in v1, request / response bodies are not logged (to prevent agent strings from leaking into logs).
+- **Bodies are not emitted**: request / response bodies are not logged (to prevent agent strings from leaking into logs).
 - **Secret redaction**: reuses the same redaction layer as the daemon log ([13-observability-logs](13-observability-logs.md)).
 
 ### Shared types crate and read-only projection
@@ -144,15 +144,16 @@ Linear refresh nudge.
 
 ## Boundaries
 
-- **Authentication / Authorization** are out of scope for v1 (loopback assumption).
-- **TLS** is out of scope for v1.
+- **Authentication / Authorization** are out of scope (loopback assumption).
+- **TLS** is out of scope.
 - **Web UI** is out of scope (a future spec).
 - **Adding mutating endpoints** (cancel / retry / pause / resume / workspace operations) is out of scope.
 - **Persistent metrics / time-series** are out of scope (live snapshot only).
 - **Per-request body capture** is out of scope.
 - **Runtime re-bind** is out of scope (a restart is required).
-- **WebSocket / SSE push** is out of scope for v1; polling `since` is the supported model.
+- **WebSocket / SSE push** is out of scope; polling `since` is the supported model.
 - **Windows support** is out of scope.
+- **URL versioning** is out of scope. Schema and binary advance together.
 
 ## Traceability
 

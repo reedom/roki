@@ -149,6 +149,7 @@ Daemon-detected internal failures during a cycle:
 | `process_crash` | Subprocess exited via signal or non-zero exit code without a parseable terminal response |
 | `unparseable` | Last JSON object on stdout failed to parse, or the `directive` field is missing |
 | `schema_drift` | `directive` value is outside the legal set for the current phase |
+| `repo_mismatch` | A pre response's `repo` field does not match the admission-resolved repo for the ticket ([06-worktree-and-session](06-worktree-and-session.md)) |
 | `stall` | Stall window exceeded; daemon SIGTERMed the subprocess |
 | `iter_exhausted` | `max_iterations` exceeded and the AI did not cooperate (or the phase was command-form) |
 | `template_error` | Liquid render failure when preparing the phase prompt or command |

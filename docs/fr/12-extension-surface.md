@@ -31,7 +31,7 @@ Earlier versions exposed six in-process surfaces (`OrchestratorRead`, `Transitio
 |---|---|
 | `OrchestratorRead` (read-only snapshot of per-issue state) | HTTP API endpoints under `/api/tickets`, `/api/tickets/{id}`, `/api/tickets/{id}/cycles` ([15-http-api](15-http-api.md)) |
 | `TransitionSubscriber` (subscribe to per-issue state-machine transitions) | Structured event log + ring buffer + `GET /api/events` ([13-observability-logs](13-observability-logs.md), [15-http-api](15-http-api.md)) |
-| `TrackerRefresh` (request a Linear poll) | `POST /api/refresh` (or equivalent) — the refresh nudge endpoint ([03-linear-integration §Refresh nudge](03-linear-integration.md)) |
+| `TrackerRefresh` (request a Linear poll) | `POST /api/refresh` — the refresh nudge endpoint ([15-http-api](15-http-api.md), [03-linear-integration §Refresh nudge](03-linear-integration.md)) |
 | Engine adapter `additional_context` injection | Template variables `{{ pre.* }}` / `{{ post.* }}` / `{{ run.* }}` populated from operator-authored response payloads ([20-rule-and-cycle-engine §Inter-phase data flow](20-rule-and-cycle-engine.md)) |
 | Phase override (`extension.phase.<name>.command` / `prompt_template_<phase>`) | Operator authors `[[rule]]` / `[[cleanup]]` / `[[on_failure]]` entries directly; there is no built-in phase catalog to override |
 | Namespaced configuration (`extension.<spec>.*`) | Operators put whatever they want into WORKFLOW.toml; the daemon does not reserve namespaces |

@@ -33,7 +33,7 @@ refs:
 Operators specify the path with `--config <path>` ([01-daemon-lifecycle](01-daemon-lifecycle.md)). The file groups into:
 
 - **Linear access**: API token, webhook secret, the assignee identifier whose tickets the daemon admits (`me` resolves to the API token holder).
-- **Network**: bind address and port for the webhook receiver and HTTP API.
+- **Server**: bind address and port shared by the webhook receiver and the HTTP API.
 - **AI default CLIs**: the cli line and stall window the daemon uses when a workflow phase declares `session = "session"` (long-lived stream-json AI reused within one cycle's pre/post chain) or `session = "command"` (one-shot subprocess) without specifying its own cli line.
 - **Engine knobs**: per-cycle iteration cap and (future) concurrency cap.
 - **Paths**: where to load WORKFLOW.toml from, where to put session tempdirs, where to put worktrees.
@@ -51,7 +51,7 @@ token = "lin_api_..."
 webhook_secret = "..."
 assignee = "me"
 
-[network]
+[server]
 bind = "127.0.0.1"
 port = 8080
 
@@ -78,7 +78,7 @@ level = "info"
 ring_size = 1000
 ```
 
-The previous fixed Linear label conventions (`roki:ready`, `roki:impl`) are no longer hard-coded. Operators express any label-driven gating inside `[[rule]]` / `[[cleanup]]` entries (see below). Conventional names are still recommended in operator docs, but the daemon does not interpret them.
+Linear label names are not hard-coded by the daemon. Operators express any label-driven gating inside `[[rule]]` / `[[cleanup]]` entries (see below). The example values below (`roki:ready`, `repo:bar`, etc.) are conventions a particular operator might pick — the daemon does not interpret them.
 
 ### `WORKFLOW.toml` (hot-reloadable)
 
