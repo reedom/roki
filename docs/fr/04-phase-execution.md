@@ -44,7 +44,13 @@ Run-phase subprocesses are typically command-shape (the run is the heavyweight c
 
 **Trigger**: the cycle engine signals "spawn phase X for cycle iteration N". The daemon does not pick what to spawn — it follows the engine's directive.
 
-**Working directory**: every phase subprocess (session and command) is launched with cwd set to the ticket's worktree when one exists, otherwise to the ticket's session tempdir. The daemon resolves the worktree via `ghq list -p` plus the `wt` worktree convention ([05-worktree-and-session](05-worktree-and-session.md)); operators do not need to write `cd "$(roki repo)"` inside their cli line.
+**Working directory**: every phase subprocess (session and command) is launched with cwd set to the worktree when one exists, otherwise to the **ghq base path** of the admission-resolved repo. The daemon resolves both via `ghq list -p` plus the `wt` worktree convention ([05-worktree-and-session](05-worktree-and-session.md)); operators do not need to write `cd "$(roki repo)"` inside their cli line.
+
+The session tempdir is **not** used as a cwd — it is the daemon-owned log-capture root only ([05-worktree-and-session §Session tempdir](05-worktree-and-session.md)).
+
+Session-shape cwd is fixed at spawn time. The daemon spawns the session subprocess at cycle start; if the worktree does not yet exist (no `pre.directive: "run"` has fired), cwd is the ghq base for the entire cycle, including any subsequent pre / post turns. Command-shape subprocesses (typically run) get their cwd evaluated per-invocation, so a run launched after worktree creation gets cwd = worktree.
+
+Pre / post phases that run in the ghq base must treat the cwd as **read-only** — writing into the ghq base pollutes the operator's main checkout. The worktree is the only daemon-managed writable filesystem; any work that mutates files belongs to a run phase.
 
 #### Input channels
 
@@ -129,7 +135,7 @@ A Linear status change to `Done` / `Cancelled` (or assignee removal, or any othe
 
 ### Daemon-only failures (no Linear writes)
 
-The daemon never writes Linear directly. Failures detected by the daemon (stall, process crash, unparseable, schema drift, iteration cap, template error) flow through `[[on_failure]]`. If `[[on_failure]]` matches, the operator's failure-handler cycle decides whether to write Linear feedback. If `[[on_failure]]` does not match (or is absent), the failure is recorded in the structured event log and as one entry in the TUI escalation queue ([06-failure-handling](06-failure-handling.md)); no Linear write is attempted.
+The daemon never writes Linear directly. Failures detected by the daemon (stall, process crash, unparseable, schema drift, repo mismatch, fs poison, iteration cap, template error) flow through `[[on_failure]]`. If `[[on_failure]]` matches, the operator's failure-handler cycle decides whether to write Linear feedback. If `[[on_failure]]` does not match (or is absent), the daemon emits a `failure_unhandled` structured event ([06-failure-handling §Failure-handler cycle](06-failure-handling.md)) and retains the worktree for forensics. The escalation queue is **not** touched in this case (it is reserved for daemon-stuck cases per [06-failure-handling §Escalation queue](06-failure-handling.md)). No Linear write is attempted.
 
 ## Capabilities
 
@@ -140,7 +146,7 @@ The daemon never writes Linear directly. Failures detected by the daemon (stall,
 - **Per-launch logging**: every subprocess launch records the phase, cli, env vars, working dir, and (on completion) outcome and exit code in the structured event log.
 - **Stall handling**: per-shape default with per-file override. SIGTERM + grace + SIGKILL.
 - **Operator-driven retry**: post directives `pre` / `run` are how the operator retries. The daemon does not retry on its own.
-- **Failure routing**: every failure kind (process crash, unparseable, schema drift, stall, iter exhausted, template error) flows through `[[on_failure]]` first-match; default is structured log + escalation entry.
+- **Failure routing**: every failure kind (process crash, unparseable, schema drift, repo mismatch, fs poison, stall, iter exhausted, template error) flows through `[[on_failure]]` first-match; default on no-match is a `failure_unhandled` structured event (no escalation entry — the queue is reserved for daemon-stuck cases per [06-failure-handling §Escalation queue](06-failure-handling.md)).
 
 ## Boundaries
 
