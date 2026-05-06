@@ -101,7 +101,7 @@ Tasks are ordered to match implementation order: foundation first, then layers i
   - _Boundary: admission_
   - _Depends: 2.2, 3.1_
 
-- [ ] 4.2 (P) Implement the first-match rule evaluator
+- [x] 4.2 (P) Implement the first-match rule evaluator
   - Pure function `Rule::first_match(&AdmittedTicket, &[Rule]) -> Option<&Rule>` evaluating rules in declared order.
   - Match on `when.status` string equality and `when.labels.has_all` set containment only; do not evaluate `[[cleanup]]` or `[[on_failure]]`.
   - Add unit tests covering: status equality + `has_all` containment hit returns the rule; status mismatch returns `None`; `has_all` not contained returns `None`.
