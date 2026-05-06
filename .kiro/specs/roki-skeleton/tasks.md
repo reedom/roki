@@ -69,7 +69,7 @@ Tasks are ordered to match implementation order: foundation first, then layers i
   - _Requirements: 3.2, 4.1, 5.1_
   - _Depends: 1.1_
 
-- [ ] 3.2 (P) Implement the Linear `viewer { id }` resolver with the `test-support` env-var seam
+- [x] 3.2 (P) Implement the Linear `viewer { id }` resolver with the `test-support` env-var seam
   - Issue one `POST https://api.linear.app/graphql` with body `{"query":"query { viewer { id } }"}` and `Authorization: <[linear].token>` header (token applied verbatim, no `Bearer` prefix).
   - Gate the `ROKI_LINEAR_GRAPHQL_URL` env-var override behind `#[cfg(any(test, feature = "test-support"))]` so the release binary always targets the hardcoded endpoint.
   - On non-200, malformed body, or missing `viewer.id`, return `LinearClientError::ViewerResolveFailed` carrying the endpoint string.
