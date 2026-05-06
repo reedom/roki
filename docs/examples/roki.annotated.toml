@@ -5,76 +5,100 @@
 # Source-value notation:
 #   { env  = "VAR_NAME" }            — read from an environment variable
 #   { file = "/path/to/secret" }     — read from a file (newline trimmed)
-#   "literal-value"                   — written inline (not recommended)
+#   "literal-value"                  — written inline (not recommended for secrets)
 #
-# Note: orchestrator session A's model / effort / max_phases / allowed_tools
-# are NOT configured here. They live under the reserved `extension.orchestrator.*`
-# namespace in WORKFLOW.md (hot-reloadable). The legacy [judge] block is
-# removed alongside the setup-judge subprocess shape; both admission
-# classification and daemon-only Linear writes are now performed by orchestrator
-# session A. See docs/fr/19-orchestrator-session.md.
+# roki.toml is NOT hot-reloaded; changes require a daemon restart.
+# WORKFLOW.toml + workflow/*.md ARE hot-reloaded.
 
 # ============================================================
 # [linear] — Linear access (required)
 # ============================================================
 [linear]
 # Where to fetch the API token from. Refuses startup if it cannot be resolved
-api_token = { env = "LINEAR_API_TOKEN" }
-# Alternative: api_token = { file = "/etc/roki/linear-token" }
+token = { env = "LINEAR_API_TOKEN" }
+# Alternative: token = { file = "/etc/roki/linear-token" }
 
-# Where to fetch the webhook HMAC secret from
-webhook_secret = { env = "LINEAR_WEBHOOK_SECRET" }
-
-# Assignee subject to admission
-# Specifying "me" resolves to the API token holder
-# Refuses startup if unresolvable / multiple resolutions
-assignee = "me"
-# Alternative: assignee = "user-uuid-or-email"
-
-# Set of Linear workflow state names to admit (optional)
-# default: ["Todo"]
-# Refuses startup on empty set
-admit_states = ["Todo"]
-# Example: admit_states = ["Todo", "Backlog"]
+# Polling fallback cadence (seconds). Default 300, validation min 60.
+# Polling is activated by webhook outage detection or by POST /api/refresh
+# (refresh nudge); it is not the primary path. Webhook delivery is mandatory.
+polling.cadence_seconds = 300
 
 # ============================================================
-# [workflow] — WORKFLOW.md path (required)
+# [linear.webhook] — Webhook receiver (required, internet-facing)
 # ============================================================
-[workflow]
-# Refuses startup if missing / unreadable
-path = "./WORKFLOW.md"
+# Linear cloud must be able to reach this bind. Keep it separate from the
+# observability HTTP API ([api]) so the read-only surface is not co-located
+# with the public ingress.
+[linear.webhook]
+secret = { env = "LINEAR_WEBHOOK_SECRET" }
+bind = "0.0.0.0"
+port = 9090
 
 # ============================================================
-# [server] — Webhook receiver bind (optional, can be overridden via CLI)
+# [api] — Observability HTTP API (optional, loopback default)
 # ============================================================
-[server]
-bind = "127.0.0.1"   # CLI: --bind <addr>
-port = 8080          # CLI: --port <num>
+# Read-only consumer surface for roki-tui and `roki events`. The server does
+# not start when port is omitted (an `api_disabled` info log is emitted).
+[api]
+bind = "127.0.0.1"   # default 127.0.0.1; non-loopback emits a warn log noting absent auth
+port = 8080          # omit to disable the API
 
 # ============================================================
-# [[repos]] — Allowlist (0+, ghq identifiers)
+# [default.ai.session] — Default session-shape cli (required)
 # ============================================================
-# Refuses startup on duplicates
-# Booting with an empty allowlist is fine, but any `act` admission decision A
-# returns will then fail allowlist validation and route the issue to
-# Inactive(reason=allowlist_rejected).
-
-[[repos]]
-ghq = "github.com/your-org/repo-a"
-
-[[repos]]
-ghq = "github.com/your-org/repo-b"
+# Used when a workflow phase declares `session = "session"` (or inline `prompt`)
+# without a per-file `cli` override. Long-lived AI subprocess reused across all
+# pre / post invocations of one cycle. The daemon does not parse the cli line.
+[default.ai.session]
+cli = "claude --input-format stream-json --output-format stream-json --model claude-opus-4-7"
+stall_seconds = 600   # default 600
 
 # ============================================================
-# [permissions] — Phase subprocess permission strategy (required)
+# [default.ai.command] — Default command-shape cli (required)
 # ============================================================
-# Applies to phase subprocesses only. Orchestrator session A always runs with a
-# read-only filesystem sandbox and rejected elicitations regardless of this
-# setting; A's tool surface is governed exclusively by
-# extension.orchestrator.allowed_tools in WORKFLOW.md.
-[permissions]
-# "settings-allowlist": via Claude Code's --settings allowlist (recommended)
-# "dangerously-skip":   pinned to --dangerously-skip-permissions
-#                        (fallback for when the allowlist cannot be trusted)
-strategy = "settings-allowlist"
-# Can be overridden at runtime via the --dangerously-skip-permissions CLI flag
+# Used when a workflow phase declares `session = "command"` (or inline `cmd`)
+# without a per-file `cli` override. Fresh subprocess per invocation.
+[default.ai.command]
+cli = "claude -p --output-format stream-json --max-turns 100"
+stall_seconds = 300   # default 300
+
+# ============================================================
+# [engine] — Cycle engine knobs
+# ============================================================
+[engine]
+# Cap on iterations per cycle. When a post directive `pre`/`run` arrives at the
+# cap, the daemon refuses to start the next iteration and routes the cycle
+# through `[[on_failure]] when.kind = "iter_exhausted"`.
+max_iterations = 10   # default 10
+
+# ============================================================
+# [paths] — Filesystem layout (required)
+# ============================================================
+[paths]
+# WORKFLOW.toml location. Hot-reloaded.
+workflow = "./WORKFLOW.toml"
+
+# Per-ticket session tempdir + per-iter capture root. Used by the daemon for
+# log capture only; never used as a phase subprocess cwd.
+session_root = "~/.cache/roki/sessions"
+
+# Per-ticket worktree root. The daemon creates worktrees here lazily on first
+# `pre.directive: "run"` of a cycle.
+worktree_root = "~/wt"
+
+# ============================================================
+# [log] — Structured event log destination
+# ============================================================
+[log]
+# stdout (default) | file | both
+destination = "stdout"
+
+# Required when destination ∈ {file, both}
+file_path = "/var/log/roki/daemon.jsonl"
+
+# error | warn | info (default) | debug | trace
+# Overridable via CLI: --log-level <level>
+level = "info"
+
+# In-memory ring buffer size (events). Backs the HTTP API live tail.
+ring_size = 1000   # default 1000

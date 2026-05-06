@@ -3,21 +3,20 @@
 # Schema canonical: docs/reference/config.md
 
 [linear]
-# Linear API token (used read-only by the daemon)
-api_token = { env = "LINEAR_API_TOKEN" }
-# Linear webhook HMAC secret (used by the webhook receiver for verification)
-webhook_secret = { env = "LINEAR_WEBHOOK_SECRET" }
-# Assignee to admit. "me" resolves to the API token holder
-assignee = "me"
+token = { env = "LINEAR_API_TOKEN" }
 
-[workflow]
-path = "./WORKFLOW.md"
+[linear.webhook]
+secret = { env = "LINEAR_WEBHOOK_SECRET" }
+bind = "0.0.0.0"
+port = 9090
 
-# Add one or more repos to the allowlist
-# (booting with an empty allowlist is fine, but any repo returned by the judge
-#  will route the issue to Skipped)
-[[repos]]
-ghq = "github.com/your-org/your-repo"
+[default.ai.session]
+cli = "claude --input-format stream-json --output-format stream-json --model claude-opus-4-7"
 
-[permissions]
-strategy = "settings-allowlist"
+[default.ai.command]
+cli = "claude -p --output-format stream-json --max-turns 100"
+
+[paths]
+workflow = "./WORKFLOW.toml"
+session_root = "~/.cache/roki/sessions"
+worktree_root = "~/wt"
