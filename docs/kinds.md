@@ -75,10 +75,12 @@ kinds:
       output: docs/reference/index.md
 
   - name: example
-    # docs/examples/*.md files (WORKFLOW.{minimal,annotated}.md) carry
-    # application-level frontmatter, not refs:. Path glob points at a
-    # non-matching pattern so the strict validator does not require them.
-    # Add a real example doc with a refs: block to enable indexing later.
+    # docs/examples/*.toml + docs/examples/workflow-*.md carry application-
+    # level frontmatter (TOML config, or workflow/*.md `session`/`cli`/
+    # `stall_seconds` frontmatter), not refs:. The path glob below targets
+    # an opt-in `*.example.md` suffix for files that DO want graph
+    # membership; the bulk-shipped example files use plain names and stay
+    # outside the graph.
     path_globs: ["docs/examples/*.example.md"]
     id_pattern: "example:{slug}"
 
