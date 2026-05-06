@@ -55,11 +55,12 @@ cycle start
       end  → cycle terminates
 ```
 
-All three phases are optional inside a `[[rule]]` / `[[cleanup]]` / `[[on_failure]]` entry:
+Phase optionality:
 
-- pre omitted → the daemon synthesizes `directive: "run"` and proceeds.
-- run omitted → only meaningful for cleanup shorthand (immediate delete) or for ceremony-only entries; otherwise the entry has nothing to do.
-- post omitted → the daemon synthesizes `directive: "end"` and the cycle terminates after the run phase.
+- **run is required** for every `[[rule]]` / `[[cleanup]]` / `[[on_failure]]` entry that spawns a cycle. Schema validation rejects an entry that has any phase declared but lacks `run`.
+- **pre is optional** — when omitted the daemon synthesizes `directive: "run"` and proceeds.
+- **post is optional** — when omitted the daemon synthesizes `directive: "end"` and the cycle terminates after the run phase.
+- **`[[cleanup]]` shorthand**: an entry with **all three** phases omitted means "delete immediately, no cycle starts" (see §Cleanup). This is the only case in which `run` may be absent.
 
 Pre and post are subprocesses, just like run. They may be long-lived AI sessions (when declared `session = "session"`) reused across pre/post invocations within the same cycle, or one-shot commands. The choice is per-phase via the workflow/*.md frontmatter or the inline `pre.cmd` / `pre.prompt` / `post.cmd` / `post.prompt` form. See [02-configuration §Phase specification](02-configuration.md).
 
@@ -191,7 +192,7 @@ On daemon process start, the engine runs the same evaluation flow but with `cycl
 ## Capabilities
 
 - **Generic dispatch**: `[[cleanup]]` / `[[rule]]` / `[[on_failure]]` are the only three lists the daemon evaluates. Each is first-match. Operators express any workflow within them.
-- **Three phases per cycle, optional**: pre / run / post. Each one independently picks long-lived AI session or one-shot command. The daemon does not enforce a phase catalog.
+- **Three phases per cycle**: pre / run / post. `run` is required for any cycle-spawning entry; pre and post are optional with synthesized defaults. The cleanup-shorthand (all three omitted) is the only case where run may be absent. Each phase independently picks long-lived AI session or one-shot command. The daemon does not enforce a phase catalog.
 - **Structured directive contract**: pre returns `run` / `end`; post returns `pre` / `run` / `end`. The daemon parses only the last JSON object on stdout per invocation; reasoning text is never interpreted.
 - **Last-iteration data flow**: `{{ pre.* }}` / `{{ post.* }}` / `{{ run.* }}` expose the most recent iteration to subsequent phases. Older iterations live on disk only.
 - **Iteration cap**: max_iterations is a hard daemon-enforced boundary on starting a new iteration. Operators can preempt cooperatively by inspecting `{{ cycle.iter }}` and `{{ config.max_iterations }}` in their pre / post body. When a post extends the cycle past the cap, daemon closes stdin and routes through `[[on_failure]] when.kind = "iter_exhausted"`.

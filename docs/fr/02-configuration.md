@@ -172,6 +172,8 @@ Each phase declares exactly one of `path` / `prompt` / `cmd` (mutually exclusive
 - `prompt = "<inline string>"` — inline session form. Always uses `default.ai.session.cli` from `roki.toml`.
 - `cmd = "<inline string>"` — inline command form. The operator writes the full command line; the daemon spawns the process directly.
 
+Phase requirements per entry: `run` is required for every `[[rule]]` / `[[cleanup]]` / `[[on_failure]]` entry that spawns a cycle (see [01-engine-model §Phase loop](01-engine-model.md)). `pre` and `post` are optional. The only legal entry without `run` is a `[[cleanup]]` entry with all three phases omitted (immediate-delete shorthand). Schema validation rejects any other entry that lacks `run`.
+
 ### `workflow/*.md`
 
 Each file referenced from a `*.path` field has YAML frontmatter and a Liquid body:
