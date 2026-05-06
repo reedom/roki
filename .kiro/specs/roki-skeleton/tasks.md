@@ -139,7 +139,7 @@ Tasks are ordered to match implementation order: foundation first, then layers i
   - _Boundary: runtime_
   - _Depends: 1.2, 2.1, 2.2, 3.2, 3.3, 4.1, 4.2, 4.3, 4.4_
 
-- [ ] 5.2 Implement the `roki run --config <path>` CLI surface
+- [x] 5.2 Implement the `roki run --config <path>` CLI surface
   - Define a top-level `roki` `clap` command with one subcommand (`run`) and one flag (`--config <path>`); produce a typed `CliCommand` enum and dispatch the `Run` variant to `runtime::run`.
   - On missing or unreadable `--config`, surface the path in the error so the resulting `tracing::error!` log line names the offending file.
   - Ensure `roki --help` and `roki run --help` list `--config` together with the configuration file it identifies (`roki.toml`).
