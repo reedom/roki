@@ -40,7 +40,10 @@ Tickets that fail admission are not added to the cache. If the ticket was previo
 
 ### Polling fallback
 
-The webhook receiver is mandatory (`[linear.webhook]` is required in `roki.toml`). Polling exists only as a runtime fallback for transient webhook outages — Linear cloud unreachable, network partition, the webhook receiver port becoming temporarily unbindable. When the daemon detects such an outage, it polls Linear for issues that satisfy the assignee filter and whose state is in the union of `when.status` values across **every** `[[rule]]` and `[[cleanup]]` entry (top-level WORKFLOW.toml plus every per-repo TOML resolved at startup, [07-recovery §Cold start](07-recovery.md)).
+The webhook receiver is mandatory (`[linear.webhook]` is required in `roki.toml`). Polling exists only as a runtime fallback for transient webhook outages — Linear cloud unreachable, network partition, the webhook receiver port becoming temporarily unbindable. When the daemon detects such an outage, it polls Linear for issues satisfying the assignee filter, optionally narrowed by status:
+
+- If **every** `[[rule]]` and `[[cleanup]]` entry across WORKFLOW.toml plus every per-repo TOML declares an explicit `when.status`, the union of those values becomes a Linear-side status filter (small, bounded query).
+- If **any** entry omits `when.status` (i.e. matches any state), the status filter is dropped and the query enumerates every ticket the assignee owns. The daemon emits an info log at startup naming the entry that triggered the drop, so operators concerned about Linear API budget can add an explicit `when.status` and shrink the query.
 
 Cadence is governed by `roki.toml [linear].polling.cadence_seconds` (default `300`, validation minimum `60`). The cap is enforced even when a refresh nudge arrives (see below). Polling stops automatically once webhook delivery resumes (Linear delivers a fresh webhook the daemon successfully verifies).
 
