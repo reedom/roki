@@ -18,11 +18,11 @@ refs:
 
 # FR 04: Diff Cache and Recovery
 
-> The per-ticket in-memory diff cache the daemon keeps to detect Linear status / labels / assignee changes, plus the cold-start / restart-recovery flow that rebuilds it from Linear and disk on every daemon launch. There is **no** daemon-side state machine of execution stages anymore — execution is bounded by the cycle ([20-rule-and-cycle-engine](20-rule-and-cycle-engine.md)), not by a daemon-tracked enum.
+> The per-ticket in-memory diff cache the daemon keeps to detect Linear status / labels / assignee changes, plus the cold-start / restart-recovery flow that rebuilds it from Linear and disk on every daemon launch. The daemon does not track execution stages itself — execution is bounded by the cycle ([20-rule-and-cycle-engine](20-rule-and-cycle-engine.md)).
 
 ## Purpose
 
-The previous five-state machine (`Pending` / `Active` / `Backoff` / `Inactive` / `Cleaning`) and the twelve `Inactive.reason` discriminator have been retired. Workflow stages now live entirely inside operator-authored cycles; the daemon does not classify a ticket as "in implement" or "in validate" or "in retry budget exhaustion". What it tracks is much smaller:
+Workflow stages live entirely inside operator-authored cycles ([20-rule-and-cycle-engine](20-rule-and-cycle-engine.md)). The daemon's per-ticket bookkeeping is small:
 
 - For each admitted ticket: the most recent `(status, labels, assignee)` triple, the resolved repo, the resolved per-repo workflow path, and a flag for "cycle in flight". That is the diff cache.
 - A queue of pending re-evaluations (when a webhook arrives mid-cycle, the cache updates immediately but rule re-evaluation defers until the cycle ends).
@@ -110,8 +110,8 @@ On orderly shutdown ([01-daemon-lifecycle](01-daemon-lifecycle.md)):
 
 ## Boundaries
 
-- **No daemon-side execution-stage enum**: the `Pending` / `Active` / `Backoff` / `Inactive` / `Cleaning` state set is removed. Execution stages live inside operator-authored cycles.
-- **No `Inactive.reason` discriminator**: the twelve-variant reason set (`awaiting_linear`, `needs_operator`, `spec_incomplete`, `needs_split`, `allowlist_rejected`, `orchestrator_crash`, `orchestrator_unparseable`, `orchestrator_budget_exhausted`, `stall`, `retry_exhausted`, `fs_poison`, `orphan`) is removed. Operators express these distinctions as `outcome` strings inside their post directives.
+- **No daemon-side execution-stage enum**: execution stages live inside operator-authored cycles, not as daemon-tracked states.
+- **No `Inactive.reason` discriminator**: stop-condition distinctions are operator-authored `outcome` strings on terminal post directives.
 - **No daemon-driven Linear feedback for skipped tickets**: silent eviction stays silent. Operators that want a Linear comment on a skip (e.g. "this ticket was not assigned to a configured operator") cannot rely on the daemon — the daemon does not have any Linear write path.
 - **No mid-cycle preemption of an in-flight cycle by tracker-terminal observations**: a Linear status change to `Done` or `Cancelled` updates the cache; the in-flight cycle runs to natural end; only after it terminates does the cleanup/rule re-evaluation happen. Operators that want forced termination author a `[[cleanup]]` entry whose run phase issues whatever termination signal they want.
 - **No mirroring of Linear-side workflow states** is done. Linear states are looked up via the tracker each time.

@@ -63,7 +63,7 @@ All three phases are optional inside a `[[rule]]` / `[[cleanup]]` / `[[on_failur
 - run omitted → only meaningful for cleanup shorthand (immediate delete) or for ceremony-only entries; otherwise the entry has nothing to do.
 - post omitted → the daemon synthesizes `directive: "end"` and the cycle terminates after the run phase.
 
-The orchestrator-session-vs-phase-subprocess split that earlier FRs used is gone. Both pre and post are subprocesses too — they may be long-lived AI sessions (when declared `session = "session"`) reused across pre/post invocations within the same cycle, or one-shot commands. The choice is per-phase via the workflow/*.md frontmatter or the inline `pre.cmd` / `pre.prompt` / `post.cmd` / `post.prompt` form. See [02-configuration §Phase specification](02-configuration.md).
+Pre and post are subprocesses, just like run. They may be long-lived AI sessions (when declared `session = "session"`) reused across pre/post invocations within the same cycle, or one-shot commands. The choice is per-phase via the workflow/*.md frontmatter or the inline `pre.cmd` / `pre.prompt` / `post.cmd` / `post.prompt` form. See [02-configuration §Phase specification](02-configuration.md).
 
 ### Directive schema
 
@@ -128,7 +128,7 @@ A new webhook arriving while the same ticket has an in-flight cycle:
 2. Defers rule re-evaluation until the in-flight cycle terminates.
 3. After the cycle terminates, the daemon evaluates lists against the latest cached state. The retained webhooks are not replayed individually; only the final state matters.
 
-The single exception is admission-filter failure mid-cycle (assignee revoked, repo allowlist match lost): the in-flight cycle still runs to its natural end. After it terminates, the daemon evicts the ticket and deletes worktree + session_tempdir as orphan cleanup. The previous `tracker_terminal` preempt path is removed; operators that want forced-termination behavior on a Linear status change author a `[[cleanup]]` entry whose run phase issues a SIGTERM-equivalent action against whatever subprocess they care about (or simply omits all phases for immediate delete).
+The single exception is admission-filter failure mid-cycle (assignee revoked, repo allowlist match lost): the in-flight cycle still runs to its natural end. After it terminates, the daemon evicts the ticket and deletes worktree + session_tempdir as orphan cleanup. Operators that want forced-termination behavior on a Linear status change author a `[[cleanup]]` entry whose run phase issues a SIGTERM-equivalent action against whatever subprocess they care about (or simply omits all phases for immediate delete).
 
 ### Stall detection
 
@@ -186,13 +186,13 @@ On daemon process start, the engine runs the same evaluation flow but with `cycl
 
 ## Boundaries
 
-- **No daemon-managed retry budget**: the daemon does not count phase non-clean exits and does not enforce backoff. The orchestrator-session-driven `daemon_directive (kind=retry_exhausted)` event is removed.
+- **No daemon-managed retry budget**: the daemon does not count phase non-clean exits and does not enforce backoff.
 - **No daemon-side Linear writes**: the daemon never writes Linear directly. Linear feedback (labels, comments) is entirely operator-driven from inside pre / run / post invocations.
 - **No long-lived per-ticket AI session across cycles**: the long-lived AI exists only within one cycle's pre/post chain. Cycle end terminates the session; the next cycle launches a fresh one. Cross-cycle scratch state goes through `roki log` if needed, not through a persisted session.
-- **No phase catalog**: `classify`, `implement`, `review`, `validate`, `open_pr`, `ci_fix`, `finalize_review` are no longer daemon concepts. Operators name their phases however they like inside workflow/*.md.
-- **No daemon-side artifact validation**: the previous `review.md` structural validation done by the orchestrator session is gone. Operators encode whatever validation they want inside post.
+- **No phase catalog**: operators name their phases however they like inside workflow/*.md; the daemon does not reserve any phase name beyond `pre` / `run` / `post`.
+- **No daemon-side artifact validation**: operators encode whatever artifact checks they want inside post.
 - **No operator-installed Linear MCP requirement**: the daemon does not assume operators have any specific MCP installed. If a workflow needs to write Linear, the operator includes that capability in the cli line of the relevant phase.
-- **No `tracker_terminal` event**: the daemon does not synthesize a special preempt event when Linear state moves to `done` / `canceled`. Operators express the desired behavior with a `[[cleanup]]` entry.
+- **No tracker-terminal preemption event**: the daemon does not synthesize a special preempt event when Linear state moves to `done` / `canceled`. Operators express the desired behavior with a `[[cleanup]]` entry.
 
 ## Traceability
 

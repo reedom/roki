@@ -24,7 +24,7 @@ refs:
 
 ## Purpose
 
-`roki.toml` holds daemon startup conditions (Linear access, network, AI default CLIs, log destination, paths); changes require restart. `WORKFLOW.toml` and the `workflow/*.md` files referenced from it hold all workflow behavior — admission filter, rule / cleanup / on_failure entries, phase prompts and commands — and are **hot-reloaded without restart**. The hard-coded `prompt_template_orchestrator` / `prompt_template_implement_direct` / `prompt_template_validate_direct` / `prompt_template_open_pr` / `prompt_template_<phase>` schema and the `extension.*` namespace from earlier versions are removed: workflow behavior is now expressed by operator-authored TOML and Markdown, not by daemon-known template names.
+`roki.toml` holds daemon startup conditions (Linear access, network, AI default CLIs, log destination, paths); changes require restart. `WORKFLOW.toml` and the `workflow/*.md` files referenced from it hold all workflow behavior — admission filter, rule / cleanup / on_failure entries, phase prompts and commands — and are **hot-reloaded without restart**. Workflow behavior is expressed entirely by operator-authored TOML and Markdown; the daemon knows no fixed template names.
 
 ## User-visible Behavior
 
@@ -78,7 +78,7 @@ level = "info"
 ring_size = 1000
 ```
 
-Linear label names are not hard-coded by the daemon. Operators express any label-driven gating inside `[[rule]]` / `[[cleanup]]` entries (see below). The example values below (`roki:ready`, `repo:bar`, etc.) are conventions a particular operator might pick — the daemon does not interpret them.
+Linear label names are not interpreted by the daemon. Operators express any label-driven gating inside `[[rule]]` / `[[cleanup]]` entries (see below). The example values below (`roki:ready`, `repo:bar`, etc.) are conventions a particular operator might pick.
 
 ### `WORKFLOW.toml` (hot-reloadable)
 
@@ -205,7 +205,7 @@ The Liquid body is rendered against the variables documented in [20-rule-and-cyc
 - **A daemon-managed canonical label set** is out of scope. Operators choose their own label conventions.
 - **Environment-variable / CLI configuration overrides** are limited to a few values exposed on the CLI (`--bind`, `--port`, `--config`); a full override surface is not provided (see [cli reference](../reference/cli.md) for details).
 - **Conditional includes / partial templates inside `WORKFLOW.toml`** are out of scope for MVP. The `include = [...]` directive is reserved for a future iteration.
-- **Daemon-known phase template names** (`prompt_template_orchestrator`, `prompt_template_implement_direct`, `prompt_template_validate_direct`, `prompt_template_open_pr`, `prompt_template_<phase>`) are removed. Operators name their phase files however they like under `workflow/`.
+- **Daemon-known phase template names** are out of scope. Operators name their phase files however they like under `workflow/`.
 
 ## Traceability
 

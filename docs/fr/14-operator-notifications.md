@@ -22,7 +22,7 @@ refs:
 
 ## Purpose
 
-The previous design routed daemon-only failures through a `daemon_directive` event into a long-lived orchestrator session, which would then write Linear via the operator's Linear MCP. With the cycle engine ([20-rule-and-cycle-engine](20-rule-and-cycle-engine.md)) the orchestrator session concept is gone: there is no long-lived AI to receive a `daemon_directive` between cycles. Failure surfacing is now operator-authored: the daemon fires a failure-handler cycle (`cycle.kind = "failure"`) whose pre / run / post can do whatever the operator wants — including a Linear MCP write — and the daemon adds an entry to the TUI escalation queue regardless of whether the failure cycle ran.
+Failure surfacing is operator-authored. The daemon fires a failure-handler cycle (`cycle.kind = "failure"`) whose pre / run / post can do whatever the operator wants — including a Linear MCP write — and the daemon adds an entry to the TUI escalation queue regardless of whether the failure cycle ran.
 
 ## User-visible Behavior
 
@@ -32,15 +32,15 @@ The daemon classifies internal failures into the kinds listed in [20-rule-and-cy
 
 | Kind | Trigger |
 |---|---|
-| `process_crash` | Subprocess SIGSEGV or non-zero exit without a parseable terminal response (covers former `fs_poison` during launch) |
+| `process_crash` | Subprocess SIGSEGV or non-zero exit without a parseable terminal response |
 | `unparseable` | Last JSON object on stdout failed to parse, or `directive` missing |
-| `schema_drift` | `directive` value outside the legal set for the current phase (covers former `orchestrator_unparseable`) |
+| `schema_drift` | `directive` value outside the legal set for the current phase |
 | `repo_mismatch` | Pre's `repo` field does not match the admission-resolved repo ([06-worktree-and-session](06-worktree-and-session.md)) |
-| `stall` | Stall window exceeded; daemon SIGTERMed the subprocess (covers former phase-stall and orchestrator-stall) |
-| `iter_exhausted` | `max_iterations` exceeded with no cooperative termination (covers former `orchestrator_budget_exhausted` and `retry_exhausted`) |
+| `stall` | Stall window exceeded; daemon SIGTERMed the subprocess |
+| `iter_exhausted` | `max_iterations` exceeded with no cooperative termination |
 | `template_error` | Liquid render failure when preparing a phase prompt or command |
 
-The previous twelve `Inactive.reason` variants (`awaiting_linear`, `needs_operator`, `spec_incomplete`, `needs_split`, `allowlist_rejected`, `orchestrator_crash`, `orchestrator_unparseable`, `orchestrator_budget_exhausted`, `stall`, `retry_exhausted`, `fs_poison`, `orphan`) are gone. Operator-facing outcomes (`needs_operator`, `spec_incomplete`, `needs_split`, `allowlist_rejected`) are now operator-authored `outcome` strings on a normal cycle's terminal post directive. Operator-driven Linear writes happen inside the run / post of those cycles.
+Operator-facing outcomes (e.g. `needs_operator`, `needs_split`, `allowlist_rejected`) are operator-authored `outcome` strings on a normal cycle's terminal post directive. Operator-driven Linear writes happen inside the run / post of those cycles.
 
 ### Failure-handler cycle
 

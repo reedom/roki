@@ -20,7 +20,7 @@ refs:
 
 Tools available to every phase subprocess — Linear / git / gh / shell / other MCP — match whatever the operator's cli line invokes, exactly. The daemon holds no Linear write credentials, agent-side tool changes are decoupled from daemon releases, and the safety posture is the operator's responsibility.
 
-The previous orchestrator-vs-phase split is gone. Both shapes (long-lived AI session reused within a cycle and one-shot command per phase iteration) run with the cli line the operator authored. The orchestrator-specific `--settings` allowlist (Linear MCP write + Read + Bash + read-only filesystem sandbox) and the phase-specific permission strategy (`allowlist` / `dangerously-skip` / `refuse-to-start-when-unset`) are removed: operators that want a constrained tool surface put the relevant flags into their cli line; operators that want a free-for-all do likewise. The daemon never composes flags on the operator's behalf.
+Both subprocess shapes (long-lived AI session reused within a cycle and one-shot command per phase iteration) run with the cli line the operator authored. Operators that want a constrained tool surface put the relevant flags into their cli line; operators that want a free-for-all do likewise. The daemon never composes flags on the operator's behalf.
 
 ## User-visible Behavior
 

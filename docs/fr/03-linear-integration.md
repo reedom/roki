@@ -50,7 +50,7 @@ When the assignee on a previously admitted ticket changes to someone other than 
 2. If a cycle is currently in flight, it runs to natural end (queue mode); afterward the daemon deletes the worktree + session_tempdir as orphan cleanup.
 3. No Linear write is performed by the daemon. Operators that want a Linear comment on reassignment author a `[[cleanup]]` entry whose run phase performs the write.
 
-The previous "stop the worker immediately → move to `Cleaning` → no retry" semantics are replaced by the queue-mode behavior above. There is no separate `Cleaning` state in the daemon anymore ([04-state-machine-and-recovery](04-state-machine-and-recovery.md)).
+There is no separate `Cleaning` state in the daemon ([04-state-machine-and-recovery](04-state-machine-and-recovery.md)).
 
 ### Re-admission
 

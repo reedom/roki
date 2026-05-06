@@ -17,24 +17,13 @@ refs:
 
 # FR 12: Extension Surface
 
-> Downstream specs and operators integrate with roki through public, externally-observable surfaces only — the WORKFLOW.toml schema, the HTTP API, the structured event log, the per-ticket capture CLIs, and the refresh nudge endpoint. There is no in-process trait or hook system anymore. The previous `OrchestratorRead` / `TransitionSubscriber` / `TrackerRefresh` / `additional_context` injection / phase override / namespaced config surfaces are either removed or absorbed into the public surfaces.
+> Downstream specs and operators integrate with roki through public, externally-observable surfaces only — the WORKFLOW.toml schema, the HTTP API, the structured event log, the per-ticket capture CLIs, and the refresh nudge endpoint. There is no in-process trait or hook system.
 
 ## Purpose
 
-Earlier versions exposed six in-process surfaces (`OrchestratorRead`, `TransitionSubscriber`, `TrackerRefresh`, the engine adapter's `additional_context` channel, per-phase command / template overrides, and `extension.<spec>.*` namespaced configuration) so downstream specs (currently observability) could integrate without forking the orchestrator core. The pivot to a config-driven engine ([20-rule-and-cycle-engine](20-rule-and-cycle-engine.md)) collapses every one of those into either a public observability surface or an operator-authored entry in WORKFLOW.toml. There is no longer a roki-specific "extension trait surface" — extension is just operator authoring plus public APIs.
+Downstream specs (currently observability) integrate with roki without linking against the daemon binary. Integration happens through configuration that the daemon loads and through process-external observability surfaces.
 
 ## User-visible Behavior
-
-### Mapping from old surfaces to new
-
-| Old surface | Replacement |
-|---|---|
-| `OrchestratorRead` (read-only snapshot of per-issue state) | HTTP API endpoints under `/api/tickets`, `/api/tickets/{id}`, `/api/tickets/{id}/cycles` ([15-http-api](15-http-api.md)) |
-| `TransitionSubscriber` (subscribe to per-issue state-machine transitions) | Structured event log + ring buffer + `GET /api/events` ([13-observability-logs](13-observability-logs.md), [15-http-api](15-http-api.md)) |
-| `TrackerRefresh` (request a Linear poll) | `POST /api/refresh` — the refresh nudge endpoint ([15-http-api](15-http-api.md), [03-linear-integration §Refresh nudge](03-linear-integration.md)) |
-| Engine adapter `additional_context` injection | Template variables `{{ pre.* }}` / `{{ post.* }}` / `{{ run.* }}` populated from operator-authored response payloads ([20-rule-and-cycle-engine §Inter-phase data flow](20-rule-and-cycle-engine.md)) |
-| Phase override (`extension.phase.<name>.command` / `prompt_template_<phase>`) | Operator authors `[[rule]]` / `[[cleanup]]` / `[[on_failure]]` entries directly; there is no built-in phase catalog to override |
-| Namespaced configuration (`extension.<spec>.*`) | Operators put whatever they want into WORKFLOW.toml; the daemon does not reserve namespaces |
 
 ### Public surfaces in scope of this FR
 
@@ -67,7 +56,7 @@ There is no in-process trait the spec implements; the integration is process-ext
 - **One public observability surface**: HTTP API + event log + capture CLIs cover read access for every consumer.
 - **One configuration surface**: WORKFLOW.toml + workflow/*.md cover all dispatch and phase customization.
 - **No per-spec namespace reservation**: operators or downstream specs put whatever they need into the operator's WORKFLOW.toml; the daemon does not reserve `extension.<spec>.*`.
-- **Refresh nudge preserved**: a Linear refresh can be requested without violating the cadence cap, identical to the prior `TrackerRefresh` semantics.
+- **Refresh nudge**: a Linear refresh can be requested without violating the cadence cap.
 - **Public, stable contracts**: HTTP endpoint shapes, event field names, CLI flag names, and template variable names are the contract surface. On-disk storage layout is not.
 
 ## Boundaries

@@ -26,7 +26,7 @@ refs:
 
 Run each phase the cycle engine nominates as a single bounded subprocess. The daemon observes the lifecycle (launch, stall, exit) and forwards a structured outcome to the cycle engine; it does not drive the agent loop, choose the next phase, or interpret reasoning text. There are two subprocess shapes — long-lived AI session and one-shot command — supervised by the same engine adapter.
 
-The previous orchestrator-session-vs-phase-subprocess distinction is collapsed. Both shapes go through this FR's launch / observe / translate path. Permission strategy is no longer interpreted by the daemon: whatever the operator's cli line says (e.g. `claude --dangerously-skip-permissions`, `--settings` overrides, sandbox profile flags) is passed through unchanged. The daemon does not parse, validate, or override permission flags.
+Both subprocess shapes go through this FR's launch / observe / translate path. Permission strategy is not interpreted by the daemon: whatever the operator's cli line says (e.g. `claude --dangerously-skip-permissions`, `--settings` overrides, sandbox profile flags) is passed through unchanged. The daemon does not parse, validate, or override permission flags.
 
 ## User-visible Behavior
 
@@ -66,7 +66,7 @@ cli = "claude --input-format stream-json --output-format stream-json --model cla
 cli = "claude -p '{{ prompt }}' --output-format stream-json --max-turns 100 --dangerously-skip-permissions"
 ```
 
-The previous `[permissions].strategy` switch (`allowlist` vs `dangerously-skip` vs `refuse-to-start-when-unset`) is removed. Operators that want a fail-closed mode can omit `[default.ai.session]` / `[default.ai.command]` and rely on each rule's per-phase cli to be set explicitly.
+Operators that want a fail-closed mode omit `[default.ai.session]` / `[default.ai.command]` and rely on each rule's per-phase cli being set explicitly.
 
 ### Termination handling
 
@@ -84,7 +84,7 @@ The daemon translates each phase's exit into a single signal returned to the cyc
 | Iteration cap (forced) | Same as above but the AI did not reply within the stall window | `{ kind: "failure", failure_kind: "iter_exhausted" }` |
 | Template render error | Liquid render of the cli line, prompt body, or envelope failed before launch | `{ kind: "failure", failure_kind: "template_error" }` |
 
-The cycle engine routes all `failure_kind` values through `[[on_failure]]` first-match ([20-rule-and-cycle-engine §Failure handling](20-rule-and-cycle-engine.md)). The previous daemon-side retry budget is removed: the daemon does not retry a phase on its own and does not enforce exponential backoff. Retries are operator-driven through post directives.
+The cycle engine routes all `failure_kind` values through `[[on_failure]]` first-match ([20-rule-and-cycle-engine §Failure handling](20-rule-and-cycle-engine.md)). The daemon does not retry a phase on its own and does not enforce exponential backoff; retries are operator-driven through post directives.
 
 ### Stall detection
 
@@ -105,8 +105,6 @@ A Linear status change to `Done` / `Cancelled` (or assignee removal, or any othe
 ### Daemon-only failures (no Linear writes)
 
 The daemon never writes Linear directly. Failures detected by the daemon (stall, process crash, unparseable, schema drift, iteration cap, template error) flow through `[[on_failure]]`. If `[[on_failure]]` matches, the operator's failure-handler cycle decides whether to write Linear feedback. If `[[on_failure]]` does not match (or is absent), the failure is recorded in the structured event log and as one entry in the TUI escalation queue ([14-operator-notifications](14-operator-notifications.md)); no Linear write is attempted.
-
-The previously specified linear-updater subagent and the `daemon_directive (kind=retry_exhausted)` event are removed. Their replacement is `[[on_failure]]` plus the operator's own Linear-write tooling inside the failure-handler cycle's run / post phase.
 
 ## Capabilities
 

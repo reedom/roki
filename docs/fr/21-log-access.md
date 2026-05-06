@@ -131,7 +131,7 @@ This layout is **not** part of the operator-facing contract. Future versions may
 
 ## Traceability
 
-- **Roadmap**: `roadmap.md` > Boundary Strategy > "Shared seams to watch" (replaces the prior daemon-internal observability hooks with three external CLIs).
+- **Roadmap**: `roadmap.md` > Boundary Strategy > "Shared seams to watch".
 - **Requirements**: pending — to be added in the requirements rewrite that follows the FR rewrite.
 - **Design**: `.kiro/specs/roki-mvp/design.md` will gain a `Log Access CLIs` section in a later phase.
 - **Related FR**: [13-observability-logs](13-observability-logs.md), [15-http-api](15-http-api.md), [20-rule-and-cycle-engine](20-rule-and-cycle-engine.md), [06-worktree-and-session](06-worktree-and-session.md).

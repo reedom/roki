@@ -18,7 +18,7 @@ refs:
 
 # FR 13: Observability Logs
 
-> Three independent storage / access tiers cover everything operators need to inspect: a structured event log (daemon-wide tracing-crate JSON Lines), per-ticket subprocess raw captures (under the session tempdir), and an in-memory ring buffer that backs the HTTP API live event subscription. The previous single-pipeline model and the opt-in `--debug` per-issue capture are absorbed into these tiers.
+> Three independent storage / access tiers cover everything operators need to inspect: a structured event log (daemon-wide tracing-crate JSON Lines), per-ticket subprocess raw captures (under the session tempdir), and an in-memory ring buffer that backs the HTTP API live event subscription.
 > See [`docs/reference/log-events.md`](../reference/log-events.md) for the full event list and the common context fields.
 
 ## Purpose
@@ -60,7 +60,7 @@ Operators must diagnose daemon behavior, admission decisions, cycle outcomes, an
 
 ### Surfacing subprocess stderr in the event log
 
-For every phase iteration, the daemon emits one structured event when the subprocess exits, with summary fields including the truncated head/tail of stderr (configurable size; default first 256 bytes + last 256 bytes). The full stderr is in the per-iter capture file (Tier 2). The previous "one warn-severity event per stderr line" mode is removed because the per-iter capture already preserves every line for forensics, and per-line events flooded the structured stream.
+For every phase iteration, the daemon emits one structured event when the subprocess exits, with summary fields including the truncated head/tail of stderr (configurable size; default first 256 bytes + last 256 bytes). The full stderr is in the per-iter capture file (Tier 2).
 
 ## Capabilities
 
@@ -78,7 +78,7 @@ For every phase iteration, the daemon emits one structured event when the subpro
 - **Per-issue debug log analysis** is out of scope (operators read the captures).
 - **Persistent observability history** beyond the file destination is out of scope; once an event scrolls off the file (after operator-managed rotation), it is gone.
 - **Operator notification destinations** are a separate channel ([14-operator-notifications](14-operator-notifications.md)).
-- **The `--debug` CLI flag** and the per-issue debug log directory are removed; per-iter captures fulfill the same role and are always on.
+- **A `--debug` CLI flag and a per-issue debug log directory** are out of scope; per-iter captures cover the same need and are always on.
 
 ## Traceability
 

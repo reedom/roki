@@ -47,13 +47,13 @@ Three conditions actually invoke deletion:
 2. **Admission-filter eviction** (assignee revoked, repo allowlist match lost): the in-flight cycle (if any) runs to natural end first; afterward the daemon evicts and deletes as in (1).
 3. **Orphan reconcile at cold start** ([04-state-machine-and-recovery §Cold start](04-state-machine-and-recovery.md)): residue not corresponding to any admission-passing Linear ticket is auto-deleted with a `reason: orphan` log entry.
 
-There is no `Cleaning` state in the diff cache anymore. Cleanup is a cycle kind, not a state.
+Cleanup is a cycle kind, not a daemon-tracked state.
 
 ### Failure mode retention
 
 When `[[on_failure]]` does not match a daemon-detected failure, the worktree and session tempdir are **retained** for forensics. Operators that want them cleaned up after a failure write a `[[cleanup]]` entry that triggers on whatever signal they choose (e.g. a Linear comment / label produced inside the failure-handler cycle's run / post phase).
 
-When the daemon itself encounters a filesystem error during create or remove, it logs the offending path with `error_kind: fs_poison` and routes the event through `[[on_failure]] when.kind = "process_crash"` if the error happened during a phase launch (because the launch failed), or as a structured event + escalation entry if the error happened during cleanup. The previous `daemon_directive (kind=fs_poison)` event is removed.
+When the daemon itself encounters a filesystem error during create or remove, it logs the offending path with `error_kind: fs_poison` and routes the event through `[[on_failure]] when.kind = "process_crash"` if the error happened during a phase launch, or as a structured event + escalation entry if the error happened during cleanup.
 
 ### Multi-repo
 

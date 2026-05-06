@@ -47,7 +47,7 @@ Without it, an operator's only view of daemon state is `tail | grep` on the stru
 - **Hot reload**: changes to `[server].*` apply on the next daemon restart; no runtime re-bind.
 - **Configuration failure** (type / range validation): refuse to start the server + log the offending key + the daemon continues without the API.
 
-The previous `extension.server.*` namespace is collapsed into `roki.toml [server]` — no `extension.<spec>.*` namespace is reserved anymore ([12-extension-surface](12-extension-surface.md)).
+HTTP server settings live under `roki.toml [server]`. No `extension.<spec>.*` namespace is reserved ([12-extension-surface](12-extension-surface.md)).
 
 ### Endpoints
 

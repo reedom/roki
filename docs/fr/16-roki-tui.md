@@ -43,7 +43,7 @@ The TUI renders four views; the operator switches between them with documented k
 - **Events**: cross-ticket structured event stream (live tail of the event ring buffer). Filterable by kind, ticket, cycle.
 - **Escalations**: outstanding escalation queue entries (kind, phase, ticket id, cycle id, error text). Local-only acknowledgement clears the visual highlight without notifying the daemon.
 
-There is no daemon-side state-machine view because there is no five-state machine to render anymore: every ticket is either `idle` or `cycling`, and the in-flight cycle id (when present) is the live indicator.
+There is no daemon-side state-machine view: every ticket is either `idle` or `cycling`, and the in-flight cycle id (when present) is the live indicator.
 
 ### Escalation acknowledgement (local only)
 
@@ -98,7 +98,7 @@ The ticket-detail view exposes "open in `roki log`" shortcuts that print the app
 - **Persistent UI state** (the previous selection / acknowledged state, etc.) is out of scope (only inside the current session).
 - **Web UI** is out of scope (a future spec).
 - **Daemon-side ack persistence** is out of scope (v1).
-- **Five-state machine view** is out of scope: the daemon has only `idle` / `cycling`, and the cycle id is the live indicator. There is nothing to render with a state-transition diagram.
+- **State-transition diagram view** is out of scope: the daemon has only `idle` / `cycling`, and the cycle id is the live indicator. There is nothing to render as a transition graph.
 
 ## Traceability
 
