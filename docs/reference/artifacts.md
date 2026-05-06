@@ -3,23 +3,56 @@ refs:
   id: ref:artifacts
   kind: reference
   title: "Public Artifacts"
+  related:
+    - fr:09-log-access-cli
+    - fr:08-observability-logs
+    - fr:04-phase-execution
+    - fr:10-http-api
 ---
 
 # Reference: Public Artifacts
 
-Paths and required elements of public artifacts that operators and downstream specs read or write.
+Paths and required elements of public artifacts that the daemon writes. Operator-authored artifacts (anything a phase subprocess produces beyond the captures listed below) are out of scope — they live wherever the operator's cli line writes them.
+
+## Storage layout
+
+```
+<session_root>/<ticket-id>/
+  cycle-<uuid>/
+    meta.json
+    iter-001/
+      pre.stdout
+      pre.stderr
+      pre.events.jsonl       (session-shape pre only)
+      pre.response.json
+      run.stdout
+      run.stderr
+      run.exit_code
+      run.terminal.json      (when run cli emits stream-json `result`)
+      post.stdout
+      post.stderr
+      post.events.jsonl      (session-shape post only)
+      post.response.json
+    iter-002/
+      ...
+```
+
+`<session_root>` = `roki.toml [paths].session_root`. The on-disk layout is **not** a stable operator-facing contract; access goes through `roki log` / HTTP API. The daemon may switch backends in the future without breaking those CLIs.
 
 ## Artifact list
 
-| Artifact | Path | Writer | Reader | Purpose | Used by | Requirements |
-|---|---|---|---|---|---|---|
-| `meta.json` | `<session_root>/<ticket-id>/cycle-<uuid>/meta.json` | roki daemon (cycle engine) | `roki log --meta`, HTTP API `GET /api/tickets/{id}/cycles`, [09-log-access-cli](../fr/09-log-access-cli.md) | Per-cycle summary durably co-located with per-iter captures so cycle history is queryable independent of structured event log retention | [09-log-access-cli](../fr/09-log-access-cli.md), [10-http-api](../fr/10-http-api.md) | TBD |
-| `requirements.md` | `<workspace_root>/<repo>/<issue>/.kiro/specs/<issue>/requirements.md` | `materialize_spec` phase subprocess (per [18-worker-skill-workflow](../fr/18-worker-skill-workflow.md) phase catalog), driven by `kiro-discovery` | the orchestrator session (structural validation per [19-orchestrator-session](../fr/19-orchestrator-session.md) §Artifact validation) / operator / future spec-sync | Per-issue acceptance criteria in EARS form | [18-worker-skill-workflow](../fr/18-worker-skill-workflow.md), [19-orchestrator-session](../fr/19-orchestrator-session.md) | roki-mvp Req 5.6 |
-| `review.md` | `<workspace_root>/<repo>/<issue>/.kiro/specs/<issue>/review.md` | `finalize_review` phase subprocess (per [18-worker-skill-workflow](../fr/18-worker-skill-workflow.md) phase catalog), synthesizing from prior-phase verdicts (per-task `kiro-review` APPROVED set, `kiro-validate-impl` GO, `kiro-verify-completion` VERIFIED stamps, worktree artefacts) before the orchestrator's `action=stop` | the orchestrator session (structural validation per [19-orchestrator-session](../fr/19-orchestrator-session.md) §Artifact validation) / operator | Per-criterion pass/fail + code references | [18-worker-skill-workflow](../fr/18-worker-skill-workflow.md), [19-orchestrator-session](../fr/19-orchestrator-session.md) | roki-mvp Req 5.6 |
+| Artifact | Path (under `<session_root>/<ticket-id>/cycle-<uuid>/`) | Writer | Reader | Purpose |
+|---|---|---|---|---|
+| `meta.json` | `meta.json` | daemon (cycle engine) | `roki log --meta`, `GET /api/tickets/{id}/cycles` | Per-cycle summary; durable independent of structured event log retention |
+| `<phase>.stdout` / `<phase>.stderr` | `iter-<n>/<phase>.{stdout,stderr}` | daemon (subprocess capture) | `roki log --stream stdout` / `--stream stderr` | Byte-for-byte subprocess output |
+| `<phase>.events.jsonl` | `iter-<n>/{pre,post}.events.jsonl` | daemon (event capture, session-shape pre/post only) | `roki log --stream events` | One parseable JSON object per line; advisory stream-json events the AI emits between turns |
+| `<phase>.response.json` | `iter-<n>/{pre,post}.response.json` | daemon (terminal-directive capture) | `roki log --stream response` | The terminal JSON object the daemon parsed from this phase invocation |
+| `run.terminal.json` | `iter-<n>/run.terminal.json` | daemon (when run cli speaks stream-json) | `roki log --stream terminal` | Parsed claude/codex `result` event |
+| `run.exit_code` | `iter-<n>/run.exit_code` | daemon (post-`wait()`) | `roki log --stream exit_code` | Numeric run-phase exit code |
 
 ## Schema of `meta.json`
 
-One JSON object per file. UTF-8, no trailing newline required.
+One JSON object per file. UTF-8, no trailing newline required. Written at `cycle_started` time (with `ended_at` / terminal fields null) and replaced atomically when the cycle ends. Readers tolerate intermediate states.
 
 | Field | Type | Required | Meaning |
 |---|---|---|---|
@@ -34,49 +67,45 @@ One JSON object per file. UTF-8, no trailing newline required.
 | `iter_count` | int | yes | Number of completed iterations |
 | `terminal_directive` | enum or null | one of `terminal_directive` / `failure_kind` is non-null when `ended_at` is set | `run` / `end` / `pre` (the post directive that terminated the cycle), or null if the cycle ended through a failure |
 | `failure_kind` | enum or null | see above | `process_crash` / `unparseable` / `schema_drift` / `repo_mismatch` / `fs_poison` / `stall` / `iter_exhausted` / `template_error`, or null if the cycle terminated cleanly |
-| `failure_phase` | enum or null | non-null only when `failure_kind` is set | `pre` / `run` / `post` |
+| `failure_phase` | enum or null | non-null only when `failure_kind` is set | `pre` / `run` / `post` (always concrete for cycle-routed failures per [fr:02 §Recognized fields](../fr/02-configuration.md)) |
 
-The file is written by the daemon at `cycle_started` time (with `ended_at` / terminal fields null) and replaced atomically when the cycle ends. Readers tolerate intermediate states. The on-disk shape is canonical for `roki log --meta` and the `GET /api/tickets/{id}/cycles` endpoint; the corresponding Rust type lives in the `roki-api-types` crate.
+The Rust shape lives in the `roki-api-types` crate.
 
-## Required elements of `requirements.md`
+## Schema of `<phase>.response.json`
 
-- **File presence**: exists
-- **Non-empty**: not empty
-- **Encoding sanity**: encoding is sane
-- **EARS shape**: at least one EARS trigger keyword (`WHEN` / `IF` / `WHILE` / `WHERE` / `SHALL`) appears at an acceptance-criteria position
+One JSON object per file. UTF-8, no trailing newline required. Written when the daemon parses a terminal directive from the phase's stdout (last JSON object).
 
-Validation is performed by the orchestrator session (`Read` + `Bash` `grep -E`) after the `materialize_spec` phase clean-exits, per [fr:19-orchestrator-session §Artifact validation](../fr/19-orchestrator-session.md). It is **structural only** (no LLM substantive judgment) — substantive judgment of "are these criteria the right ones for this ticket" lives inside `kiro-discovery`.
+| Field | Type | Required | Meaning |
+|---|---|---|---|
+| `directive` | enum | yes | Phase-specific legal set: pre returns `run` / `end`; post returns `pre` / `run` / `end` ([fr:01 §Directive schema](../fr/01-engine-model.md)) |
+| `outcome` | string | no | Free-form operator string (TUI label, structured log discriminator). Daemon does not interpret |
+| `repo` | string | no | (pre only) Admission-resolved repo for this ticket; daemon validates against `[[admission.repos]]` resolution |
+| (any operator-defined field) | any JSON | no | Exposed to the next phase as `{{ pre.* }}` / `{{ post.* }}` Liquid variables; top-level scalars also exported as `ROKI_PRE_*` / `ROKI_POST_*` env vars per [fr:01 §Inter-phase data flow](../fr/01-engine-model.md) |
 
-## Required elements of `review.md`
+## Schema of `run.terminal.json`
 
-| Field | Type / range | Meaning |
-|---|---|---|
-| Overall status | `pass` or `fail` | Verdict for the whole review |
-| Per-criterion entries | array | One entry for each criterion ID in the active criteria source (SPEC_DRIVEN: numeric requirement IDs in `requirements.md`; direct mode: numbered EARS sentences in the ticket body's `## Acceptance Criteria`) |
-| `status` of each per-criterion entry | `pass` or `fail` | Verdict for the individual criterion |
-| `code_references` of each per-criterion entry (only when status=`pass`) | One or more workspace-relative file paths (optional line range) | The code positions that justify a `pass` (must be on-disk reachable at validation time) |
-| `failure_detail.category` of each per-criterion entry (only when status=`fail`) | `missing` / `regression` / `partial` / `drift` | Per-criterion failure taxonomy emitted by the producing skill (`roki-finalize-review`). Advisory: the orchestrator's structural validation does not cross-check this field, but the skill MUST emit one of the four values when the per-criterion `status` is `fail` so the artifact is parseable downstream |
-| `failure_detail.diagnostic` of each per-criterion entry (only when status=`fail`) | Free text | Short human-readable failure description; not interpreted by the orchestrator |
-| Frontmatter `criteria_source` (optional) | `spec_driven` / `direct` | Records the active mode at synthesis time. Advisory; not validated structurally |
-| Frontmatter `target` (optional) | Feature name (SPEC_DRIVEN) or issue ID (direct mode) | Records what the artifact is reviewing. Advisory; not validated structurally |
+When the run cli emits claude/codex stream-json, the daemon scans for the terminal `result` event mid-stream and writes it to this file. Other shapes leave the file absent.
 
-Validation is performed by the orchestrator session (`Read` + `Bash` `test -f` for reachability) after the `finalize_review` phase clean-exits, per [fr:19-orchestrator-session §Artifact validation](../fr/19-orchestrator-session.md). The orchestrator's structural failure categories (used to populate `additional_context` on the retry path):
+| Field | Type | Required | Meaning |
+|---|---|---|---|
+| (the parsed `result` event verbatim) | JSON object | yes | The cli's terminal `result` event. Shape matches the cli's own output schema; the daemon does not impose a shape beyond extracting the event |
 
-| Category | Condition |
-|---|---|
-| `fail-missing` | Artifact not present |
-| `fail-schema` | Did not parse against the schema described above (missing overall status / missing per-criterion entries / criterion id not in `requirements.md`) |
-| `fail-evidence` | A code reference for a `pass` entry is not reachable on disk |
-| `fail-missing-spec` | `requirements.md` is missing at validation time (rare — caught by the orchestrator before nominating `finalize_review`) |
+## Schema of `run.exit_code`
+
+Plain integer (ASCII), no surrounding whitespace. Written after `wait()` returns regardless of cli shape.
+
+## Schema of `<phase>.events.jsonl` (session-shape pre / post only)
+
+One parseable JSON object per line. Carries the full advisory stream-json output (thinking blocks, tool-use messages, etc.) the AI emits between turns. The daemon does not interpret entries; they are forensic-only.
 
 ## When adding a new artifact
 
 1. Add a row to the **Artifact list** table above.
-2. Add a section listing the required elements.
-3. Link to this reference from the FR pages that use it.
-4. Update the corresponding requirements.
+2. Add a schema section if the artifact has structured contents.
+3. Link to this reference from the FR page that uses it.
 
 ## Related reference
 
-- [config.md](config.md): operator-facing configuration knobs
-- [extension-surface.md](extension-surface.md): `OrchestratorRead`, `TrackerRefresh`, `additional_context`, reserved `WORKFLOW.md` namespaces
+- [config.md](config.md): operator-facing configuration knobs (including `[paths].session_root`)
+- [cli.md](cli.md): `roki log` flags for reading these artifacts
+- [log-events.md](log-events.md): structured events emitted alongside artifact writes

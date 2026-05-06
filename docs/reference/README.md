@@ -13,11 +13,10 @@ Lookup documents for roki.
 
 | File | Contents |
 |---|---|
-| [cli.md](cli.md) | All CLI flags of `roki run` |
-| [config.md](config.md) | `roki.toml` schema, `WORKFLOW.md` schema (including reserved extension namespaces) |
-| [artifacts.md](artifacts.md) | Paths and required elements of public artifacts (`requirements.md` / `review.md` / `distill-manifest.json`) |
-| [extension-surface.md](extension-surface.md) | Traits / hooks / context channels that downstream specs depend on |
-| [log-events.md](log-events.md) | The list of structured log events |
+| [cli.md](cli.md) | All CLI flags of `roki run`, `roki log`, `roki events`, `roki repo` |
+| [config.md](config.md) | `roki.toml` schema, `WORKFLOW.toml` schema, `workflow/*.md` frontmatter schema |
+| [artifacts.md](artifacts.md) | Paths and schemas of daemon-written artifacts (`meta.json`, per-iter captures) |
+| [log-events.md](log-events.md) | Canonical structured log event names |
 
 ## Update rules
 

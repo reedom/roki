@@ -6,98 +6,181 @@ refs:
   related:
     - ref:cli
     - fr:02-configuration
+    - fr:01-engine-model
+    - fr:03-linear-admission
+    - fr:08-observability-logs
+    - fr:10-http-api
 ---
 
 # Reference: Configuration Schema
 
-Schema for `roki.toml` (per workspace) and `WORKFLOW.md` (Liquid + Markdown, hot-reloaded).
+Schema for the three configuration files:
 
-Working samples in [`docs/examples/`](../examples/):
+- `roki.toml` — per workspace, restart-only ([fr:02 §`roki.toml`](../fr/02-configuration.md)).
+- `WORKFLOW.toml` — per workspace, hot-reloadable. Admission filter + rule / cleanup / on_failure entries.
+- `workflow/*.md` — per workspace, hot-reloadable. Phase prompt / cmd bodies (frontmatter + Liquid template).
 
-- [`roki.minimal.toml`](../examples/roki.minimal.toml) / [`WORKFLOW.minimal.md`](../examples/WORKFLOW.minimal.md) — smallest configuration that boots
-- [`roki.annotated.toml`](../examples/roki.annotated.toml) / [`WORKFLOW.annotated.md`](../examples/WORKFLOW.annotated.md) — every key with comments
+Working samples in [`docs/examples/`](../examples/) (pending post-pivot rewrite).
 
 ## `roki.toml` schema
 
-Per workspace, specified with `--config <path>` ([cli.md](cli.md)).
+Per workspace, specified with `--config <path>` ([cli.md](cli.md)). Not hot-reloaded — restart required.
 
-| Block / Key | Required | Meaning | Behavior on invalid value | Used by | Requirements |
+| Block / Key | Required | Type | Default | Validation | Used by |
 |---|---|---|---|---|---|
-| `[linear].api_token` (source) | yes | Where to fetch the Linear API token from (env / file / etc.) | Refuses startup if it cannot be resolved | [03-linear-admission](../fr/03-linear-integration.md) | roki-mvp Req 2.3 |
-| `[linear].webhook_secret` (source) | yes | Where to fetch the Linear webhook HMAC secret from | Refuses startup if it cannot be resolved | [03-linear-admission](../fr/03-linear-integration.md) | roki-mvp Req 2.3, Req 3.1 |
-| `[linear].assignee` | yes | Assignee to admit. `me` resolves to the API token holder | Refuses startup on resolution failure or multiple resolutions | [03-linear-admission](../fr/03-linear-integration.md) | roki-mvp Req 2.8, Req 2.9 |
-| `[linear].admit_states` | no | Set of Linear workflow state names to admit (default `["Todo"]`) | Refuses startup on empty set | [03-linear-admission](../fr/03-linear-integration.md) | roki-mvp Req 2.11 |
-| `[linear].poll_cadence_seconds` | no | Workspace-level polling cadence floor in seconds (default `300`, the documented 5-minute cap). The daemon never issues more than one Linear poll per `poll_cadence_seconds`, even when nudged | Refuses startup on values below `60` | [03-linear-admission](../fr/03-linear-integration.md) | roki-mvp Req 3.3, Req 3.4 |
-| `[linear].endpoint` | no | Linear GraphQL endpoint URL (default `https://api.linear.app/graphql`). Operators may point this at Linear's EU endpoint or a self-hosted GraphQL proxy; tests redirect production bootstrap at a wiremock by setting this slot | Refuses startup if empty or not an `http://` / `https://` URL | [03-linear-admission](../fr/03-linear-integration.md) | roki-mvp Req 2.13, Req 3.4 |
-| `[workflow].path` | yes | Path to `WORKFLOW.md` | Refuses startup if missing / unreadable | [02-configuration](../fr/02-configuration.md) | roki-mvp Req 2.4, Req 6.1 |
-| `[server].bind` | no | Bind host of the webhook receiver (overridable via CLI `--bind`) | Refuses startup on bind failure | [12-daemon-lifecycle](../fr/01-daemon-lifecycle.md) | roki-mvp Req 2.5 |
-| `[server].port` | no | Bind port of the webhook receiver (overridable via CLI `--port`) | Refuses startup on bind failure | [12-daemon-lifecycle](../fr/01-daemon-lifecycle.md) | roki-mvp Req 2.5 |
-| `[[repos]].ghq` | 0+ | `ghq` identifier of an allowlisted repo (`owner/repo` or `host/owner/repo`) | Refuses startup on duplicates; an empty allowlist still boots (the orchestrator's `act` admission decisions then fail allowlist validation) | [05-worktree-and-session](../fr/06-worktree-and-session.md), [19-orchestrator-session](../fr/19-orchestrator-session.md) | roki-mvp Req 2.1, Req 2.2, Req 2.7 |
-| `[permissions].strategy` | yes | `--settings` allowlist or `--dangerously-skip-permissions` (also overridable via CLI flag); applies to phase subprocesses only — orchestrator session always runs with a read-only filesystem sandbox | Refuses startup if not set | [04-phase-execution](../fr/07-worker-execution.md), [19-orchestrator-session](../fr/19-orchestrator-session.md) | roki-mvp Req 9.3, Req 9.4, Req 9.5, Req 9.6 |
+| `[linear].token` | yes | string | — | Refuses startup if missing or unresolvable | [fr:03](../fr/03-linear-admission.md) |
+| `[linear].polling.cadence_seconds` | no | int | `300` | min `60`; refuses startup below | [fr:03 §Polling fallback](../fr/03-linear-admission.md) |
+| `[linear.webhook].secret` | yes | string | — | Refuses startup if missing | [fr:03 §Webhook intake](../fr/03-linear-admission.md) |
+| `[linear.webhook].bind` | yes | bind addr | — | Refuses startup on bind failure. Internet-facing — Linear cloud must reach it | [fr:03 §Webhook intake](../fr/03-linear-admission.md) |
+| `[linear.webhook].port` | yes | port | — | Refuses startup on bind failure | [fr:03 §Webhook intake](../fr/03-linear-admission.md) |
+| `[api].port` | no | port | — (unset → API disabled) | When unset, the observability HTTP server does not start. When set, refuses startup on bind failure | [fr:10 §Server gating](../fr/10-http-api.md) |
+| `[api].bind` | no | bind addr | `127.0.0.1` | Non-loopback emits a warn log noting the absence of authentication | [fr:10 §Server gating](../fr/10-http-api.md) |
+| `[default.ai.session].cli` | yes | string (cli line) | — | Refuses startup if missing. Operator-authored; daemon does not parse the cli line. Liquid-rendered at phase launch | [fr:04 §Subprocess shapes](../fr/04-phase-execution.md) |
+| `[default.ai.session].stall_seconds` | no | int | `600` | min `1` | [fr:04 §Stall detection](../fr/04-phase-execution.md) |
+| `[default.ai.command].cli` | yes | string (cli line) | — | Refuses startup if missing | [fr:04 §Subprocess shapes](../fr/04-phase-execution.md) |
+| `[default.ai.command].stall_seconds` | no | int | `300` | min `1` | [fr:04 §Stall detection](../fr/04-phase-execution.md) |
+| `[engine].max_iterations` | no | int | `10` | min `1` | [fr:01 §Iteration cap](../fr/01-engine-model.md) |
+| `[paths].workflow` | yes | path | — | Refuses startup if file missing / unreadable | [fr:02](../fr/02-configuration.md) |
+| `[paths].session_root` | yes | path | — | Refuses startup if parent directory missing or not writable | [fr:05](../fr/05-worktree-and-session.md) |
+| `[paths].worktree_root` | yes | path | — | Refuses startup if parent directory missing or not writable | [fr:05](../fr/05-worktree-and-session.md) |
+| `[log].destination` | no | enum (`stdout` / `file` / `both`) | `stdout` | — | [fr:08 §Tier 1](../fr/08-observability-logs.md) |
+| `[log].file_path` | yes when `destination ∈ {file, both}` | path | — | Refuses startup if parent directory missing or not writable | [fr:08 §Tier 1](../fr/08-observability-logs.md) |
+| `[log].level` | no | enum (`error` / `warn` / `info` / `debug` / `trace`) | `info` | — | [fr:08 §Tier 1](../fr/08-observability-logs.md) |
+| `[log].ring_size` | no | int | `1000` | min `0` | [fr:08 §Tier 3](../fr/08-observability-logs.md) |
 
-`roki.toml` itself is **not hot-reloaded** (a restart is required).
+Validation failure refuses startup and emits the offending key path in the structured log. The default-value column lists canonical defaults; a future schema-version bump is the only path to changing them.
 
-## `WORKFLOW.md` schema
+## `WORKFLOW.toml` schema
 
-Per workspace, Liquid + Markdown, hot-reload supported. Composed of front matter (YAML or TOML) and template blocks.
+Per workspace, referenced from `roki.toml [paths].workflow`. Hot-reloadable.
 
-### Front matter / structure
+### `[admission]` (single block, required)
 
-`WORKFLOW.md` exposes one required named template block (the orchestrator-session system prompt) plus zero or more optional per-phase template blocks. The per-phase blocks are operator overrides; without them the daemon uses each phase's catalog default invocation (a slash-command-driven skill or a daemon-internal prompt fragment) per [18-worker-skill-workflow §Phase override](../fr/18-worker-skill-workflow.md). A per-phase block is mutually exclusive with the `extension.phase.<name>.command` slash-command override for the same phase.
+| Key | Required | Type | Meaning |
+|---|---|---|---|
+| `assignee` | yes | string | Linear assignee identifier; the literal `me` resolves to the API token holder |
 
-| Key | Required | Meaning | Used by | Requirements |
-|---|---|---|---|---|
-| `prompt_template_orchestrator` (named template block) | yes | System prompt for the orchestrator session. Rendered against the issue context once per orchestrator launch with the per-ticket `mode` flag (`SPEC_DRIVEN` or `NEEDS_CLASSIFY`) substituted in (per [04-state-machine-and-recovery §Pre-admission judge](../fr/04-state-machine-and-recovery.md)); the orchestrator consumes it as it processes `phase_complete`, `phase_nonclean`, `daemon_directive`, and `tracker_terminal` events, including SPEC_DRIVEN target spec doc validation on the first turn and `review.md` validation after `finalize_review` clean exit | [19-orchestrator-session](../fr/19-orchestrator-session.md) | roki-mvp Req 6.1, Req 6.6 |
-| `prompt_template_implement_direct` (named template block) | yes | Daemon-internal prompt for the `implement` phase in NEEDS_CLASSIFY (Path B / direct) mode. Rendered against the per-phase context envelope (ticket body's numbered `## Acceptance Criteria` as the sole spec source, plus any prior reviewer findings on retry) and written to the phase subprocess's stdin | [18-worker-skill-workflow](../fr/18-worker-skill-workflow.md), [19-orchestrator-session](../fr/19-orchestrator-session.md) | roki-mvp Req 6.1 |
-| `prompt_template_validate_direct` (named template block) | yes | Daemon-internal prompt for the `validate` phase in NEEDS_CLASSIFY (Path B / direct) mode. Drives the two-stage mechanical / acceptance check against the ticket body's EARS criteria | [18-worker-skill-workflow](../fr/18-worker-skill-workflow.md) | roki-mvp Req 6.1 |
-| `prompt_template_open_pr` (named template block) | yes | Daemon-internal prompt for the `open_pr` phase. Drives `gh pr create` with the orchestrator-supplied summary | [18-worker-skill-workflow](../fr/18-worker-skill-workflow.md) | roki-mvp Req 6.1 |
-| `prompt_template_<phase>` (named template block, per phase) | no | Operator override for any other phase subprocess's prompt; rendered against the per-phase context envelope and written to the subprocess's stdin (the daemon launches `claude --input-format stream-json --output-format stream-json` instead of `claude -p '<slash-command>'`). Mutually exclusive per phase with `extension.phase.<name>.command`. Absent: the daemon uses the catalog default invocation per [18-worker-skill-workflow](../fr/18-worker-skill-workflow.md) | [18-worker-skill-workflow](../fr/18-worker-skill-workflow.md), [02-configuration](../fr/02-configuration.md) | roki-mvp Req 6.7 |
+### `[[admission.repos]]` (array, 1+ entries, ordered first-match)
 
-### Reserved extension namespaces
+Repo allowlist + dispatch.
 
-Each downstream spec consumes only its own namespace. The loader **round-trips unknown keys** (does not interpret them, does not delete them).
+| Key | Required | Type | Meaning |
+|---|---|---|---|
+| `ghq` | yes | string | ghq path (`github.com/foo/bar` or `host/owner/repo`) |
+| `workflow` | no | path (relative to WORKFLOW.toml) | Per-repo TOML overriding the top-level `[[rule]]` / `[[cleanup]]` / `[[on_failure]]` lists for this repo |
+| `when.*` | no | matcher set | Optional repo-discrimination matchers; entry with no `when.*` is the fallback for tickets matching no other repo entry |
 
-| Namespace / Key | Consuming spec | Required | Meaning | Used by | Requirements |
-|---|---|---|---|---|---|
-| `extension.orchestrator.model` | roki-mvp (orchestrator session) | no | Claude model identifier for the orchestrator (default `"claude-opus-4-7"`) | [19-orchestrator-session](../fr/19-orchestrator-session.md) | roki-mvp Req 2.11 |
-| `extension.orchestrator.effort` | roki-mvp (orchestrator session) | no | Extended-thinking budget for the orchestrator; one of `low` / `middle` / `high` (default `"middle"`) | [19-orchestrator-session](../fr/19-orchestrator-session.md) | roki-mvp Req 2.11 |
-| `extension.orchestrator.max_phases` | roki-mvp (orchestrator session) | no | Total phase subprocesses the orchestrator may nominate before the budget routes the issue to `Inactive(reason=orchestrator_budget_exhausted)` (default `15`; lowered from the prior `20` since the per-issue `materialize_spec` phase is removed and `classify` runs at most once per ticket) | [19-orchestrator-session](../fr/19-orchestrator-session.md) | roki-mvp Req 2.11, Req 5.5 |
-| `extension.orchestrator.allowed_tools` | roki-mvp (orchestrator session) | no | Allowlist passed to the orchestrator via `--settings` (default permits Linear MCP write + `Read` + `Bash`; `Bash` runs inside a read-only filesystem sandbox and is intended for artifact validation) | [19-orchestrator-session](../fr/19-orchestrator-session.md), [11-agent-tool-boundary](../fr/11-agent-tool-boundary.md) | roki-mvp Req 2.11, Req 5.1 |
-| `extension.orchestrator.stall_seconds` | roki-mvp (orchestrator session) | no | Orchestrator-stall window in seconds (default `600`). If the orchestrator emits no stdout for this many seconds the daemon SIGTERMs it and routes the issue to `Inactive(reason=orchestrator_crash)` per Req 5.3. Default is sized for `effort=high` turns that combine extended-thinking blocks with tool calls; operators on `effort=middle`/`low` may lower the value | [19-orchestrator-session](../fr/19-orchestrator-session.md) | roki-mvp Req 2.11, Req 5.3 |
-| `extension.phase.<name>.command` | roki-mvp (per-phase override) | no | Slash-command override for a specific phase, replacing the catalog default skill while keeping `claude -p '<command>' --output-format stream-json --max-turns N` as the invocation pattern. `<name>` is one of `classify`, `implement`, `review`, `validate`, `open_pr`, `ci_fix`, `finalize_review`. Mutually exclusive per phase with the matching `prompt_template_<phase>` named template block; declaring both is a configuration error per Req 6.7 | [18-worker-skill-workflow](../fr/18-worker-skill-workflow.md), [02-configuration](../fr/02-configuration.md) | roki-mvp Req 6.7, Req 13.5 |
-| `extension.phase.<name>.max_turns` | roki-mvp (per-phase override) | no | Per-phase `--max-turns` override; replaces the catalog default for the named phase. Additive scalar — may be set with or without `command`, coexists with `prompt_template_<phase>` | [18-worker-skill-workflow](../fr/18-worker-skill-workflow.md) | roki-mvp Req 6.7 |
-| `extension.phase.<name>.stall_seconds` | roki-mvp (per-phase override) | no | Per-phase stall window in seconds (default `120` for every phase). If the named phase emits no stream-json events for this many seconds the daemon SIGTERMs the phase subprocess and emits `phase_nonclean(stall)` to the orchestrator; if the orchestrator is no longer alive the daemon routes the issue to `Inactive(reason=stall)` and surfaces via TUI escalation queue only. Additive scalar — may be set with or without `command`, coexists with `prompt_template_<phase>` | [18-worker-skill-workflow](../fr/18-worker-skill-workflow.md), [04-phase-execution](../fr/07-worker-execution.md), [06-failure-handling](../fr/14-operator-notifications.md) | roki-mvp Req 5.7, Req 6.7 |
-| `extension.server.port` | roki-observability | no | HTTP API port (omitting disables the API) | [10-http-api](../fr/15-http-api.md) | roki-observability Req 1.1, Req 1.2, Req 15.2 |
-| `extension.server.bind` | roki-observability | no | HTTP API bind host (default `127.0.0.1`) | [10-http-api](../fr/15-http-api.md) | roki-observability Req 7.1, Req 15.2 |
-| `extension.server.min_refresh_interval_seconds` | roki-observability | no | Minimum coalescing interval for `POST /refresh` | [10-http-api](../fr/15-http-api.md) | roki-observability Req 4.4, Req 15.2 |
-| `extension.server.max_event_log_per_issue` | roki-observability | no | Maximum length of the event log returned by the per-issue endpoint | [10-http-api](../fr/15-http-api.md) | roki-observability Req 3.6, Req 15.2 |
+Resolution runs once per cache entry at first admission ([fr:03 §Diff observation](../fr/03-linear-admission.md)). Subsequent webhook updates do not re-resolve.
 
-The following legacy keys are removed and **explicitly refused** by the loader with an actionable error naming the offending key path per `roki-mvp Req 2.12`:
+### `[[rule]]` / `[[cleanup]]` / `[[on_failure]]` (arrays, 0+ entries each, ordered first-match)
 
-| Legacy key | Source | Replaced by |
+| Key | Required | Type | Meaning |
+|---|---|---|---|
+| `when.*` | yes | matcher set | Conditions; all `when.*` keys within an entry AND together |
+| `pre` | no | phase block | Optional. Synthesized `directive: "run"` when omitted |
+| `run` | yes | phase block | Required for any cycle-spawning entry. The only legal omission is a `[[cleanup]]` entry with all three phases omitted (immediate-delete shorthand) |
+| `post` | no | phase block | Optional. Synthesized `directive: "end"` when omitted |
+
+Phase block declares exactly one of:
+
+| Key | Type | Meaning |
 |---|---|---|
-| `[judge].model` | `roki.toml` | `extension.orchestrator.model` (orchestrator session absorbs the setup-judge) |
-| `extension.linear_updater.*` | `WORKFLOW.md` | Orchestrator session writes Linear directly via the operator's installed Linear MCP (linear-updater subagent removed) |
-| `extension.gates.spec.*` / `extension.gates.review.*` (and any other `extension.gates.*` key) | `WORKFLOW.md` | Orchestrator session performs structural validation of `requirements.md` and `review.md` (daemon-side mechanical gates removed) |
-| `extension.distill.*` | `WORKFLOW.md` | No replacement — the per-issue `materialize_spec` distill flow is removed; SPEC_DRIVEN tickets reuse a project-level spec, NEEDS_CLASSIFY tickets use the ticket body's EARS criteria |
+| `path = "<file>"` | path (relative to WORKFLOW.toml) | File-form. Frontmatter chooses session vs command. Body is a Liquid template |
+| `prompt = "<inline string>"` | string | Inline session-form. Always uses `default.ai.session.cli` |
+| `cmd = "<inline string>"` | string | Inline command-form. Operator-authored full cli line, Liquid-rendered |
 
-All four are rejected at startup. At hot reload the loader retains the previous policy and logs the failure. See [19-orchestrator-session](../fr/19-orchestrator-session.md) for how the orchestrator session absorbs these functions.
+### Condition vocabulary (`when.*`)
 
-### Hot reload and validation
+| Operator | Form | Meaning |
+|---|---|---|
+| Equality | `when.<field> = "<scalar>"` | Field equals the scalar |
+| Negation | `when.<field>.not = "<scalar>"` | Field does not equal the scalar |
+| Set membership | `when.<field>.in = [...]` | Field is in the set |
+| List has-all | `when.labels.has_all = [...]` | Every entry present in ticket labels |
+| List has-any | `when.labels.has_any = [...]` | At least one entry present |
+| List has-none | `when.labels.has_none = [...]` | None of the entries present |
+| String regex | `when.title.regex = "..."` | (admission.repos only) ticket title matches the regex |
+| String prefix | `when.title.starts_with = "..."` | (admission.repos only) |
+| String contains | `when.title.contains = "..."` / `when.body.contains = "..."` | (admission.repos only) |
 
-- **Schema validation failure at startup** → refuse to start + log the offending key path
-- **Validation passes on hot reload** → apply the new policy
-- **Validation fails on hot reload** → **keep the previous policy** + log the failure (do not stop the daemon)
-- **Per-key invalidity inside `extension.*`** (e.g. negative `extension.orchestrator.max_phases`) → the corresponding spec refuses evaluation + logs the misconfiguration
+Recognized fields:
 
-## When adding a new key / namespace
+| Field | Scope |
+|---|---|
+| `status` | Linear state name |
+| `labels` | Linear label list |
+| `assignee` | Linear assignee (rule-level only; `[admission].assignee` does the coarse filter) |
+| `repo` | admission-resolved ghq path (rule-level only) |
+| `kind` | failure kind (`[[on_failure]]` only): `process_crash` / `unparseable` / `schema_drift` / `repo_mismatch` / `fs_poison` / `stall` / `iter_exhausted` / `template_error` |
+| `phase` | phase name (`[[on_failure]]` only): `pre` / `run` / `post` |
+| `title`, `body` | Linear ticket strings (`[[admission.repos]]` only) |
 
-1. Add a row to the corresponding table above.
+OR is expressed by writing additional entries.
+
+## Per-repo `WORKFLOW.toml` (optional)
+
+Set via `[[admission.repos]] workflow = "<path>"`. The file replaces this repo's `[[rule]]` / `[[cleanup]]` / `[[on_failure]]` lists entirely. Top-level admission stays in WORKFLOW.toml; the per-repo file inherits nothing else.
+
+Schema is identical to the top-level WORKFLOW.toml minus the `[admission]` block.
+
+## `workflow/*.md` schema
+
+Each file referenced from a `*.path` field has YAML frontmatter and a Liquid body.
+
+| Key | Required | Type | Default | Meaning |
+|---|---|---|---|---|
+| `session` | no | enum (`session` / `command`) | `session` | Subprocess shape ([fr:04](../fr/04-phase-execution.md)) |
+| `cli` | no | string (cli line) | (falls back to `[default.ai.{session,command}].cli`) | Per-file override of the cli line |
+| `stall_seconds` | no | int | (falls back to `[default.ai.{session,command}].stall_seconds`) | Per-file stall window override |
+
+Body is a Liquid template, rendered against the variables in [fr:01 §Inter-phase data flow](../fr/01-engine-model.md). The rendered text is delivered via stdin per [fr:04 §Input channels](../fr/04-phase-execution.md).
+
+## Hot reload
+
+WORKFLOW.toml + workflow/*.md changes:
+
+| Outcome | Behavior |
+|---|---|
+| Validation passes on initial load | Apply policy; daemon proceeds to ready |
+| Validation fails on initial load | Refuse to start; log offending key path |
+| Validation passes on hot reload | Apply on next webhook; in-flight cycles keep their pre-reload policy until they terminate |
+| Validation fails on hot reload | Keep the previous policy + log the failure (daemon does not stop) |
+| Per-key invalidity inside a single entry | That entry is rejected as if it had not matched; other entries continue to apply |
+
+`roki.toml` is **not** hot-reloaded; changes require a daemon restart.
+
+## Removed legacy keys
+
+The following pre-pivot keys are removed and **explicitly refused** by the loader at startup with an actionable error naming the offending key path:
+
+| Legacy key | Source | Removed because |
+|---|---|---|
+| `[server].bind` / `[server].port` | `roki.toml` | Single `[server]` block split into `[linear.webhook]` (internet-facing) and `[api]` (loopback observability) |
+| `[linear].webhook_secret` | `roki.toml` | Moved into `[linear.webhook].secret` alongside the webhook receiver's bind/port |
+| `[linear].admit_states` | `roki.toml` | Status filter now derived from the union of `when.status` values across `[[rule]]` and `[[cleanup]]` entries; explicit allowlist no longer needed |
+| `[[repos]]` | `roki.toml` | Repo allowlist moved into `WORKFLOW.toml [[admission.repos]]` |
+| `[permissions].strategy` | `roki.toml` | Permission strategy is now pass-through: whatever the operator's cli line declares (`--dangerously-skip-permissions`, `--settings`, etc.) is what the subprocess sees |
+| `[judge].*` | `roki.toml` | Pre-admission judge removed; admission is purely mechanical (assignee + repo allowlist) |
+| `extension.orchestrator.*` | `WORKFLOW.md` | Orchestrator session removed |
+| `extension.phase.<name>.command` | `WORKFLOW.md` | Phase catalog removed; phase invocations are operator-authored via `path` / `prompt` / `cmd` per phase block |
+| `extension.phase.<name>.max_turns` | `WORKFLOW.md` | Daemon does not enforce a turn budget; operator's cli line owns it |
+| `extension.phase.<name>.stall_seconds` | `WORKFLOW.md` | Replaced by per-file `stall_seconds` in `workflow/*.md` frontmatter |
+| `extension.linear_updater.*` | `WORKFLOW.md` | Daemon never writes Linear; writes happen inside operator-authored phase subprocesses |
+| `extension.gates.*` | `WORKFLOW.md` | Daemon never validates artifacts |
+| `extension.distill.*` | `WORKFLOW.md` | `materialize_spec` flow removed |
+| `extension.server.*` | `WORKFLOW.md` | HTTP API config moved to top-level `roki.toml [api]` (not in WORKFLOW.toml) |
+| `prompt_template_orchestrator` (named template block) | `WORKFLOW.md` | Orchestrator session removed |
+| `prompt_template_<phase>` (named template block) | `WORKFLOW.md` | Phase prompts now live in `workflow/*.md` and inline `prompt` / `cmd` strings |
+
+The loader emits a startup error that names the offending key path. At hot reload the loader retains the previous policy and logs the failure; the daemon does not stop.
+
+## When adding a new key
+
+1. Add a row to the corresponding table above with the canonical default and validation rule.
 2. Link to this table from the FR page that uses it.
-3. Update `roki-mvp Req 2` (for `roki.toml`) or `roki-mvp Req 13.5` (for a `WORKFLOW.md` namespace) and the consuming spec's requirements.
+3. Update the spec the key is owned by (post spec rebuild).
 
-## Related
+## Related reference
 
 - [cli.md](cli.md): override via CLI flags
-- [extension-surface.md](extension-surface.md): extension contract including WORKFLOW.md namespaces
-- [`docs/examples/`](../examples/): working samples
+- [`docs/examples/`](../examples/): working samples (pending post-pivot rewrite)
