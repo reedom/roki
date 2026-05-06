@@ -3,11 +3,7 @@ refs:
   id: crate:roki-daemon
   kind: crate
   title: "roki-daemon"
-  spec: roki-mvp
-  implements:
-    - requirements:roki-mvp
-  related:
-    - design:roki-mvp
+  spec: roki-skeleton
   modules:
     - crates/roki-daemon/
 ---
@@ -16,7 +12,7 @@ refs:
 
 Single-binary daemon: observes Linear, supervises one long-lived orchestrator session (`claude --input-format stream-json --output-format stream-json`) plus short-lived phase subprocesses (`claude -p '/kiro-* <args>' --output-format stream-json`) per ticket, reconciles per-issue state on restart. Owns no Linear writes, no PR creation, no code edits — Linear writes belong to the orchestrator (via operator's Linear MCP); PR / git / code edits belong to phase subprocesses.
 
-Narrative: [`docs/fr/index.md`](../../docs/fr/index.md). Spec: [`.kiro/specs/roki-mvp/`](../../.kiro/specs/roki-mvp/).
+Narrative: [`docs/fr/index.md`](../../docs/fr/index.md). Specs: [`.kiro/specs/`](../../.kiro/specs/) (Wave 0 backbone: `roki-skeleton`).
 
 ## Build
 
