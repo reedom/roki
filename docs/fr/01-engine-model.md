@@ -101,8 +101,8 @@ The daemon retains the **last completed iteration's** payloads and exposes them 
 | `{{ cycle.trigger }}` | `ROKI_CYCLE_TRIGGER` | `webhook` / `cold_start` (extensible) |
 | `{{ cycle.iter }}` | `ROKI_CYCLE_ITER` | int (1-indexed) |
 | `{{ config.max_iterations }}` | `ROKI_CONFIG_MAX_ITERATIONS` | int — engine cap from `roki.toml [engine].max_iterations` |
-| `{{ pre.* }}` | `ROKI_PRE_<FIELD>` for scalars | Most recent pre response payload |
-| `{{ post.* }}` | `ROKI_POST_<FIELD>` for scalars | Most recent post response payload (visible from iteration N+1 onward) |
+| `{{ pre.* }}` | `ROKI_PRE_<FIELD>` for top-level scalars only | Most recent pre response payload. Nested objects / arrays / null are reachable through Liquid only. |
+| `{{ post.* }}` | `ROKI_POST_<FIELD>` for top-level scalars only | Most recent post response payload (visible from iteration N+1 onward). Same env restriction as `pre`. |
 | `{{ run.exit_code }}` | `ROKI_RUN_EXIT_CODE` | int |
 | `{{ run.duration_seconds }}` | `ROKI_RUN_DURATION_SECONDS` | int |
 | `{{ run.terminal.* }}` | (inline only) | Parsed claude/codex stream-json `result` event when applicable; null for shell commands |
@@ -115,6 +115,8 @@ The daemon exposes these variables to every subprocess on three fixed channels (
 - **stdin** — the rendered phase body (`path` body or inline `prompt` string). Inline `cmd` phases write nothing to stdin.
 
 Phases that need a complex prev-iter object not present in the table (e.g. an older iteration's parsed response) read it through `roki log --stream response --iter -N` ([09-log-access-cli](09-log-access-cli.md)).
+
+**Env-var naming rule for `ROKI_PRE_*` / `ROKI_POST_*`**: only top-level scalar fields (string, number, bool) are exported. Each operator-defined key `<key>` becomes `ROKI_PRE_<KEY>` / `ROKI_POST_<KEY>` where `<KEY>` is the field name uppercased verbatim (no snake-case rewriting; non-`[A-Z0-9_]` characters cause the entry to be skipped with an info-level log naming the offending key). Nested objects, arrays, and null fields are not exported and are reachable through Liquid (`{{ pre.payload.foo }}`) or stdin only.
 
 ### Iteration cap and cooperative termination
 
