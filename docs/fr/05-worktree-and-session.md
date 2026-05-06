@@ -1,6 +1,6 @@
 ---
 refs:
-  id: fr:06-worktree-and-session
+  id: fr:05-worktree-and-session
   kind: fr
   title: "Worktree and Session Lifecycle"
   spec: roki-mvp
@@ -8,15 +8,15 @@ refs:
     - req:roki-mvp:4
   related:
     - fr:02-configuration
-    - fr:04-state-machine-and-recovery
-    - fr:07-worker-execution
-    - fr:20-rule-and-cycle-engine
-    - fr:21-log-access
+    - fr:07-recovery
+    - fr:04-phase-execution
+    - fr:01-engine-model
+    - fr:09-log-access-cli
 ---
 
-# FR 06: Worktree and Session Lifecycle
+# FR 05: Worktree and Session Lifecycle
 
-> Per-ticket session tempdirs (always present once admitted) and per-ticket git worktrees (lazily materialized when a cycle reaches its first run phase). The daemon owns both directories' creation and deletion. Operators read paths through `roki repo` ([21-log-access](21-log-access.md)); phase subprocesses walk into the resolved path.
+> Per-ticket session tempdirs (always present once admitted) and per-ticket git worktrees (lazily materialized when a cycle reaches its first run phase). The daemon owns both directories' creation and deletion. Operators read paths through `roki repo` ([09-log-access-cli](09-log-access-cli.md)); phase subprocesses walk into the resolved path.
 
 ## Purpose
 
@@ -26,26 +26,26 @@ Concentrate worktree and session-tempdir lifecycle in the daemon so the operator
 
 ### Session tempdir
 
-- **Created at admission**: when the admission filter ([04-state-machine-and-recovery §Admission filter](04-state-machine-and-recovery.md)) accepts a ticket, the daemon creates `<session_root>/<ticket-id>/` (where `<session_root>` is `roki.toml [paths].session_root`). This directory is the per-iter capture root ([21-log-access §Storage layout](21-log-access.md)). It exists before any cycle starts so even pre-run inspection has somewhere to write logs.
+- **Created at admission**: when the admission filter ([04-state-machine-and-recovery §Admission filter](07-recovery.md)) accepts a ticket, the daemon creates `<session_root>/<ticket-id>/` (where `<session_root>` is `roki.toml [paths].session_root`). This directory is the per-iter capture root ([21-log-access §Storage layout](09-log-access-cli.md)). It exists before any cycle starts so even pre-run inspection has somewhere to write logs.
 - **Deleted on**: cleanup-cycle completion, admission-filter eviction (after any in-flight cycle terminates), and orphan reconciliation at cold start.
 
 ### Worktree
 
-- **Created lazily**: when a cycle's pre returns `directive: "run"` and the worktree does not yet exist, the daemon creates it before spawning the run subprocess. The pre response payload includes a `repo` field that names the ghq repo for this ticket. The daemon validates `repo` against the admission-resolved repo and rejects mismatches as a `repo_mismatch` failure ([20-rule-and-cycle-engine §Failure handling](20-rule-and-cycle-engine.md)).
+- **Created lazily**: when a cycle's pre returns `directive: "run"` and the worktree does not yet exist, the daemon creates it before spawning the run subprocess. The pre response payload includes a `repo` field that names the ghq repo for this ticket. The daemon validates `repo` against the admission-resolved repo and rejects mismatches as a `repo_mismatch` failure ([20-rule-and-cycle-engine §Failure handling](01-engine-model.md)).
 - **Tooling**: the daemon resolves the repo's local clone with `ghq list -p` and creates a worktree with `wt switch-create` (branch name = the Linear issue identifier verbatim). Idempotent on subsequent `directive: "run"` invocations: the daemon verifies the worktree's continued presence with `wt list` (or equivalent) without re-running `wt switch-create`. If the operator removed the worktree out-of-band between iterations, the daemon recreates it.
-- **Path exposure**: phase subprocesses obtain the path via `roki repo` ([21-log-access §`roki repo`](21-log-access.md)). The daemon does not inject the worktree path into the cli line implicitly; operators write `cd "$(roki repo)"` (or equivalent) inside their command.
+- **Path exposure**: phase subprocesses obtain the path via `roki repo` ([21-log-access §`roki repo`](09-log-access-cli.md)). The daemon does not inject the worktree path into the cli line implicitly; operators write `cd "$(roki repo)"` (or equivalent) inside their command.
 - **Reused across cycles**: the same worktree persists across cycles for the same ticket. New cycles inherit whatever git state the previous cycle left.
 - **Branch name**: equals the Linear issue identifier verbatim. The daemon does not parse, transform, or namespace it.
 
 ### Cleanup
 
-Auto-delete is gated by cycle kind ([20-rule-and-cycle-engine §Cycle kinds](20-rule-and-cycle-engine.md)): only `cleanup` cycles trigger auto-delete on completion. `rule` and `failure` cycle completions do not.
+Auto-delete is gated by cycle kind ([20-rule-and-cycle-engine §Cycle kinds](01-engine-model.md)): only `cleanup` cycles trigger auto-delete on completion. `rule` and `failure` cycle completions do not.
 
 Three conditions actually invoke deletion:
 
 1. **Cleanup cycle completion** (`cycle.kind == "cleanup"`): after the cycle's terminal directive is observed, the daemon enumerates worktrees in the allowlist whose branch name matches the issue identifier and runs `wt remove`, then `rm -rf` on the session tempdir. The branch itself is **not** deleted.
 2. **Admission-filter eviction** (assignee revoked, repo allowlist match lost): the in-flight cycle (if any) runs to natural end first; afterward the daemon evicts and deletes as in (1).
-3. **Orphan reconcile at cold start** ([04-state-machine-and-recovery §Cold start](04-state-machine-and-recovery.md)): residue not corresponding to any admission-passing Linear ticket is auto-deleted with a `reason: orphan` log entry.
+3. **Orphan reconcile at cold start** ([04-state-machine-and-recovery §Cold start](07-recovery.md)): residue not corresponding to any admission-passing Linear ticket is auto-deleted with a `reason: orphan` log entry.
 
 Cleanup is a cycle kind, not a daemon-tracked state.
 
@@ -84,4 +84,4 @@ One ticket → one repo by construction. The admission step resolves it; the wor
 - **Design**:
   - `.kiro/specs/roki-mvp/design-worktree-workspace.md` (pending rewrite).
   - `Workspace Manager` section of `.kiro/specs/roki-mvp/design.md` (pending rewrite).
-- **Related FR**: [02-configuration](02-configuration.md), [04-state-machine-and-recovery](04-state-machine-and-recovery.md), [07-worker-execution](07-worker-execution.md), [20-rule-and-cycle-engine](20-rule-and-cycle-engine.md), [21-log-access](21-log-access.md).
+- **Related FR**: [02-configuration](02-configuration.md), [07-recovery](07-recovery.md), [04-phase-execution](04-phase-execution.md), [01-engine-model](01-engine-model.md), [09-log-access-cli](09-log-access-cli.md).

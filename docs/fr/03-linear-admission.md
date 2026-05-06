@@ -1,21 +1,21 @@
 ---
 refs:
-  id: fr:03-linear-integration
+  id: fr:03-linear-admission
   kind: fr
-  title: "Linear Integration"
+  title: "Linear Admission"
   spec: roki-mvp
   implements:
     - req:roki-mvp:3
   related:
     - fr:02-configuration
-    - fr:04-state-machine-and-recovery
-    - fr:15-http-api
-    - fr:20-rule-and-cycle-engine
+    - fr:07-recovery
+    - fr:10-http-api
+    - fr:01-engine-model
 ---
 
-# FR 03: Linear Integration
+# FR 03: Linear Admission
 
-> Discovery and admission of Linear tickets via webhook (hot path) or polling (fallback). The daemon is read-only against Linear; the admission filter and diff cache live in [04-state-machine-and-recovery](04-state-machine-and-recovery.md), and rule dispatch in [20-rule-and-cycle-engine](20-rule-and-cycle-engine.md). This FR covers the wire-level intake plus the assignee / admission semantics as observed at the Linear surface.
+> Discovery and admission of Linear tickets via webhook (hot path) or polling (fallback). Webhook signature verification, normalized event model, assignee + repo allowlist gating, polling cadence cap, and 429 backoff. The daemon is read-only against Linear; the diff cache and rule dispatch live in [07-recovery](07-recovery.md) and [01-engine-model](01-engine-model.md).
 
 ## Purpose
 
@@ -27,7 +27,16 @@ Admit assigned tickets without drops, never touch others' tickets, and respect t
 
 - **HMAC verification**: every webhook is verified against `roki.toml [linear].webhook_secret`. Invalid signature → respond with the documented unauthorized status code without normalization.
 - **Normalization**: a verified payload is normalized into the internal issue model (see Capabilities). The normalized model is the only thing later layers see.
-- **Forward to admission**: the normalized event is handed to the admission filter ([04-state-machine-and-recovery §Admission filter](04-state-machine-and-recovery.md)). Admission decides whether to update the diff cache and re-evaluate rules.
+- **Forward to admission**: the normalized event is handed to the admission filter (next section). Admission decides whether to update the diff cache and re-evaluate rules.
+
+### Admission filter
+
+Before any cache update ([07-recovery §Diff cache](07-recovery.md)), the daemon evaluates the admission filter declared in WORKFLOW.toml ([02-configuration §WORKFLOW.toml](02-configuration.md)):
+
+1. **Assignee gate**: `ticket.assignee == [admission].assignee`. The literal `me` resolves to the API token holder. Failure → silent eviction (logged but not surfaced to Linear).
+2. **Repo resolution**: `[[admission.repos]]` first-match → resolves the ticket's ghq repo identifier and its per-repo `workflow` path (or fall back to the top-level WORKFLOW.toml entries). No match → silent eviction (`reason: repo_unresolvable`).
+
+Tickets that fail admission are not added to the cache. If the ticket was previously cached and the new webhook fails admission (assignee change, repo matcher no longer hits), the cache entry is evicted; if a cycle is currently in flight for that ticket, the cycle is allowed to terminate naturally and the worktree + session_tempdir are deleted afterward as orphan cleanup ([05-worktree-and-session](05-worktree-and-session.md)).
 
 ### Polling fallback
 
@@ -40,7 +49,7 @@ When the webhook is not usable (operator-disabled, network partition, transient 
 
 ### Diff observation
 
-The diff cache decides what counts as a change ([04-state-machine-and-recovery §Diff cache](04-state-machine-and-recovery.md)). For the Linear-side surface, the daemon tracks `(status, labels, assignee)` per ticket. Webhook events that announce changes outside that triple (description edits, comments, reactions) update Linear's own state but do not start a cycle.
+The diff cache decides what counts as a change ([07-recovery §Diff cache](07-recovery.md)). For the Linear-side surface, the daemon tracks `(status, labels, assignee)` per ticket. Webhook events that announce changes outside that triple (description edits, comments, reactions) update Linear's own state but do not start a cycle.
 
 ### Reassignment
 
@@ -50,7 +59,7 @@ When the assignee on a previously admitted ticket changes to someone other than 
 2. If a cycle is currently in flight, it runs to natural end (queue mode); afterward the daemon deletes the worktree + session_tempdir as orphan cleanup.
 3. No Linear write is performed by the daemon. Operators that want a Linear comment on reassignment author a `[[cleanup]]` entry whose run phase performs the write.
 
-There is no separate `Cleaning` state in the daemon ([04-state-machine-and-recovery](04-state-machine-and-recovery.md)).
+There is no separate `Cleaning` state in the daemon ([07-recovery](07-recovery.md)).
 
 ### Re-admission
 
@@ -58,7 +67,7 @@ An issue that was previously evicted (assignee mismatch, repo unresolvable) and 
 
 ### Refresh nudge
 
-Operators (TUI, external scripts, observability components) can request an out-of-cycle Linear refresh through the HTTP API ([15-http-api](15-http-api.md)). The nudge bumps the polling cadence forward by one tick subject to the cap and the current 429 backoff. If a nudge arrives during a backoff window it is dropped (logged) rather than queued.
+Operators (TUI, external scripts, observability components) can request an out-of-cycle Linear refresh through the HTTP API ([10-http-api](10-http-api.md)). The nudge bumps the polling cadence forward by one tick subject to the cap and the current 429 backoff. If a nudge arrives during a backoff window it is dropped (logged) rather than queued.
 
 ## Capabilities
 
@@ -85,4 +94,4 @@ Operators (TUI, external scripts, observability components) can request an out-o
   - `roki-mvp Req 13.3`: TrackerRefresh trait (refresh nudge consumer).
 - **Design**:
   - `Tracker Adapter` section of `.kiro/specs/roki-mvp/design.md` (pending rewrite).
-- **Related FR**: [02-configuration](02-configuration.md), [04-state-machine-and-recovery](04-state-machine-and-recovery.md), [15-http-api](15-http-api.md), [20-rule-and-cycle-engine](20-rule-and-cycle-engine.md).
+- **Related FR**: [02-configuration](02-configuration.md), [07-recovery](07-recovery.md), [10-http-api](10-http-api.md), [01-engine-model](01-engine-model.md).

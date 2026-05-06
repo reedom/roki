@@ -11,8 +11,8 @@ refs:
     - ref:config
   related:
     - ref:cli
-    - fr:04-state-machine-and-recovery
-    - fr:20-rule-and-cycle-engine
+    - fr:07-recovery
+    - fr:01-engine-model
   modules:
     - crates/roki-daemon/src/config/
     - crates/roki-daemon/src/workflow/
@@ -30,16 +30,16 @@ refs:
 
 ### `roki.toml` (immutable at startup)
 
-Operators specify the path with `--config <path>` ([01-daemon-lifecycle](01-daemon-lifecycle.md)). The file groups into:
+Operators specify the path with `--config <path>` ([12-daemon-lifecycle](12-daemon-lifecycle.md)). The file groups into:
 
-- **Linear access**: API token, webhook secret, the assignee identifier whose tickets the daemon admits (`me` resolves to the API token holder).
-- **Server**: bind address and port shared by the webhook receiver and the HTTP API.
+- **Linear access**: API token, webhook secret. The assignee identifier lives in WORKFLOW.toml `[admission]`, not here.
+- **Network**: bind address and port shared by the webhook receiver and the HTTP API.
 - **AI default CLIs**: the cli line and stall window the daemon uses when a workflow phase declares `session = "session"` (long-lived stream-json AI reused within one cycle's pre/post chain) or `session = "command"` (one-shot subprocess) without specifying its own cli line.
 - **Engine knobs**: per-cycle iteration cap and (future) concurrency cap.
 - **Paths**: where to load WORKFLOW.toml from, where to put session tempdirs, where to put worktrees.
 - **Log destination**: the structured event log goes to stdout, a file, or both, with operator-set rotation policy.
 
-Any invalid value or resolution failure (`linear.assignee` cannot be resolved, `[default.ai.session].cli` missing, WORKFLOW.toml path missing, token missing, etc.) **refuses startup** and emits the offending field in the structured log.
+Any invalid value or resolution failure (`[admission].assignee` cannot be resolved against the Linear API token holder, `[default.ai.session].cli` missing, WORKFLOW.toml path missing, token missing, etc.) **refuses startup** and emits the offending field in the structured log.
 
 `roki.toml` itself is not hot-reloaded; changing it requires a daemon restart. The exact name, default, and validation rule for each key live in the "roki.toml schema" table in [`docs/reference/config.md`](../reference/config.md).
 
@@ -49,9 +49,8 @@ A canonical layout:
 [linear]
 token = "lin_api_..."
 webhook_secret = "..."
-assignee = "me"
 
-[server]
+[network]
 bind = "127.0.0.1"
 port = 8080
 
@@ -85,7 +84,7 @@ Linear label names are not interpreted by the daemon. Operators express any labe
 A single per-workspace TOML file referenced from `roki.toml [paths].workflow`. Two roles:
 
 1. **Admission filter** — coarse gate evaluated on every webhook before any rule list is touched. Tickets that fail the filter are silently evicted (logged but not surfaced to Linear).
-2. **Rule / cleanup / on_failure entries** — the lists [20-rule-and-cycle-engine](20-rule-and-cycle-engine.md) evaluates first-match to dispatch a cycle.
+2. **Rule / cleanup / on_failure entries** — the lists [01-engine-model](01-engine-model.md) evaluates first-match to dispatch a cycle.
 
 ```toml
 [admission]
@@ -178,7 +177,7 @@ stall_seconds: 600     # optional override of default.ai.{session,command}.stall
 {Liquid body, rendered against the per-phase context envelope}
 ```
 
-The Liquid body is rendered against the variables documented in [20-rule-and-cycle-engine §Inter-phase data flow](20-rule-and-cycle-engine.md). The rendered text is what the daemon passes to the subprocess: as the system / first-turn prompt for `session: "session"` mode, or as stdin for `session: "command"` mode. (Inline command-form phases bypass rendering; the operator's `cmd` string is itself rendered as a Liquid template, but no separate prompt body is supplied.)
+The Liquid body is rendered against the variables documented in [20-rule-and-cycle-engine §Inter-phase data flow](01-engine-model.md). The rendered text is what the daemon passes to the subprocess: as the system / first-turn prompt for `session: "session"` mode, or as stdin for `session: "command"` mode. (Inline command-form phases bypass rendering; the operator's `cmd` string is itself rendered as a Liquid template, but no separate prompt body is supplied.)
 
 ### Hot reload and validation
 
@@ -218,4 +217,4 @@ The Liquid body is rendered against the variables documented in [20-rule-and-cyc
   - `Configuration Schema` / `Workflow Loader` sections of `.kiro/specs/roki-mvp/design.md` (pending rewrite).
   - The Configuration sections of each spec's `design.md`.
 - **Related reference**: [config.md](../reference/config.md), [cli.md](../reference/cli.md).
-- **Related FR**: [04-state-machine-and-recovery](04-state-machine-and-recovery.md) (admission filter and diff cache consume `[admission]`), [20-rule-and-cycle-engine](20-rule-and-cycle-engine.md) (the rule / cleanup / on_failure lists this file populates).
+- **Related FR**: [07-recovery](07-recovery.md) (admission filter and diff cache consume `[admission]`), [01-engine-model](01-engine-model.md) (the rule / cleanup / on_failure lists this file populates).

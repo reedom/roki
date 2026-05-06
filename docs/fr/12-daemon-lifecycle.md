@@ -1,6 +1,6 @@
 ---
 refs:
-  id: fr:01-daemon-lifecycle
+  id: fr:12-daemon-lifecycle
   kind: fr
   title: "Daemon Lifecycle"
   spec: roki-mvp
@@ -8,18 +8,18 @@ refs:
     - req:roki-mvp:1
   depends_on:
     - fr:02-configuration
-    - fr:13-observability-logs
+    - fr:08-observability-logs
   related:
     - ref:cli
-    - fr:04-state-machine-and-recovery
-    - fr:07-worker-execution
-    - fr:20-rule-and-cycle-engine
+    - fr:07-recovery
+    - fr:04-phase-execution
+    - fr:01-engine-model
   modules:
     - crates/roki-daemon/src/runtime.rs
     - crates/roki-daemon/src/config/mod.rs
 ---
 
-# FR 01: Daemon Lifecycle
+# FR 12: Daemon Lifecycle
 
 > The lifecycle of the single-binary daemon launched by `roki run`.
 > See [`docs/reference/cli.md`](../reference/cli.md) for the full CLI flag list.
@@ -30,7 +30,7 @@ An operator runs roki by launching the single `roki` binary with `roki run` and 
 
 ## User-visible Behavior
 
-- **Normal startup**: `roki run --config ./roki.toml` loads `roki.toml`, loads `WORKFLOW.toml` (and any per-repo TOMLs referenced through `[[admission.repos]] workflow`), validates both, brings up the Linear adapter, the diff cache, the cycle engine, and the webhook + HTTP API server, runs the cold-start enumeration ([04-state-machine-and-recovery §Cold start](04-state-machine-and-recovery.md)), then logs that it is ready.
+- **Normal startup**: `roki run --config ./roki.toml` loads `roki.toml`, loads `WORKFLOW.toml` (and any per-repo TOMLs referenced through `[[admission.repos]] workflow`), validates both, brings up the Linear adapter, the diff cache, the cycle engine, and the webhook + HTTP API server, runs the cold-start enumeration ([04-state-machine-and-recovery §Cold start](07-recovery.md)), then logs that it is ready.
 - **Configuration error**: configuration file not found, schema validation failure for `roki.toml`, or schema validation failure for the initial `WORKFLOW.toml` load → non-zero exit, with the offending field name in the structured log.
 - **Missing dependency CLI**: if `wt` / `ghq` are not on `PATH` → refuse to start, with the missing binary name and a remediation hint in the structured log. The cli lines configured in `roki.toml [default.ai.session]` and `[default.ai.command]` are **not** validated at startup (the daemon does not parse them); their first failure surfaces as a `process_crash` failure on the first phase that uses them.
 - **Normal shutdown**: on SIGINT / SIGTERM, stop accepting new work, signal every active cycle (each in-flight pre / run / post subprocess) to terminate within the configured shutdown window, then exit cleanly. In-flight worktrees and session tempdirs are not deleted at shutdown — the next cold start reconciles them.
@@ -38,17 +38,17 @@ An operator runs roki by launching the single `roki` binary with `roki run` and 
 
 ### Cycle integration
 
-The cycle engine ([20-rule-and-cycle-engine](20-rule-and-cycle-engine.md)) decides when to spawn cycles; subprocess supervision is owned by [07-worker-execution](07-worker-execution.md). Daemon responsibilities at the lifecycle layer:
+The cycle engine ([01-engine-model](01-engine-model.md)) decides when to spawn cycles; subprocess supervision is owned by [04-phase-execution](04-phase-execution.md). Daemon responsibilities at the lifecycle layer:
 
 - **Launch a cycle**: the engine signals "spawn pre/run/post for ticket X under matched entry Y". The daemon prepares the per-iter capture directory, renders the cli line, and invokes the launcher. Cycle kind (`rule` / `cleanup` / `failure`) and trigger (`webhook` / `cold_start`) are propagated through environment variables.
 - **Graceful termination**: when a cycle ends (terminal directive, failure routing, or admission eviction after natural end), the daemon writes the final structured event log entry for the cycle and, in the cleanup case, deletes the worktree + session tempdir.
-- **Forced termination on shutdown**: SIGINT / SIGTERM signals every in-flight subprocess. The shutdown window applies uniformly to session-shape and command-shape subprocesses ([07-worker-execution §Subprocess shapes](07-worker-execution.md)).
+- **Forced termination on shutdown**: SIGINT / SIGTERM signals every in-flight subprocess. The shutdown window applies uniformly to session-shape and command-shape subprocesses ([07-worker-execution §Subprocess shapes](04-phase-execution.md)).
 - **Restart non-persistence**: nothing about the cycle engine or the diff cache is persisted across daemon restarts. The next cold start re-enumerates Linear and reconciles disk residue.
 
 ## Capabilities
 
 - **CLI flags**: the canonical list lives in [`docs/reference/cli.md`](../reference/cli.md). Flags override configuration-file values, and `--help` displays every flag together with the corresponding configuration key.
-- **Structured logging foundation**: per-ticket / per-cycle / per-iter fields are attached to every event through the tracing pipeline (see [13-observability-logs](13-observability-logs.md)).
+- **Structured logging foundation**: per-ticket / per-cycle / per-iter fields are attached to every event through the tracing pipeline (see [08-observability-logs](08-observability-logs.md)).
 - **Dependency check**: at startup, verify the existence of `wt` and `ghq`; refuse to start if either is missing. AI cli lines (`claude`, `codex`, etc.) are not pre-checked.
 - **Signal handling**: graceful shutdown (stop new admission → signal each in-flight subprocess to exit → wait within the configured window → exit).
 
@@ -68,4 +68,4 @@ The cycle engine ([20-rule-and-cycle-engine](20-rule-and-cycle-engine.md)) decid
 - **Design**:
   - `Daemon Bootstrap` section of `.kiro/specs/roki-mvp/design.md` (pending rewrite).
   - `.kiro/specs/roki-mvp/design-bootstrap.md` (pending rewrite).
-- **Related FR**: [02-configuration](02-configuration.md), [04-state-machine-and-recovery](04-state-machine-and-recovery.md), [07-worker-execution](07-worker-execution.md), [13-observability-logs](13-observability-logs.md), [20-rule-and-cycle-engine](20-rule-and-cycle-engine.md).
+- **Related FR**: [02-configuration](02-configuration.md), [07-recovery](07-recovery.md), [04-phase-execution](04-phase-execution.md), [08-observability-logs](08-observability-logs.md), [01-engine-model](01-engine-model.md).

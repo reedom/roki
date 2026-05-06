@@ -1,26 +1,27 @@
 ---
 refs:
-  id: fr:07-worker-execution
+  id: fr:04-phase-execution
   kind: fr
   title: "Phase Subprocess Execution"
   spec: roki-mvp
   implements:
     - req:roki-mvp:5
     - req:roki-mvp:5.10
+    - req:roki-mvp:7
     - req:roki-mvp:9
   related:
-    - fr:01-daemon-lifecycle
+    - fr:12-daemon-lifecycle
     - fr:02-configuration
-    - fr:04-state-machine-and-recovery
-    - fr:06-worktree-and-session
-    - fr:14-operator-notifications
-    - fr:20-rule-and-cycle-engine
-    - fr:21-log-access
+    - fr:07-recovery
+    - fr:05-worktree-and-session
+    - fr:06-failure-handling
+    - fr:01-engine-model
+    - fr:09-log-access-cli
 ---
 
-# FR 07: Phase Subprocess Execution
+# FR 04: Phase Subprocess Execution
 
-> The daemon-side mechanics that spawn each pre / run / post subprocess for a cycle, capture its stdout / stderr to disk, parse a structured directive from the last JSON object on stdout (pre / post), apply stall detection, and route the outcome back to the cycle engine. The cycle dispatch logic — which list to evaluate, what directive means what — lives in [20-rule-and-cycle-engine](20-rule-and-cycle-engine.md); this FR is the daemon-side process supervisor only.
+> The daemon-side mechanics that spawn each pre / run / post subprocess for a cycle, capture its stdout / stderr to disk, parse a structured directive from the last JSON object on stdout (pre / post), apply stall detection, and route the outcome back to the cycle engine. The cycle dispatch logic — which list to evaluate, what directive means what — lives in [01-engine-model](01-engine-model.md); this FR is the daemon-side process supervisor only.
 
 ## Purpose
 
@@ -43,20 +44,26 @@ Run-phase subprocesses are typically command-shape (the run is the heavyweight c
 
 **Trigger**: the cycle engine signals "spawn phase X with envelope E". The daemon does not pick what to spawn — it follows the engine's directive.
 
-**Launch (session)**: at the start of a cycle, if any phase declares session-shape, the daemon spawns one subprocess running `[default.ai.session].cli` inside the issue's session tempdir, with a working directory set as documented in [06-worktree-and-session](06-worktree-and-session.md). The same process is reused across pre and post invocations of the cycle. The daemon writes a launch-envelope JSON to stdin once on first use, then writes one event JSON per turn after each cooperative `directive: "..."` reply.
+**Launch (session)**: at the start of a cycle, if any phase declares session-shape, the daemon spawns one subprocess running `[default.ai.session].cli` inside the issue's session tempdir, with a working directory set as documented in [05-worktree-and-session](05-worktree-and-session.md). The same process is reused across pre and post invocations of the cycle. The daemon writes a launch-envelope JSON to stdin once on first use, then writes one event JSON per turn after each cooperative `directive: "..."` reply.
 
-**Launch (command)**: each invocation spawns a fresh subprocess. The daemon renders the cli line as a Liquid template (substituting `{{ pre.* }}` / `{{ post.* }}` / `{{ ticket.* }}` / `{{ cycle.* }}` per [20-rule-and-cycle-engine §Inter-phase data flow](20-rule-and-cycle-engine.md)), spawns the process, writes the envelope JSON to stdin, closes stdin, and waits for exit.
+**Launch (command)**: each invocation spawns a fresh subprocess. The daemon renders the cli line as a Liquid template (substituting `{{ pre.* }}` / `{{ post.* }}` / `{{ ticket.* }}` / `{{ cycle.* }}` per [20-rule-and-cycle-engine §Inter-phase data flow](01-engine-model.md)), spawns the process, writes the envelope JSON to stdin, closes stdin, and waits for exit.
 
-**Capture**: stdout and stderr are copied to per-iter files under `<session_root>/<ticket-id>/cycle-<uuid>/iter-<n>/{phase}.{stdout,stderr}` ([21-log-access §Storage layout](21-log-access.md)). The capture is byte-for-byte; the daemon does not strip ANSI codes or filter content.
+**Capture**: stdout and stderr are copied to per-iter files under `<session_root>/<ticket-id>/cycle-<uuid>/iter-<n>/{phase}.{stdout,stderr}` ([21-log-access §Storage layout](09-log-access-cli.md)). The capture is byte-for-byte; the daemon does not strip ANSI codes or filter content.
 
 **Event handling**: stdout is also parsed as it arrives, line-by-line:
 
 - For session phases (pre / post) emitting stream-json: the daemon scans for the terminal JSON object that contains a `directive` field. Earlier JSON objects (advisory thinking blocks, tool-use messages, etc.) are recorded only in the iter capture file; they do not affect the cycle.
-- For command phases (run, or pre/post in command shape): the daemon reads the entire stdout, then on exit parses the **last** JSON object (for pre / post) or the terminal `result` event ([21-log-access §`run.terminal.json`](21-log-access.md)) (for run, when the command speaks claude/codex stream-json).
+- For command phases (run, or pre/post in command shape): the daemon reads the entire stdout, then on exit parses the **last** JSON object (for pre / post) or the terminal `result` event ([09-log-access-cli §`run.terminal.json`](09-log-access-cli.md)) (for run, when the command speaks claude/codex stream-json).
 
-### Permission strategy (pass-through)
+### Tool boundary and permissions (pass-through)
 
-Whatever the cli line says is what runs. The daemon does not enforce sandbox levels, allowlists, or `--dangerously-skip-permissions` decisions. Operators take responsibility for the resulting safety posture by choosing cli lines they trust:
+The daemon never registers, proxies, or wraps any agent-side tool. Every phase subprocess sees exactly what the operator's cli line invokes — Linear MCP, git, gh, shell, language MCPs — verbatim. The daemon adds nothing, removes nothing, and composes no flags on the operator's behalf.
+
+- **Subprocess tool surface**: equals the cli line's tool surface.
+- **Linear writes**: originate only from inside a phase subprocess, through whatever MCP / CLI / HTTP client the operator's cli line exposes. The daemon process itself never writes Linear under any circumstance — including failure handling, cleanup, and restart recovery.
+- **Permission flags**: `--dangerously-skip-permissions`, `--settings`, sandbox profile flags are passed through unchanged. The daemon does not parse, validate, or override them.
+- **Secrets**: Linear API token, webhook secret, and operator-declared `roki.toml` secrets are never placed in prompt input, captures, environment variables given to phase subprocesses, or structured log entries. The redaction layer in [08-observability-logs](08-observability-logs.md) enforces this at log emit time.
+- **Operator safety posture**: operators choose the cli line for each phase. A constrained allowlist or a permissive `--dangerously-skip-permissions` are equally accepted by the daemon.
 
 ```toml
 [default.ai.session]
@@ -66,7 +73,7 @@ cli = "claude --input-format stream-json --output-format stream-json --model cla
 cli = "claude -p '{{ prompt }}' --output-format stream-json --max-turns 100 --dangerously-skip-permissions"
 ```
 
-Operators that want a fail-closed mode omit `[default.ai.session]` / `[default.ai.command]` and rely on each rule's per-phase cli being set explicitly.
+Operators that want a fail-closed mode omit `[default.ai.session]` / `[default.ai.command]` and require each rule's per-phase cli to be set explicitly.
 
 ### Termination handling
 
@@ -84,7 +91,7 @@ The daemon translates each phase's exit into a single signal returned to the cyc
 | Iteration cap (forced) | Same as above but the AI did not reply within the stall window | `{ kind: "failure", failure_kind: "iter_exhausted" }` |
 | Template render error | Liquid render of the cli line, prompt body, or envelope failed before launch | `{ kind: "failure", failure_kind: "template_error" }` |
 
-The cycle engine routes all `failure_kind` values through `[[on_failure]]` first-match ([20-rule-and-cycle-engine §Failure handling](20-rule-and-cycle-engine.md)). The daemon does not retry a phase on its own and does not enforce exponential backoff; retries are operator-driven through post directives.
+The cycle engine routes all `failure_kind` values through `[[on_failure]]` first-match ([20-rule-and-cycle-engine §Failure handling](01-engine-model.md)). The daemon does not retry a phase on its own and does not enforce exponential backoff; retries are operator-driven through post directives.
 
 ### Stall detection
 
@@ -104,7 +111,7 @@ A Linear status change to `Done` / `Cancelled` (or assignee removal, or any othe
 
 ### Daemon-only failures (no Linear writes)
 
-The daemon never writes Linear directly. Failures detected by the daemon (stall, process crash, unparseable, schema drift, iteration cap, template error) flow through `[[on_failure]]`. If `[[on_failure]]` matches, the operator's failure-handler cycle decides whether to write Linear feedback. If `[[on_failure]]` does not match (or is absent), the failure is recorded in the structured event log and as one entry in the TUI escalation queue ([14-operator-notifications](14-operator-notifications.md)); no Linear write is attempted.
+The daemon never writes Linear directly. Failures detected by the daemon (stall, process crash, unparseable, schema drift, iteration cap, template error) flow through `[[on_failure]]`. If `[[on_failure]]` matches, the operator's failure-handler cycle decides whether to write Linear feedback. If `[[on_failure]]` does not match (or is absent), the failure is recorded in the structured event log and as one entry in the TUI escalation queue ([06-failure-handling](06-failure-handling.md)); no Linear write is attempted.
 
 ## Capabilities
 
@@ -129,11 +136,12 @@ The daemon never writes Linear directly. Failures detected by the daemon (stall,
 
 ## Traceability
 
-- **Roadmap**: `roadmap.md` > Scope > In > "Phase subprocesses for code-changing work"; Constraints > Engine ("Phase subprocess (short-lived, one per phase)" + "Orchestrator session (long-lived)") collapses into the two-shape model here.
+- **Roadmap**: `roadmap.md` > Scope > In > "Phase subprocesses for code-changing work".
 - **Requirements**:
-  - `req:roki-mvp:5`: Bounded Subprocess Adapters (the contract here covers both session and command shapes).
+  - `req:roki-mvp:5`: Bounded Subprocess Adapters (covers both session and command shapes).
   - `req:roki-mvp:5.10`: Retry budget exhaustion → operators express via `[[on_failure]] when.kind = "iter_exhausted"`.
-  - `req:roki-mvp:9`: Permission Strategy (collapses to pass-through; operator owns the safety posture by choosing cli lines).
+  - `req:roki-mvp:7`: Agent Tooling Boundary (the daemon registers, proxies, or wraps no agent-side tool).
+  - `req:roki-mvp:9`: Permission Strategy — pass-through; operator owns the safety posture by choosing cli lines.
 - **Design**:
   - `Engine Adapter` section of `.kiro/specs/roki-mvp/design.md` (pending rewrite).
-- **Related FR**: [01-daemon-lifecycle](01-daemon-lifecycle.md), [04-state-machine-and-recovery](04-state-machine-and-recovery.md), [06-worktree-and-session](06-worktree-and-session.md), [14-operator-notifications](14-operator-notifications.md), [20-rule-and-cycle-engine](20-rule-and-cycle-engine.md), [21-log-access](21-log-access.md).
+- **Related FR**: [12-daemon-lifecycle](12-daemon-lifecycle.md), [07-recovery](07-recovery.md), [05-worktree-and-session](05-worktree-and-session.md), [06-failure-handling](06-failure-handling.md), [01-engine-model](01-engine-model.md), [09-log-access-cli](09-log-access-cli.md).

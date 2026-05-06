@@ -34,25 +34,22 @@ All docs across kinds. For per-kind indexes see the per-kind INDEX files; for AI
 | `design:roki-mvp` | roki-mvp Design | roki-mvp | [.kiro/specs/roki-mvp/design.md](../.kiro/specs/roki-mvp/design.md) |
 | `design:roki-observability` | roki-observability Design | roki-observability | [.kiro/specs/roki-observability/design.md](../.kiro/specs/roki-observability/design.md) |
 
-## fr (15)
+## fr (12)
 
 | ID | Title | Spec | Path |
 |---|---|---|---|
-| `fr:01-daemon-lifecycle` | Daemon Lifecycle | roki-mvp | [docs/fr/01-daemon-lifecycle.md](fr/01-daemon-lifecycle.md) |
+| `fr:01-engine-model` | Rule and Cycle Engine | roki-mvp | [docs/fr/01-engine-model.md](fr/01-engine-model.md) |
 | `fr:02-configuration` | Configuration | roki-mvp | [docs/fr/02-configuration.md](fr/02-configuration.md) |
-| `fr:03-linear-integration` | Linear Integration | roki-mvp | [docs/fr/03-linear-integration.md](fr/03-linear-integration.md) |
-| `fr:04-state-machine-and-recovery` | Diff Cache and Recovery | roki-mvp | [docs/fr/04-state-machine-and-recovery.md](fr/04-state-machine-and-recovery.md) |
-| `fr:06-worktree-and-session` | Worktree and Session Lifecycle | roki-mvp | [docs/fr/06-worktree-and-session.md](fr/06-worktree-and-session.md) |
-| `fr:07-worker-execution` | Phase Subprocess Execution | roki-mvp | [docs/fr/07-worker-execution.md](fr/07-worker-execution.md) |
-| `fr:11-agent-tool-boundary` | Agent Tool Boundary | roki-mvp | [docs/fr/11-agent-tool-boundary.md](fr/11-agent-tool-boundary.md) |
-| `fr:12-extension-surface` | Extension Surface | roki-mvp | [docs/fr/12-extension-surface.md](fr/12-extension-surface.md) |
-| `fr:13-observability-logs` | Observability Logs | roki-mvp | [docs/fr/13-observability-logs.md](fr/13-observability-logs.md) |
-| `fr:14-operator-notifications` | Failure Surfacing | roki-mvp | [docs/fr/14-operator-notifications.md](fr/14-operator-notifications.md) |
-| `fr:15-http-api` | HTTP API | roki-observability | [docs/fr/15-http-api.md](fr/15-http-api.md) |
-| `fr:16-roki-tui` | roki-tui | roki-observability | [docs/fr/16-roki-tui.md](fr/16-roki-tui.md) |
-| `fr:17-doc-cross-references` | Doc Cross-References |  | [docs/fr/17-doc-cross-references.md](fr/17-doc-cross-references.md) |
-| `fr:20-rule-and-cycle-engine` | Rule and Cycle Engine | roki-mvp | [docs/fr/20-rule-and-cycle-engine.md](fr/20-rule-and-cycle-engine.md) |
-| `fr:21-log-access` | Log Access CLIs | roki-mvp | [docs/fr/21-log-access.md](fr/21-log-access.md) |
+| `fr:03-linear-admission` | Linear Admission | roki-mvp | [docs/fr/03-linear-admission.md](fr/03-linear-admission.md) |
+| `fr:04-phase-execution` | Phase Subprocess Execution | roki-mvp | [docs/fr/04-phase-execution.md](fr/04-phase-execution.md) |
+| `fr:05-worktree-and-session` | Worktree and Session Lifecycle | roki-mvp | [docs/fr/05-worktree-and-session.md](fr/05-worktree-and-session.md) |
+| `fr:06-failure-handling` | Failure Handling | roki-mvp | [docs/fr/06-failure-handling.md](fr/06-failure-handling.md) |
+| `fr:07-recovery` | Diff Cache and Recovery | roki-mvp | [docs/fr/07-recovery.md](fr/07-recovery.md) |
+| `fr:08-observability-logs` | Observability Logs | roki-mvp | [docs/fr/08-observability-logs.md](fr/08-observability-logs.md) |
+| `fr:09-log-access-cli` | Log Access CLIs | roki-mvp | [docs/fr/09-log-access-cli.md](fr/09-log-access-cli.md) |
+| `fr:10-http-api` | HTTP API | roki-observability | [docs/fr/10-http-api.md](fr/10-http-api.md) |
+| `fr:11-roki-tui` | roki-tui | roki-observability | [docs/fr/11-roki-tui.md](fr/11-roki-tui.md) |
+| `fr:12-daemon-lifecycle` | Daemon Lifecycle | roki-mvp | [docs/fr/12-daemon-lifecycle.md](fr/12-daemon-lifecycle.md) |
 
 ## reference (6)
 

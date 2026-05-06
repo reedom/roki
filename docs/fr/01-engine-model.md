@@ -1,29 +1,27 @@
 ---
 refs:
-  id: fr:20-rule-and-cycle-engine
+  id: fr:01-engine-model
   kind: fr
   title: "Rule and Cycle Engine"
   spec: roki-mvp
   related:
     - fr:02-configuration
-    - fr:03-linear-integration
-    - fr:04-state-machine-and-recovery
-    - fr:06-worktree-and-session
-    - fr:07-worker-execution
-    - fr:13-observability-logs
-    - fr:14-operator-notifications
-    - fr:21-log-access
+    - fr:03-linear-admission
+    - fr:07-recovery
+    - fr:05-worktree-and-session
+    - fr:04-phase-execution
+    - fr:08-observability-logs
+    - fr:06-failure-handling
+    - fr:09-log-access-cli
 ---
 
-# FR 20: Rule and Cycle Engine
+# FR 01: Rule and Cycle Engine
 
-> The config-driven heart of the daemon. Each Linear webhook diff selects one entry from operator-authored `[[cleanup]]` / `[[rule]]` / `[[on_failure]]` lists; the matched entry runs as a **cycle** of three phases (pre / run / post) that can loop until a terminal directive or a daemon-enforced cap. The daemon does not know about kiro skills, claude vs codex, or any specific phase semantics — it parses a structured directive from each phase's stdout and routes accordingly.
+> The config-driven heart of the daemon. Each Linear webhook diff selects one entry from operator-authored `[[cleanup]]` / `[[rule]]` / `[[on_failure]]` lists; the matched entry runs as a **cycle** of three phases (pre / run / post) that can loop until a terminal directive or a daemon-enforced cap. The daemon parses a structured directive from each phase's stdout and routes accordingly; phase contents are operator-authored.
 
 ## Purpose
 
-Move all workflow knowledge out of the daemon and into the operator's WORKFLOW.toml + workflow/*.md. The daemon becomes a thin event-driven engine: webhook → admission → diff → first-match dispatch → cycle of subprocess phases → directive-driven loop → termination. Hard-coded modes (`SPEC_DRIVEN` / `NEEDS_CLASSIFY`), the long-lived per-ticket orchestrator session, the fixed phase catalog, the daemon-side state machine with twelve `Inactive.reason` variants, and the daemon-driven Linear write paths are all retired. What replaces them is a small set of generic concepts described here.
-
-Rejected alternatives: keeping the orchestrator session alive across cycles to amortize thinking cost (raises idle-token spend, complicates restart, and hides operator-controllable behavior inside a single long thread); making the daemon parse every claude stream-json event so it can intervene mid-phase (forces the daemon to track engine specifics, defeats the engine-agnostic goal); embedding rule conditions in code paths instead of TOML (operators cannot hot-reload behavior).
+All workflow knowledge lives in the operator's WORKFLOW.toml + workflow/*.md. The daemon is a thin event-driven engine: webhook → admission → diff → first-match dispatch → cycle of subprocess phases → directive-driven loop → termination.
 
 ## User-visible Behavior
 
@@ -67,7 +65,7 @@ Pre and post are subprocesses, just like run. They may be long-lived AI sessions
 
 ### Directive schema
 
-Each pre and post invocation emits exactly one terminal JSON object on its stdout. The daemon parses the **last** JSON object on the phase's stdout per invocation; earlier JSON output is treated as advisory and stored only in the per-iter capture file ([21-log-access](21-log-access.md)).
+Each pre and post invocation emits exactly one terminal JSON object on its stdout. The daemon parses the **last** JSON object on the phase's stdout per invocation; earlier JSON output is treated as advisory and stored only in the per-iter capture file ([09-log-access-cli](09-log-access-cli.md)).
 
 ```json
 {
@@ -90,7 +88,7 @@ Field semantics:
 
 ### Inter-phase data flow
 
-The daemon retains the **last completed iteration's** payloads and exposes them to subsequent phases as Liquid template variables and environment variables. Earlier iterations are not retained in scratch state; their captures still live on disk and are accessible via [21-log-access](21-log-access.md).
+The daemon retains the **last completed iteration's** payloads and exposes them to subsequent phases as Liquid template variables and environment variables. Earlier iterations are not retained in scratch state; their captures still live on disk and are accessible via [09-log-access-cli](09-log-access-cli.md).
 
 | Variable | Env | Scope |
 |---|---|---|
@@ -108,7 +106,7 @@ The daemon retains the **last completed iteration's** payloads and exposes them 
 | `{{ run.terminal.* }}` | (inline only) | Parsed claude/codex stream-json `result` event when applicable; null for shell commands |
 | `{{ failure.kind }}`, `{{ failure.failed_cycle_id }}`, `{{ failure.phase }}`, `{{ failure.iter }}`, `{{ failure.exit_code }}`, `{{ failure.error_text }}` | `ROKI_FAILURE_*` | Failure cycles only |
 
-For `{{ ticket.* }}` and complex objects, only the inline Liquid form is provided; reading them in shell-form phases requires `roki repo`-style accessor CLIs (see [21-log-access](21-log-access.md)) or piping the launch envelope from stdin (the daemon writes a JSON envelope to every subprocess's stdin at launch).
+For `{{ ticket.* }}` and complex objects, only the inline Liquid form is provided; reading them in shell-form phases requires `roki repo`-style accessor CLIs (see [09-log-access-cli](09-log-access-cli.md)) or piping the launch envelope from stdin (the daemon writes a JSON envelope to every subprocess's stdin at launch).
 
 ### Iteration cap and cooperative termination
 
@@ -149,7 +147,7 @@ Daemon-detected internal failures during a cycle:
 | `process_crash` | Subprocess exited via signal or non-zero exit code without a parseable terminal response |
 | `unparseable` | Last JSON object on stdout failed to parse, or the `directive` field is missing |
 | `schema_drift` | `directive` value is outside the legal set for the current phase |
-| `repo_mismatch` | A pre response's `repo` field does not match the admission-resolved repo for the ticket ([06-worktree-and-session](06-worktree-and-session.md)) |
+| `repo_mismatch` | A pre response's `repo` field does not match the admission-resolved repo for the ticket ([05-worktree-and-session](05-worktree-and-session.md)) |
 | `stall` | Stall window exceeded; daemon SIGTERMed the subprocess |
 | `iter_exhausted` | `max_iterations` exceeded and the AI did not cooperate (or the phase was command-form) |
 | `template_error` | Liquid render failure when preparing the phase prompt or command |
@@ -171,7 +169,7 @@ A cleanup entry with all three phases omitted is shorthand for "delete immediate
 
 ### Cold start
 
-On daemon process start, the engine runs the same evaluation flow but with `cycle.trigger = "cold_start"`. See [04-state-machine-and-recovery §Cold start](04-state-machine-and-recovery.md) for the full enumeration / reconcile flow. Operators that need to suppress duplicate Linear comments on cold-start re-runs check `{% if cycle.trigger == "cold_start" %}` in their pre/post templates.
+On daemon process start, the engine runs the same evaluation flow but with `cycle.trigger = "cold_start"`. See [04-state-machine-and-recovery §Cold start](07-recovery.md) for the full enumeration / reconcile flow. Operators that need to suppress duplicate Linear comments on cold-start re-runs check `{% if cycle.trigger == "cold_start" %}` in their pre/post templates.
 
 ## Capabilities
 
@@ -196,7 +194,7 @@ On daemon process start, the engine runs the same evaluation flow but with `cycl
 
 ## Traceability
 
-- **Roadmap**: `roadmap.md` > Boundary Strategy > "Orchestrator-vs-phase boundary" (the boundary collapses; both ends are now subprocesses with the same parser).
-- **Requirements**: pending — the requirements rewrite that follows this FR rewrite will introduce IDs covering rule-list evaluation order, the directive schema, the iteration cap, and failure handling. Until then this FR carries the contract directly.
-- **Design**: `.kiro/specs/roki-mvp/design.md` will gain a `Rule and Cycle Engine` section in a later phase; this FR is the placeholder of record.
-- **Related FR**: [02-configuration](02-configuration.md), [03-linear-integration](03-linear-integration.md), [04-state-machine-and-recovery](04-state-machine-and-recovery.md), [06-worktree-and-session](06-worktree-and-session.md), [07-worker-execution](07-worker-execution.md), [13-observability-logs](13-observability-logs.md), [14-operator-notifications](14-operator-notifications.md), [21-log-access](21-log-access.md).
+- **Roadmap**: `roadmap.md` > Boundary Strategy.
+- **Requirements**: pending — the spec rebuild will introduce IDs covering rule-list evaluation order, the directive schema, the iteration cap, and failure handling. Until then this FR carries the contract directly.
+- **Design**: pending — the new spec set's design.md files will reference back to this FR.
+- **Related FR**: [02-configuration](02-configuration.md), [03-linear-admission](03-linear-admission.md), [07-recovery](07-recovery.md), [05-worktree-and-session](05-worktree-and-session.md), [04-phase-execution](04-phase-execution.md), [08-observability-logs](08-observability-logs.md), [06-failure-handling](06-failure-handling.md), [09-log-access-cli](09-log-access-cli.md).

@@ -1,6 +1,6 @@
 ---
 refs:
-  id: fr:04-state-machine-and-recovery
+  id: fr:07-recovery
   kind: fr
   title: "Diff Cache and Recovery"
   spec: roki-mvp
@@ -8,21 +8,21 @@ refs:
     - req:roki-mvp:8
     - req:roki-mvp:10
   related:
-    - fr:01-daemon-lifecycle
+    - fr:12-daemon-lifecycle
     - fr:02-configuration
-    - fr:03-linear-integration
-    - fr:06-worktree-and-session
-    - fr:14-operator-notifications
-    - fr:20-rule-and-cycle-engine
+    - fr:03-linear-admission
+    - fr:05-worktree-and-session
+    - fr:06-failure-handling
+    - fr:01-engine-model
 ---
 
-# FR 04: Diff Cache and Recovery
+# FR 07: Diff Cache and Recovery
 
-> The per-ticket in-memory diff cache the daemon keeps to detect Linear status / labels / assignee changes, plus the cold-start / restart-recovery flow that rebuilds it from Linear and disk on every daemon launch. The daemon does not track execution stages itself — execution is bounded by the cycle ([20-rule-and-cycle-engine](20-rule-and-cycle-engine.md)).
+> The per-ticket in-memory diff cache the daemon keeps to detect Linear status / labels / assignee changes, plus the cold-start / restart-recovery flow that rebuilds it from Linear and disk on every daemon launch. The daemon does not track execution stages itself — execution is bounded by the cycle ([01-engine-model](01-engine-model.md)).
 
 ## Purpose
 
-Workflow stages live entirely inside operator-authored cycles ([20-rule-and-cycle-engine](20-rule-and-cycle-engine.md)). The daemon's per-ticket bookkeeping is small:
+Workflow stages live entirely inside operator-authored cycles ([01-engine-model](01-engine-model.md)). The daemon's per-ticket bookkeeping is small:
 
 - For each admitted ticket: the most recent `(status, labels, assignee)` triple, the resolved repo, the resolved per-repo workflow path, and a flag for "cycle in flight". That is the diff cache.
 - A queue of pending re-evaluations (when a webhook arrives mid-cycle, the cache updates immediately but rule re-evaluation defers until the cycle ends).
@@ -31,14 +31,7 @@ This file documents the diff cache and the cold-start / restart-recovery procedu
 
 ## User-visible Behavior
 
-### Admission filter
-
-Before any cache update, the daemon evaluates the admission filter ([02-configuration §WORKFLOW.toml](02-configuration.md)):
-
-1. `ticket.assignee == [admission].assignee` (with `me` resolving to the API token holder). Failure → silent eviction (logged but not surfaced to Linear).
-2. `[[admission.repos]]` first-match → resolves the ticket's ghq repo and the per-repo `workflow` path (or fall back to the top-level WORKFLOW.toml). No match → silent eviction (`reason: repo_unresolvable`).
-
-Tickets that fail admission are not added to the cache. If the ticket was previously cached and the new webhook fails admission (assignee change, repo matcher no longer hits), the cache entry is evicted; if a cycle is currently in flight for that ticket, the cycle is allowed to terminate naturally and the worktree + session_tempdir are deleted afterward as orphan cleanup.
+The admission filter that gates cache updates lives in [03-linear-admission §Admission filter](03-linear-admission.md). This file picks up after that gate.
 
 ### Diff cache
 
@@ -61,7 +54,7 @@ A new webhook for a cached ticket triggers re-evaluation only when at least one 
 
 #### Cycle dispatch
 
-When a diff is detected and no cycle is in flight, the daemon evaluates lists in priority order ([20-rule-and-cycle-engine §Cycle kinds](20-rule-and-cycle-engine.md)): `[[cleanup]]` first-match, then `[[rule]]` first-match. The first matching entry starts a cycle. If a cycle is already in flight for the ticket, the daemon sets `pending_recheck = true` instead of starting a new one (queue-mode preemption).
+When a diff is detected and no cycle is in flight, the daemon evaluates lists in priority order ([20-rule-and-cycle-engine §Cycle kinds](01-engine-model.md)): `[[cleanup]]` first-match, then `[[rule]]` first-match. The first matching entry starts a cycle. If a cycle is already in flight for the ticket, the daemon sets `pending_recheck = true` instead of starting a new one (queue-mode preemption).
 
 #### Cycle in-flight semantics
 
@@ -73,7 +66,7 @@ Only one cycle is in flight per ticket at a time. The cache's `cycle_id` field n
 
 #### Subscribers
 
-Other components (HTTP API, TUI, structured event log) observe cache changes via the structured event stream ([13-observability-logs](13-observability-logs.md)) — `cycle_started`, `cycle_completed`, `cycle_aborted`, `worktree_created`, `worktree_deleted`, `cold_start_began`, `cold_start_completed`. There is no in-process subscriber API for cache transitions; consumers subscribe to events through the public observability surface.
+Other components (HTTP API, TUI, structured event log) observe cache changes via the structured event stream ([08-observability-logs](08-observability-logs.md)) — `cycle_started`, `cycle_completed`, `cycle_aborted`, `worktree_created`, `worktree_deleted`, `cold_start_began`, `cold_start_completed`. There is no in-process subscriber API for cache transitions; consumers subscribe to events through the public observability surface.
 
 ### Cold start and restart recovery
 
@@ -91,7 +84,7 @@ The trigger value `cold_start` covers both first-launch and post-crash recovery.
 
 ### Stop / shutdown
 
-On orderly shutdown ([01-daemon-lifecycle](01-daemon-lifecycle.md)):
+On orderly shutdown ([12-daemon-lifecycle](12-daemon-lifecycle.md)):
 
 1. The daemon stops accepting webhooks and stops launching new cycles.
 2. In-flight cycles are SIGTERMed; their pre/run/post subprocesses receive SIGTERM and the configured shutdown grace window applies.
@@ -118,14 +111,14 @@ On orderly shutdown ([01-daemon-lifecycle](01-daemon-lifecycle.md)):
 - **A persistent DB** is intentionally not maintained.
 - **Cross-issue state correlation** is out of scope (each issue is independent).
 - **Per-repo state** is out of scope: one ticket = one repo. Multi-repo tickets are resolved to the first matching `[[admission.repos]]` entry; operators that detect the ticket spans repos can `directive: "end"` with whatever Linear write they choose to make.
-- **Visualization / debug UI of the cache** belongs to [13-observability-logs](13-observability-logs.md), [15-http-api](15-http-api.md), and [16-roki-tui](16-roki-tui.md).
+- **Visualization / debug UI of the cache** belongs to [08-observability-logs](08-observability-logs.md), [10-http-api](10-http-api.md), and [11-roki-tui](11-roki-tui.md).
 
 ## Traceability
 
 - **Roadmap**: `roadmap.md` > Scope > In > "Per-issue session tempdir lifecycle ..."; Boundary Strategy > "in-memory orchestrator with no persistent database".
 - **Requirements**:
-  - `roki-mvp Req 8`: Orchestrator State Machine and Extension Points (the requirement remains; the implementation collapses to the diff cache plus the cycle engine in [20-rule-and-cycle-engine](20-rule-and-cycle-engine.md)).
+  - `roki-mvp Req 8`: per-ticket bookkeeping covered by the diff cache plus the cycle engine ([01-engine-model](01-engine-model.md)).
   - `roki-mvp Req 10`: Restart Recovery Without Persistent Storage.
 - **Design**:
   - `Diff Cache` / `Cold Start` sections of `.kiro/specs/roki-mvp/design.md` (pending rewrite).
-- **Related FR**: [01-daemon-lifecycle](01-daemon-lifecycle.md), [02-configuration](02-configuration.md), [03-linear-integration](03-linear-integration.md), [06-worktree-and-session](06-worktree-and-session.md), [14-operator-notifications](14-operator-notifications.md), [20-rule-and-cycle-engine](20-rule-and-cycle-engine.md).
+- **Related FR**: [12-daemon-lifecycle](12-daemon-lifecycle.md), [02-configuration](02-configuration.md), [03-linear-admission](03-linear-admission.md), [05-worktree-and-session](05-worktree-and-session.md), [06-failure-handling](06-failure-handling.md), [01-engine-model](01-engine-model.md).

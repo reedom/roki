@@ -1,22 +1,22 @@
 ---
 refs:
-  id: fr:14-operator-notifications
+  id: fr:06-failure-handling
   kind: fr
-  title: "Failure Surfacing"
+  title: "Failure Handling"
   spec: roki-mvp
   implements:
     - req:roki-mvp:12
     - req:roki-mvp:5.10
   related:
-    - fr:04-state-machine-and-recovery
-    - fr:07-worker-execution
-    - fr:13-observability-logs
-    - fr:15-http-api
-    - fr:16-roki-tui
-    - fr:20-rule-and-cycle-engine
+    - fr:07-recovery
+    - fr:04-phase-execution
+    - fr:08-observability-logs
+    - fr:10-http-api
+    - fr:11-roki-tui
+    - fr:01-engine-model
 ---
 
-# FR 14: Failure Surfacing
+# FR 06: Failure Handling
 
 > Daemon-detected internal failures route through `[[on_failure]]` first-match in WORKFLOW.toml. The matched entry runs as a failure-handler cycle whose run / post phases can write Linear (or any other channel) using whatever cli line the operator authored. When `[[on_failure]]` does not match, the failure surfaces only through the structured event log and an in-memory escalation queue consumed by the TUI / HTTP API. The daemon process itself never writes Linear under any circumstance.
 
@@ -28,14 +28,14 @@ Failure surfacing is operator-authored. The daemon fires a failure-handler cycle
 
 ### Daemon-detected failure kinds
 
-The daemon classifies internal failures into the kinds listed in [20-rule-and-cycle-engine §Failure handling](20-rule-and-cycle-engine.md):
+The daemon classifies internal failures into the kinds listed in [20-rule-and-cycle-engine §Failure handling](01-engine-model.md):
 
 | Kind | Trigger |
 |---|---|
 | `process_crash` | Subprocess SIGSEGV or non-zero exit without a parseable terminal response |
 | `unparseable` | Last JSON object on stdout failed to parse, or `directive` missing |
 | `schema_drift` | `directive` value outside the legal set for the current phase |
-| `repo_mismatch` | Pre's `repo` field does not match the admission-resolved repo ([06-worktree-and-session](06-worktree-and-session.md)) |
+| `repo_mismatch` | Pre's `repo` field does not match the admission-resolved repo ([05-worktree-and-session](05-worktree-and-session.md)) |
 | `stall` | Stall window exceeded; daemon SIGTERMed the subprocess |
 | `iter_exhausted` | `max_iterations` exceeded with no cooperative termination |
 | `template_error` | Liquid render failure when preparing a phase prompt or command |
@@ -71,13 +71,13 @@ The daemon maintains an in-memory escalation queue keyed by `(ticket_id, cycle_i
 
 Consumers:
 
-- The HTTP API exposes the queue at `GET /api/escalations` ([15-http-api](15-http-api.md)).
-- The TUI renders the queue with a local-only acknowledgement affordance ([16-roki-tui](16-roki-tui.md)). It is the **primary surface** when no `[[on_failure]]` matches and the **secondary surface** otherwise.
+- The HTTP API exposes the queue at `GET /api/escalations` ([10-http-api](10-http-api.md)).
+- The TUI renders the queue with a local-only acknowledgement affordance ([11-roki-tui](11-roki-tui.md)). It is the **primary surface** when no `[[on_failure]]` matches and the **secondary surface** otherwise.
 - Entries are cleared automatically when the ticket is evicted (cleanup-cycle completion, admission failure, orphan reconcile). They are also lost on daemon restart (the queue is in-memory only).
 
 ### Worktree retention
 
-Failures that route through `[[on_failure]]` do not delete the worktree or session tempdir on their own — the failure-handler cycle is a normal cycle and inherits the same lifecycle rules ([06-worktree-and-session](06-worktree-and-session.md)). Operators that want post-failure cleanup author either (a) a `[[cleanup]]` entry whose match condition the failure handler creates (e.g. by writing a Linear label that the cleanup matches), or (b) a `[[cleanup]]` entry that fires on the same `when.status` / `when.labels` change the operator's failure handler caused.
+Failures that route through `[[on_failure]]` do not delete the worktree or session tempdir on their own — the failure-handler cycle is a normal cycle and inherits the same lifecycle rules ([05-worktree-and-session](05-worktree-and-session.md)). Operators that want post-failure cleanup author either (a) a `[[cleanup]]` entry whose match condition the failure handler creates (e.g. by writing a Linear label that the cleanup matches), or (b) a `[[cleanup]]` entry that fires on the same `when.status` / `when.labels` change the operator's failure handler caused.
 
 When `[[on_failure]]` does not match, the worktree and session tempdir are retained for forensics until the operator manually cleans up.
 
@@ -107,7 +107,7 @@ When `[[on_failure]]` does not match, the worktree and session tempdir are retai
 
 - **Roadmap**: `roadmap.md` > Constraints > Operator notifications.
 - **Requirements**:
-  - `req:roki-mvp:12`: Daemon-Only Failure Surfacing — replaced by `[[on_failure]]` + escalation queue.
-  - `req:roki-mvp:5.10`: Retry-budget exhaustion — replaced by `[[on_failure]] when.kind = "iter_exhausted"`.
+  - `req:roki-mvp:12`: Daemon-Only Failure Surfacing — covered by `[[on_failure]]` + escalation queue.
+  - `req:roki-mvp:5.10`: Retry-budget exhaustion — covered by `[[on_failure]] when.kind = "iter_exhausted"`.
 - **Reference**: [`docs/reference/log-events.md`](../reference/log-events.md) (pending rewrite for the new failure event catalog).
-- **Related FR**: [04-state-machine-and-recovery](04-state-machine-and-recovery.md), [07-worker-execution](07-worker-execution.md), [13-observability-logs](13-observability-logs.md), [15-http-api](15-http-api.md), [16-roki-tui](16-roki-tui.md), [20-rule-and-cycle-engine](20-rule-and-cycle-engine.md).
+- **Related FR**: [07-recovery](07-recovery.md), [04-phase-execution](04-phase-execution.md), [08-observability-logs](08-observability-logs.md), [10-http-api](10-http-api.md), [11-roki-tui](11-roki-tui.md), [01-engine-model](01-engine-model.md).

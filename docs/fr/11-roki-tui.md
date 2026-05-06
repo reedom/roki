@@ -1,6 +1,6 @@
 ---
 refs:
-  id: fr:16-roki-tui
+  id: fr:11-roki-tui
   kind: fr
   title: "roki-tui"
   spec: roki-observability
@@ -12,15 +12,15 @@ refs:
     - req:roki-observability:6.4
     - req:roki-observability:14.4
   related:
-    - fr:13-observability-logs
-    - fr:14-operator-notifications
-    - fr:15-http-api
-    - fr:21-log-access
+    - fr:08-observability-logs
+    - fr:06-failure-handling
+    - fr:10-http-api
+    - fr:09-log-access-cli
 ---
 
-# FR 16: roki-tui
+# FR 11: roki-tui
 
-> A ratatui binary shipped as a cargo target independent of the daemon. Polls the HTTP API and renders the ticket list, ticket detail (cycle history + log tail), the live event stream, and the escalation queue. Local-only escalation acknowledgement and a manual refresh action. Designed against the simplified daemon model: no five-state machine, no twelve-variant `Inactive.reason`.
+> A ratatui binary shipped as a cargo target independent of the daemon. Polls the HTTP API and renders the ticket list, ticket detail (cycle history + log tail), the live event stream, and the escalation queue. Local-only escalation acknowledgement and a manual refresh action.
 
 ## Purpose
 
@@ -30,7 +30,7 @@ A single-terminal view of daemon state at second-by-second granularity. The TUI'
 
 ### Startup and connection
 
-- **`roki-tui <api-url>`**: connects to the given API URL, fetches the initial ticket snapshot via `GET /api/tickets` ([15-http-api](15-http-api.md)), and renders a live view within the documented startup window (1 second on a developer-class machine against a loopback daemon; pinned in `SPEC.md`).
+- **`roki-tui <api-url>`**: connects to the given API URL, fetches the initial ticket snapshot via `GET /api/tickets` ([10-http-api](10-http-api.md)), and renders a live view within the documented startup window (1 second on a developer-class machine against a loopback daemon; pinned in `SPEC.md`).
 - **Polling loop**: re-fetches `/api/tickets`, `/api/events?since=<latest_seq>`, and `/api/escalations` at the configured cadences. If the API returns non-2xx, an error is shown in the status bar; the TUI does not exit.
 - **Quit key**: a clean exit on the documented quit key. Restores the terminal to its original mode.
 
@@ -73,7 +73,7 @@ The ticket-detail view exposes "open in `roki log`" shortcuts that print the app
 
 ### Defense-in-depth sanitization
 
-- Even though the API side has already stripped, `roki-tui` re-applies **ANSI strip + control-character removal** to received strings ([15-http-api](15-http-api.md)).
+- Even though the API side has already stripped, `roki-tui` re-applies **ANSI strip + control-character removal** to received strings ([10-http-api](10-http-api.md)).
 
 ### Shared types
 
@@ -87,7 +87,7 @@ The ticket-detail view exposes "open in `roki log`" shortcuts that print the app
 
 - **Independent binary**: the daemon's up/down state and the TUI's up/down state are unrelated.
 - **API client only**: does not embed the daemon; communicates only over HTTP.
-- **Four-view layout**: tickets, ticket detail, events, escalations. The view set matches the simplified daemon model.
+- **Four-view layout**: tickets, ticket detail, events, escalations.
 - **Shared schema**: server and TUI stay in sync via `roki-api-types`.
 - **Defense in depth**: re-strips on the TUI even if something leaks through the server.
 
@@ -109,4 +109,4 @@ The ticket-detail view exposes "open in `roki log`" shortcuts that print the app
   - `roki-observability Req 14.4`: TUI startup logging.
 - **Design**:
   - `roki-tui` section of `.kiro/specs/roki-observability/design.md` (pending rewrite).
-- **Related FR**: [13-observability-logs](13-observability-logs.md), [14-operator-notifications](14-operator-notifications.md), [15-http-api](15-http-api.md), [21-log-access](21-log-access.md).
+- **Related FR**: [08-observability-logs](08-observability-logs.md), [06-failure-handling](06-failure-handling.md), [10-http-api](10-http-api.md), [09-log-access-cli](09-log-access-cli.md).

@@ -1,6 +1,6 @@
 ---
 refs:
-  id: fr:13-observability-logs
+  id: fr:08-observability-logs
   kind: fr
   title: "Observability Logs"
   spec: roki-mvp
@@ -10,13 +10,13 @@ refs:
     - ref:log-events
     - ref:cli
     - ref:config
-    - fr:14-operator-notifications
-    - fr:15-http-api
-    - fr:20-rule-and-cycle-engine
-    - fr:21-log-access
+    - fr:06-failure-handling
+    - fr:10-http-api
+    - fr:01-engine-model
+    - fr:09-log-access-cli
 ---
 
-# FR 13: Observability Logs
+# FR 08: Observability Logs
 
 > Three independent storage / access tiers cover everything operators need to inspect: a structured event log (daemon-wide tracing-crate JSON Lines), per-ticket subprocess raw captures (under the session tempdir), and an in-memory ring buffer that backs the HTTP API live event subscription.
 > See [`docs/reference/log-events.md`](../reference/log-events.md) for the full event list and the common context fields.
@@ -38,19 +38,19 @@ Operators must diagnose daemon behavior, admission decisions, cycle outcomes, an
 - **Level**: configurable via `[log].level` and the `--log-level` CLI override.
 - **Per-cycle / per-iter / per-ticket / per-repo fields**: automatically attached based on tracing spans. Cycle id (`cycle.id`), iteration (`cycle.iter`), phase (`pre` / `run` / `post`), ticket id, repo, and trigger (`webhook` / `cold_start`) are present where relevant.
 - **Secret redaction**: Linear API token, webhook secret, and any operator-declared secrets in `roki.toml` are redacted before emit. Secrets in capture files (Tier 2) are not redacted because the daemon does not parse their contents — operators that want redacted captures route their cli line's output through their own redactor.
-- **Read access**: `roki events` ([21-log-access](21-log-access.md)) reads from the HTTP API ring buffer (live tail / range filter) and, with `--offline --file <path>`, from a JSON Lines file directly.
+- **Read access**: `roki events` ([09-log-access-cli](09-log-access-cli.md)) reads from the HTTP API ring buffer (live tail / range filter) and, with `--offline --file <path>`, from a JSON Lines file directly.
 
 ### Tier 2: per-ticket subprocess raw captures
 
-- **Layout**: `<session_root>/<ticket-id>/cycle-<uuid>/iter-<n>/{pre,run,post}.{stdout,stderr}`, plus parsed-derivative files (`pre.response.json`, `run.exit_code`, `run.terminal.json`, `post.response.json`) per [21-log-access §Storage layout](21-log-access.md).
+- **Layout**: `<session_root>/<ticket-id>/cycle-<uuid>/iter-<n>/{pre,run,post}.{stdout,stderr}`, plus parsed-derivative files (`pre.response.json`, `run.exit_code`, `run.terminal.json`, `post.response.json`) per [21-log-access §Storage layout](09-log-access-cli.md).
 - **Capture mode**: byte-for-byte. The daemon does not strip ANSI codes, does not redact, and does not impose a per-line tag.
-- **Lifetime**: deleted on cleanup-cycle completion, on admission-eviction orphan cleanup, and on cold-start orphan reconcile (matches [06-worktree-and-session](06-worktree-and-session.md)).
+- **Lifetime**: deleted on cleanup-cycle completion, on admission-eviction orphan cleanup, and on cold-start orphan reconcile (matches [05-worktree-and-session](05-worktree-and-session.md)).
 - **Read access**: `roki log` (scope = same ticket); HTTP API mirrors via `GET /api/tickets/{id}/cycles/{cycle_id}/iters/{n}/{phase}/{stream}`.
 
 ### Tier 3: in-memory ring buffer
 
 - **Scope**: a daemon-internal ring of the most recent N structured events (N = `roki.toml [log].ring_size`, default `1000`).
-- **Use**: backs the HTTP API live event subscription (`GET /api/events`) and the TUI live view ([16-roki-tui](16-roki-tui.md)).
+- **Use**: backs the HTTP API live event subscription (`GET /api/events`) and the TUI live view ([11-roki-tui](11-roki-tui.md)).
 - **Loss on restart**: the ring buffer is in-memory only. After daemon restart, the ring is empty; older events are recovered from the file destination if `[log].destination = "file" | "both"`.
 
 ### Event catalog (MVP)
@@ -64,7 +64,7 @@ Canonical event names emitted on the structured pipeline. `roki events --kind <n
 | `cycle_started` | Cycle begins (`cycle.kind` ∈ `rule` / `cleanup` / `failure`) |
 | `phase_started` | Phase subprocess spawned |
 | `phase_completed` | Phase clean exit; carries head/tail stderr summary |
-| `phase_failed` | Phase failure (`failure.kind` per [20-rule-and-cycle-engine](20-rule-and-cycle-engine.md) §Failure kinds) |
+| `phase_failed` | Phase failure (`failure.kind` per [01-engine-model](01-engine-model.md) §Failure kinds) |
 | `cycle_completed` | Cycle ends with terminal directive |
 | `cycle_aborted` | Cycle aborted (failure or admission lost mid-cycle) |
 | `escalation_added` | Escalation queue entry added |
@@ -92,12 +92,12 @@ For every phase iteration, the daemon emits one structured event when the subpro
 
 ## Boundaries
 
-- **HTTP API / TUI** are out of scope here ([15-http-api](15-http-api.md) / [16-roki-tui](16-roki-tui.md) own those).
+- **HTTP API / TUI** are out of scope here ([10-http-api](10-http-api.md) / [11-roki-tui](11-roki-tui.md) own those).
 - **Metrics / time-series** are out of scope (event log only; if metrics are wanted, an external scraper consumes the event stream).
-- **Log retention / rotation** is the responsibility of external tooling for the file destination. Per-ticket captures (Tier 2) are deleted by ticket lifecycle events ([06-worktree-and-session](06-worktree-and-session.md)) — there is no time-based retention for them.
+- **Log retention / rotation** is the responsibility of external tooling for the file destination. Per-ticket captures (Tier 2) are deleted by ticket lifecycle events ([05-worktree-and-session](05-worktree-and-session.md)) — there is no time-based retention for them.
 - **Per-issue debug log analysis** is out of scope (operators read the captures).
 - **Persistent observability history** beyond the file destination is out of scope; once an event scrolls off the file (after operator-managed rotation), it is gone.
-- **Operator notification destinations** are a separate channel ([14-operator-notifications](14-operator-notifications.md)).
+- **Operator notification destinations** are a separate channel ([06-failure-handling](06-failure-handling.md)).
 - **A `--debug` CLI flag and a per-issue debug log directory** are out of scope; per-iter captures cover the same need and are always on.
 
 ## Traceability
@@ -108,4 +108,4 @@ For every phase iteration, the daemon emits one structured event when the subpro
 - **Design**:
   - `Observability Pipeline` section of `.kiro/specs/roki-mvp/design.md` (pending rewrite).
 - **Related reference**: [`docs/reference/log-events.md`](../reference/log-events.md) (pending rewrite for the new event catalog), [`docs/reference/config.md`](../reference/config.md) (`[log]` section).
-- **Related FR**: [14-operator-notifications](14-operator-notifications.md), [15-http-api](15-http-api.md), [20-rule-and-cycle-engine](20-rule-and-cycle-engine.md), [21-log-access](21-log-access.md).
+- **Related FR**: [06-failure-handling](06-failure-handling.md), [10-http-api](10-http-api.md), [01-engine-model](01-engine-model.md), [09-log-access-cli](09-log-access-cli.md).

@@ -3,15 +3,13 @@ refs:
   id: ref:frontmatter
   kind: reference
   title: "Frontmatter Schema"
-  related:
-    - fr:17-doc-cross-references
 ---
 
 # Reference: Frontmatter Schema
 
 The YAML `refs:` block carried by every doc in the cross-reference graph.
 
-Semantics and authoring guidance: [`.kiro/steering/refs.md`](../../.kiro/steering/refs.md). Valid kinds and on-disk locations: [`docs/kinds.md`](../kinds.md). Feature narrative: [17-doc-cross-references](../fr/17-doc-cross-references.md).
+Semantics and authoring guidance: [`.kiro/steering/refs.md`](../../.kiro/steering/refs.md). Valid kinds and on-disk locations: [`docs/kinds.md`](../kinds.md).
 
 ## Block shape
 
@@ -85,7 +83,7 @@ Per-kind conventions in [`docs/kinds.md`](../kinds.md) (`id_pattern` is informat
 | `design` | `design:roki-mvp`, `design:roki-mvp:bootstrap` |
 | `tasks` | `tasks:roki-mvp` |
 | `research` | `research:roki-mvp` |
-| `fr` | `fr:01-daemon-lifecycle` |
+| `fr` | `fr:12-daemon-lifecycle` |
 | `reference` | `ref:cli`, `ref:config`, `ref:frontmatter` |
 | `example` | `example:roki.minimal` |
 | `crate` | `crate:roki-daemon`, `crate:roki-doctools` |

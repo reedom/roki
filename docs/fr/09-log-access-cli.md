@@ -1,23 +1,23 @@
 ---
 refs:
-  id: fr:21-log-access
+  id: fr:09-log-access-cli
   kind: fr
   title: "Log Access CLIs"
   spec: roki-mvp
   related:
-    - fr:13-observability-logs
-    - fr:15-http-api
-    - fr:20-rule-and-cycle-engine
-    - fr:06-worktree-and-session
+    - fr:08-observability-logs
+    - fr:10-http-api
+    - fr:01-engine-model
+    - fr:05-worktree-and-session
 ---
 
-# FR 21: Log Access CLIs
+# FR 09: Log Access CLIs
 
 > Three small CLIs (`roki log`, `roki events`, `roki repo`) that operators (and operator-authored phases) call to inspect per-ticket subprocess captures, the structured event stream, and per-ticket repo paths. The CLIs encapsulate the daemon's storage layout so the on-disk format can change without breaking workflow scripts.
 
 ## Purpose
 
-The cycle engine ([20-rule-and-cycle-engine](20-rule-and-cycle-engine.md)) writes three kinds of artifact: per-iter subprocess captures, structured event log entries, and per-ticket worktree state. Workflow templates and operator tooling read all three. Exposing the on-disk layout directly would freeze the storage backend forever; exposing only Linux paths in environment variables also makes the API platform-specific. These CLIs sit between operator code and the storage layer, so the daemon can switch from flat files to SQLite or to a remote store later without breaking workflow templates.
+The cycle engine ([01-engine-model](01-engine-model.md)) writes three kinds of artifact: per-iter subprocess captures, structured event log entries, and per-ticket worktree state. Workflow templates and operator tooling read all three. Exposing the on-disk layout directly would freeze the storage backend forever; exposing only Linux paths in environment variables also makes the API platform-specific. These CLIs sit between operator code and the storage layer, so the daemon can switch from flat files to SQLite or to a remote store later without breaking workflow templates.
 
 ## User-visible Behavior
 
@@ -50,7 +50,7 @@ Scope: a `roki log` invocation is bound to a single ticket. The daemon refuses c
 
 ### `roki events` — structured event stream
 
-Reads from the daemon's structured event pipeline (the tracing-crate JSON Lines emitted per [13-observability-logs](13-observability-logs.md)). Default mode connects to the daemon's HTTP API ([15-http-api](15-http-api.md)) so live tail and ring-buffer queries work without any additional config; `--offline` reads a JSON Lines file directly when the daemon is not reachable.
+Reads from the daemon's structured event pipeline (the tracing-crate JSON Lines emitted per [08-observability-logs](08-observability-logs.md)). Default mode connects to the daemon's HTTP API ([10-http-api](10-http-api.md)) so live tail and ring-buffer queries work without any additional config; `--offline` reads a JSON Lines file directly when the daemon is not reachable.
 
 ```bash
 # Live (HTTP API client)
@@ -106,7 +106,7 @@ The CLIs encapsulate this layout. Operators that need raw file access for debugg
       ...
 ```
 
-The structured event log destination is set in `roki.toml [log]` (stdout / file / both). The HTTP API mirrors the live ring buffer ([15-http-api §Endpoints](15-http-api.md)).
+The structured event log destination is set in `roki.toml [log]` (stdout / file / both). The HTTP API mirrors the live ring buffer ([15-http-api §Endpoints](10-http-api.md)).
 
 This layout is **not** part of the operator-facing contract. Future versions may move some files into a SQLite database, compress old iters, or delegate to a remote store; only the CLIs are stable.
 
@@ -126,12 +126,12 @@ This layout is **not** part of the operator-facing contract. Future versions may
 - **Mutating the captures** is out of scope. The CLIs are read-only.
 - **Streaming protocols** (WebSocket, SSE) are deferred for `roki events`. MVP supports `--tail` over HTTP polling; richer push is post-MVP.
 - **Indexed search** (full-text, structured query DSL) is out of scope. MVP filters are equality / range / kind / ticket / cycle.
-- **Log retention / rotation** is the responsibility of external tools for the file destination ([13-observability-logs §Boundaries](13-observability-logs.md)). Per-ticket captures under the session root are deleted when the ticket is evicted (cleanup cycle, admission failure, or orphan reconcile).
-- **Authentication and authorization** for the HTTP API are governed by [15-http-api](15-http-api.md); these CLIs do not introduce a separate auth path.
+- **Log retention / rotation** is the responsibility of external tools for the file destination ([13-observability-logs §Boundaries](08-observability-logs.md)). Per-ticket captures under the session root are deleted when the ticket is evicted (cleanup cycle, admission failure, or orphan reconcile).
+- **Authentication and authorization** for the HTTP API are governed by [10-http-api](10-http-api.md); these CLIs do not introduce a separate auth path.
 
 ## Traceability
 
 - **Roadmap**: `roadmap.md` > Boundary Strategy > "Shared seams to watch".
 - **Requirements**: pending — to be added in the requirements rewrite that follows the FR rewrite.
 - **Design**: `.kiro/specs/roki-mvp/design.md` will gain a `Log Access CLIs` section in a later phase.
-- **Related FR**: [13-observability-logs](13-observability-logs.md), [15-http-api](15-http-api.md), [20-rule-and-cycle-engine](20-rule-and-cycle-engine.md), [06-worktree-and-session](06-worktree-and-session.md).
+- **Related FR**: [08-observability-logs](08-observability-logs.md), [10-http-api](10-http-api.md), [01-engine-model](01-engine-model.md), [05-worktree-and-session](05-worktree-and-session.md).
