@@ -250,6 +250,7 @@ mod tests {
             },
             default_ai_command: DefaultAiCommandSection {
                 cli: "echo".to_string(),
+                stall_seconds: 300,
             },
             engine: EngineSection { max_iterations },
             paths: PathsSection {

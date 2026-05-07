@@ -38,8 +38,8 @@ pub struct RokiConfig {
     pub engine: EngineSection,
     pub paths: PathsSection,
     pub log: LogSection,
-    /// Accepted-without-applying per Req 2.4. Stored verbatim; not
-    /// surfaced beyond this module during the skeleton phase.
+    /// `[default.ai.session]` section. Slice 2 loads it eagerly so cycles
+    /// can resolve the session subprocess cli + stall window.
     pub default_ai_session: Option<DefaultAiSessionSection>,
 }
 
@@ -73,13 +73,23 @@ pub struct LinearWebhookSection {
 #[derive(Clone, Debug)]
 pub struct DefaultAiCommandSection {
     pub cli: String,
+    /// Stdout-silence threshold in seconds; defaults to 300. Per shape default in
+    /// docs/reference/config.md.
+    pub stall_seconds: u32,
 }
 
-/// `[default.ai.session]` section. Accepted-without-applying per Req 2.4.
-#[derive(Clone, Debug, Default, Deserialize)]
-#[serde(default)]
+/// `[default.ai.session]` section.
+///
+/// Slice 2 promotes the section from "accepted-without-applying" to a
+/// loaded shape: `cli` stays optional (only required when an actual phase
+/// resolves to session shape, checked at cycle start), `stall_seconds` gets
+/// the canonical default 600.
+#[derive(Clone, Debug)]
 pub struct DefaultAiSessionSection {
     pub cli: Option<String>,
+    /// Stdout-silence threshold in seconds; defaults to 600. Applied also to the
+    /// iter_exhausted post-stdin-close grace per fr:01 §123-125.
+    pub stall_seconds: u32,
 }
 
 /// `[engine]` section.
@@ -205,13 +215,21 @@ struct RawDefaultBlock {
 #[serde(default)]
 struct RawDefaultAi {
     command: Option<RawDefaultAiCommand>,
-    session: Option<DefaultAiSessionSection>,
+    session: Option<RawDefaultAiSession>,
 }
 
 #[derive(Default, Deserialize)]
 #[serde(default)]
 struct RawDefaultAiCommand {
     cli: Option<String>,
+    stall_seconds: Option<i64>,
+}
+
+#[derive(Default, Deserialize)]
+#[serde(default)]
+struct RawDefaultAiSession {
+    cli: Option<String>,
+    stall_seconds: Option<i64>,
 }
 
 #[derive(Default, Deserialize)]
@@ -257,12 +275,35 @@ impl RawRokiConfig {
             secret: raw_webhook.secret,
         };
 
+        let cmd_stall = parse_stall_seconds(
+            path,
+            "default.ai.command.stall_seconds",
+            raw_default_command.stall_seconds,
+            300,
+        )?;
         let default_ai_command = DefaultAiCommandSection {
             cli: required_string(
                 path,
                 "default.ai.command.cli",
                 raw_default_command.cli,
             )?,
+            stall_seconds: cmd_stall,
+        };
+
+        let default_ai_session = match raw_default_ai.session {
+            None => None,
+            Some(raw_session) => {
+                let session_stall = parse_stall_seconds(
+                    path,
+                    "default.ai.session.stall_seconds",
+                    raw_session.stall_seconds,
+                    600,
+                )?;
+                Some(DefaultAiSessionSection {
+                    cli: raw_session.cli,
+                    stall_seconds: session_stall,
+                })
+            }
         };
 
         let paths_section = PathsSection {
@@ -290,8 +331,25 @@ impl RawRokiConfig {
             engine,
             paths: paths_section,
             log,
-            default_ai_session: raw_default_ai.session,
+            default_ai_session,
         })
+    }
+}
+
+fn parse_stall_seconds(
+    path: &Path,
+    key: &'static str,
+    raw: Option<i64>,
+    default: u32,
+) -> Result<u32, RokiConfigError> {
+    match raw {
+        None => Ok(default),
+        Some(n) if n >= 1 => Ok(n as u32),
+        Some(_) => Err(RokiConfigError::TypeMismatch {
+            path: path.to_path_buf(),
+            key: key.to_string(),
+            expected: "integer >= 1",
+        }),
     }
 }
 
@@ -564,6 +622,107 @@ session_root = "/tmp/sess"
 
         let cfg = RokiConfig::load(&path).expect("load");
         assert_eq!(cfg.engine.max_iterations, 10);
+    }
+
+    #[test]
+    fn stall_seconds_defaults_when_absent() {
+        let toml = r#"
+[linear]
+token = "t"
+
+[linear.webhook]
+bind = "127.0.0.1"
+port = 7000
+
+[default.ai.command]
+cli = "claude --print"
+
+[default.ai.session]
+cli = "claude --interactive"
+
+[engine]
+
+[paths]
+workflow = "./WORKFLOW.toml"
+session_root = "./.roki/sessions"
+"#;
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("roki.toml");
+        std::fs::write(&path, toml).unwrap();
+        let cfg = RokiConfig::load(&path).unwrap();
+        assert_eq!(cfg.default_ai_command.stall_seconds, 300);
+        let session = cfg
+            .default_ai_session
+            .as_ref()
+            .expect("session present");
+        assert_eq!(session.stall_seconds, 600);
+    }
+
+    #[test]
+    fn stall_seconds_zero_is_rejected() {
+        let toml = r#"
+[linear]
+token = "t"
+
+[linear.webhook]
+bind = "127.0.0.1"
+port = 7000
+
+[default.ai.command]
+cli = "claude --print"
+stall_seconds = 0
+
+[engine]
+
+[paths]
+workflow = "./WORKFLOW.toml"
+session_root = "./.roki/sessions"
+"#;
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("roki.toml");
+        std::fs::write(&path, toml).unwrap();
+        let err = RokiConfig::load(&path).unwrap_err();
+        match err {
+            RokiConfigError::TypeMismatch { key, .. } => {
+                assert_eq!(key, "default.ai.command.stall_seconds");
+            }
+            other => panic!("expected TypeMismatch, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn stall_seconds_session_zero_is_rejected() {
+        let toml = r#"
+[linear]
+token = "t"
+
+[linear.webhook]
+bind = "127.0.0.1"
+port = 7000
+
+[default.ai.command]
+cli = "claude --print"
+
+[default.ai.session]
+cli = "claude --interactive"
+stall_seconds = 0
+
+[engine]
+
+[paths]
+workflow = "./WORKFLOW.toml"
+session_root = "./.roki/sessions"
+"#;
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("roki.toml");
+        std::fs::write(&path, toml).unwrap();
+        let err = RokiConfig::load(&path).unwrap_err();
+        match err {
+            RokiConfigError::TypeMismatch { key, .. } => {
+                assert_eq!(key, "default.ai.session.stall_seconds");
+            }
+            other => panic!("expected TypeMismatch, got {other:?}"),
+        }
     }
 
     #[test]

@@ -243,7 +243,7 @@ mod tests {
                 port: 8000,
                 secret: None,
             },
-            default_ai_command: DefaultAiCommandSection { cli: "echo".to_string() },
+            default_ai_command: DefaultAiCommandSection { cli: "echo".to_string(), stall_seconds: 300 },
             engine: EngineSection { max_iterations: 10 },
             paths: PathsSection {
                 workflow: PathBuf::from("/tmp/w"),

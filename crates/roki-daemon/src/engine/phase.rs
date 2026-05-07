@@ -343,7 +343,7 @@ mod tests {
         RokiConfig {
             linear: LinearSection { token: "x".to_string() },
             linear_webhook: LinearWebhookSection { bind: "127.0.0.1".to_string(), port: 8000, secret: None },
-            default_ai_command: DefaultAiCommandSection { cli: "echo".to_string() },
+            default_ai_command: DefaultAiCommandSection { cli: "echo".to_string(), stall_seconds: 300 },
             engine: EngineSection { max_iterations: 10 },
             paths: PathsSection { workflow: PathBuf::from("/tmp"), session_root: PathBuf::from("/tmp") },
             log: LogSection::default(),
