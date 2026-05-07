@@ -6,7 +6,7 @@
 
 **Architecture:** A new `SessionSupervisor` struct (one per cycle) owns the long-lived child plus a tokio reader task. `engine::cycle::run_cycle` dispatches per phase: command-shape goes through the existing `CommandPhaseExecutor`, session-shape goes through the supervisor's `run_turn`. Both shapes share a new `Watchdog` (idle-stdout-byte detector) and a new `stream` line-splitter that recognises the claude/codex `result` event for the run phase. Per-file `session` and `stall_seconds` overrides come from `workflow/*.md` frontmatter, parsed once at config load.
 
-**Tech Stack:** Rust 2024 (workspace edition), `tokio` async runtime, `nix` (`signal` feature) for SIGTERM, `serde_yaml` for `workflow/*.md` frontmatter, plus the slice-1 deps (`liquid`, `shell-words`, `async-trait`, `serde_json`, `tempfile`, `wiremock`, `reqwest`).
+**Tech Stack:** Rust 2024 (workspace edition), `tokio` async runtime, `nix` (`signal` feature) for SIGTERM, `serde_yaml_ng` for `workflow/*.md` frontmatter (matches the existing `roki-doctools` workspace dep; avoids the deprecated `serde_yaml`), plus the slice-1 deps (`liquid`, `shell-words`, `async-trait`, `serde_json`, `tempfile`, `wiremock`, `reqwest`).
 
 **Spec:** `docs/superpowers/specs/2026-05-08-slice2-session-streamjson-design.md` (commits `b5b...` and the drift-fix follow-up on branch `slice2-session-streamjson`).
 
@@ -773,7 +773,7 @@ pub fn parse_workflow_md_frontmatter<'a>(
     };
 
     let yaml = &rest[..end.start];
-    let raw: RawHeader = serde_yaml::from_str(yaml).map_err(|err| {
+    let raw: RawHeader = serde_yaml_ng::from_str(yaml).map_err(|err| {
         WorkflowError::WorkflowMdFrontmatter {
             path: path.to_path_buf(),
             reason: format!("yaml parse error: {err}"),
