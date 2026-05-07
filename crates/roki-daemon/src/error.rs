@@ -242,6 +242,22 @@ pub enum PhaseInfraError {
         iter: u32,
     },
 
+    #[error("session subprocess failed to spawn '{cli}': {source}")]
+    SessionSpawn {
+        cli: String,
+        #[source]
+        source: std::io::Error,
+    },
+
+    #[error("session subprocess stdin closed unexpectedly during turn for phase {}", phase.as_str())]
+    SessionStdinClosed { phase: PhaseKind },
+
+    #[error("session subprocess stdout closed before any directive on phase {}", phase.as_str())]
+    SessionStdoutClosed { phase: PhaseKind },
+
+    #[error("[default.ai.session].cli not configured but cycle requires session shape")]
+    SessionCliMissing,
+
     #[error(transparent)]
     Capture(#[from] CaptureError),
 }
