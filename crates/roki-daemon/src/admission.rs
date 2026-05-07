@@ -78,6 +78,8 @@ mod tests {
             assignee.map(String::from),
             "in_progress".to_string(),
             vec!["bug".to_string()],
+            String::new(),
+            String::new(),
         )
     }
 

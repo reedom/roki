@@ -71,6 +71,8 @@ mod tests {
                 Some("u1".to_string()),
                 status.to_string(),
                 labels.iter().map(|s| s.to_string()).collect(),
+                String::new(),
+                String::new(),
             ),
             ghq: "github.com/owner/repo".to_string(),
         }

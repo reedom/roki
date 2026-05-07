@@ -155,7 +155,29 @@ fn parse_ticket(body: &[u8]) -> Result<NormalizedTicket, String> {
         .collect::<Option<Vec<String>>>()
         .ok_or_else(|| "missing data.labels[].name".to_string())?;
 
-    Ok(NormalizedTicket::new(id, Some(assignee_id), status, labels))
+    // Title and body are not required by Linear's webhook schema for every
+    // event kind; treat them as optional and default to empty so the
+    // engine's Liquid context can still expand `{{ ticket.title }}` /
+    // `{{ ticket.body }}` to an empty string for events that omit them.
+    let title = value
+        .pointer("/data/title")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_string();
+    let body = value
+        .pointer("/data/description")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_string();
+
+    Ok(NormalizedTicket::new(
+        id,
+        Some(assignee_id),
+        status,
+        labels,
+        title,
+        body,
+    ))
 }
 
 /// Bind the axum listener and serve until `shutdown` resolves.
@@ -417,5 +439,36 @@ mod tests {
         assert_eq!(ticket.assignee_id.as_deref(), Some("u1"));
         assert_eq!(ticket.status, "in_progress");
         assert_eq!(ticket.labels, vec!["bug".to_string(), "p0".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn good_body_propagates_title_and_description() {
+        let (state, mut rx, _cycle) = make_state();
+        let app = router(state);
+
+        let mut body = good_body();
+        body["data"]["title"] = serde_json::json!("Implement widget");
+        body["data"]["description"] = serde_json::json!("Multi-line\ndescription");
+
+        let res = post_json(app, serde_json::to_vec(&body).unwrap()).await;
+        assert_eq!(res.status(), StatusCode::ACCEPTED);
+
+        let ticket = rx.recv().await.expect("ticket emitted");
+        assert_eq!(ticket.title, "Implement widget");
+        assert!(ticket.body.contains("description"));
+    }
+
+    #[tokio::test]
+    async fn missing_title_and_description_default_to_empty() {
+        let (state, mut rx, _cycle) = make_state();
+        let app = router(state);
+
+        // good_body() omits title/description; assert they default to "".
+        let res = post_json(app, serde_json::to_vec(&good_body()).unwrap()).await;
+        assert_eq!(res.status(), StatusCode::ACCEPTED);
+
+        let ticket = rx.recv().await.expect("ticket emitted");
+        assert_eq!(ticket.title, "");
+        assert_eq!(ticket.body, "");
     }
 }

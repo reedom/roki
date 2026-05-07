@@ -19,6 +19,8 @@ pub struct NormalizedTicket {
     pub assignee_id: Option<String>,
     pub status: String,
     pub labels: Vec<String>,
+    pub title: String,
+    pub body: String,
 }
 
 impl NormalizedTicket {
@@ -32,12 +34,16 @@ impl NormalizedTicket {
         assignee_id: Option<String>,
         status: String,
         labels: Vec<String>,
+        title: String,
+        body: String,
     ) -> Self {
         Self {
             id,
             assignee_id,
             status,
             labels,
+            title,
+            body,
         }
     }
 }
@@ -53,11 +59,15 @@ mod tests {
             Some("u1".to_string()),
             "in_progress".to_string(),
             vec!["bug".to_string(), "p0".to_string()],
+            "Title".to_string(),
+            "Body".to_string(),
         );
         assert_eq!(ticket.id, "tid-1");
         assert_eq!(ticket.assignee_id, Some("u1".to_string()));
         assert_eq!(ticket.status, "in_progress");
         assert_eq!(ticket.labels, vec!["bug".to_string(), "p0".to_string()]);
+        assert_eq!(ticket.title, "Title");
+        assert_eq!(ticket.body, "Body");
     }
 
     #[test]
@@ -67,11 +77,15 @@ mod tests {
             None,
             "todo".to_string(),
             Vec::new(),
+            String::new(),
+            String::new(),
         );
         assert!(ticket.assignee_id.is_none());
         assert_eq!(ticket.id, "t");
         assert_eq!(ticket.status, "todo");
         assert!(ticket.labels.is_empty());
+        assert!(ticket.title.is_empty());
+        assert!(ticket.body.is_empty());
     }
 
     #[test]
@@ -81,8 +95,24 @@ mod tests {
             Some("u2".to_string()),
             "review".to_string(),
             vec!["feature".to_string()],
+            "T".to_string(),
+            "B".to_string(),
         );
         let clone = ticket.clone();
         assert_eq!(ticket, clone);
+    }
+
+    #[test]
+    fn constructor_accepts_title_and_body() {
+        let ticket = NormalizedTicket::new(
+            "tid-3".to_string(),
+            Some("u1".to_string()),
+            "review".to_string(),
+            vec!["needs-impl".to_string()],
+            "Implement widget".to_string(),
+            "Body paragraph one.\n\nBody paragraph two.".to_string(),
+        );
+        assert_eq!(ticket.title, "Implement widget");
+        assert!(ticket.body.contains("paragraph two"));
     }
 }
