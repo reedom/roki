@@ -103,6 +103,69 @@ pub fn write_run_exit_code(iter_dir: &Path, exit_code: i32) -> Result<(), Captur
     })
 }
 
+/// Files opened for one session-shape phase turn. The supervisor opens these
+/// at the start of `run_turn(kind, ...)` and rotates them when the next turn
+/// starts.
+#[allow(dead_code)]
+pub struct SessionPhaseFiles {
+    pub stdout: File,
+    pub stderr: File,
+    pub events: File,
+}
+
+/// Open `<phase>.stdout`, `<phase>.stderr`, and `<phase>.events.jsonl`
+/// inside `iter_dir`. All three files are truncated on open per slice-1
+/// `open_phase_files` semantics — the supervisor writes for the duration
+/// of one turn and never reopens the same triple twice.
+#[allow(dead_code)]
+pub fn open_session_phase_files(
+    iter_dir: &Path,
+    phase: PhaseKind,
+) -> Result<SessionPhaseFiles, CaptureError> {
+    let stdout_path = iter_dir.join(format!("{}.stdout", phase.as_str()));
+    let stderr_path = iter_dir.join(format!("{}.stderr", phase.as_str()));
+    let events_path = iter_dir.join(format!("{}.events.jsonl", phase.as_str()));
+    let stdout = File::create(&stdout_path).map_err(|source| CaptureError::OpenFile {
+        path: stdout_path,
+        source,
+    })?;
+    let stderr = File::create(&stderr_path).map_err(|source| CaptureError::OpenFile {
+        path: stderr_path,
+        source,
+    })?;
+    let events = File::create(&events_path).map_err(|source| CaptureError::OpenFile {
+        path: events_path,
+        source,
+    })?;
+    Ok(SessionPhaseFiles {
+        stdout,
+        stderr,
+        events,
+    })
+}
+
+/// Write `run.terminal.json` (pretty-printed) inside `iter_dir`. Used when
+/// the run-phase tee scanner spots a claude/codex `result` event mid-stream.
+#[allow(dead_code)]
+pub fn write_run_terminal_json(
+    iter_dir: &Path,
+    value: &serde_json::Value,
+) -> Result<(), CaptureError> {
+    let path = iter_dir.join("run.terminal.json");
+    let pretty = serde_json::to_vec_pretty(value).map_err(|err| CaptureError::Write {
+        path: path.clone(),
+        source: std::io::Error::other(err),
+    })?;
+    let mut file = File::create(&path).map_err(|source| CaptureError::OpenFile {
+        path: path.clone(),
+        source,
+    })?;
+    file.write_all(&pretty).map_err(|source| CaptureError::Write {
+        path,
+        source,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -157,6 +220,28 @@ mod tests {
             std::fs::read_to_string(dir.join("run.exit_code")).unwrap(),
             "7\n"
         );
+    }
+
+    #[test]
+    fn open_session_phase_files_creates_three_files() {
+        let tmp = TempDir::new().unwrap();
+        let dir = create_iter_dir(tmp.path(), "ENG-1", Uuid::nil(), 1).unwrap();
+        let files = open_session_phase_files(&dir, PhaseKind::Pre).unwrap();
+        drop(files);
+        assert!(dir.join("pre.stdout").is_file());
+        assert!(dir.join("pre.stderr").is_file());
+        assert!(dir.join("pre.events.jsonl").is_file());
+    }
+
+    #[test]
+    fn write_run_terminal_json_writes_pretty_payload() {
+        let tmp = TempDir::new().unwrap();
+        let dir = create_iter_dir(tmp.path(), "X", Uuid::nil(), 1).unwrap();
+        let value = serde_json::json!({"type":"result","is_error":false});
+        write_run_terminal_json(&dir, &value).unwrap();
+        let body = std::fs::read_to_string(dir.join("run.terminal.json")).unwrap();
+        assert!(body.contains("\"is_error\""));
+        assert!(body.contains("false"));
     }
 
     #[test]
