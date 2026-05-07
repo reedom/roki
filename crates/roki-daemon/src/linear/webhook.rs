@@ -7,11 +7,11 @@
 //!
 //! The handler is path-agnostic — Linear's webhook URL is configured by the
 //! operator, so any POST path is accepted. Body parse extracts the four
-//! required fields (`id`, `assignee.id`, `state.name`, `labels.nodes[].name`)
-//! from the Linear envelope; missing fields return HTTP 400 with a
-//! `tracing::warn!` line carrying an `error_id` for log correlation. No
-//! HMAC verification is performed in the skeleton phase even when
-//! `[linear.webhook].secret` is configured (Req 3.3).
+//! required fields (`data.id`, `data.assignee.id`, `data.state.name`,
+//! `data.labels[].name`) from the Linear webhook envelope; missing fields
+//! return HTTP 400 with a `tracing::warn!` line carrying an `error_id` for
+//! log correlation. No HMAC verification is performed in the skeleton phase
+//! even when `[linear.webhook].secret` is configured (Req 3.3).
 //!
 //! Cross-task state is carried by an `mpsc::Sender<NormalizedTicket>`
 //! (channel capacity 1) plus an `AtomicBool` `cycle_started` (init `false`),
@@ -124,27 +124,27 @@ fn parse_ticket(body: &[u8]) -> Result<NormalizedTicket, String> {
     let value: Value = serde_json::from_slice(body).map_err(|err| format!("invalid json: {err}"))?;
 
     let id = value
-        .pointer("/id")
+        .pointer("/data/id")
         .and_then(Value::as_str)
-        .ok_or_else(|| "missing id".to_string())?
+        .ok_or_else(|| "missing data.id".to_string())?
         .to_string();
 
     let assignee_id = value
-        .pointer("/assignee/id")
+        .pointer("/data/assignee/id")
         .and_then(Value::as_str)
-        .ok_or_else(|| "missing assignee.id".to_string())?
+        .ok_or_else(|| "missing data.assignee.id".to_string())?
         .to_string();
 
     let status = value
-        .pointer("/state/name")
+        .pointer("/data/state/name")
         .and_then(Value::as_str)
-        .ok_or_else(|| "missing state.name".to_string())?
+        .ok_or_else(|| "missing data.state.name".to_string())?
         .to_string();
 
     let label_nodes = value
-        .pointer("/labels/nodes")
+        .pointer("/data/labels")
         .and_then(Value::as_array)
-        .ok_or_else(|| "missing labels.nodes".to_string())?;
+        .ok_or_else(|| "missing data.labels".to_string())?;
     let labels = label_nodes
         .iter()
         .map(|node| {
@@ -153,7 +153,7 @@ fn parse_ticket(body: &[u8]) -> Result<NormalizedTicket, String> {
                 .map(str::to_string)
         })
         .collect::<Option<Vec<String>>>()
-        .ok_or_else(|| "missing labels.nodes[].name".to_string())?;
+        .ok_or_else(|| "missing data.labels[].name".to_string())?;
 
     Ok(NormalizedTicket::new(id, Some(assignee_id), status, labels))
 }
@@ -206,10 +206,14 @@ mod tests {
 
     fn good_body() -> serde_json::Value {
         serde_json::json!({
-            "id": "tid-1",
-            "assignee": {"id": "u1"},
-            "state": {"name": "in_progress"},
-            "labels": {"nodes": [{"name": "bug"}, {"name": "p0"}]}
+            "action": "update",
+            "type": "Issue",
+            "data": {
+                "id": "tid-1",
+                "assignee": {"id": "u1"},
+                "state": {"name": "in_progress"},
+                "labels": [{"name": "bug"}, {"name": "p0"}]
+            }
         })
     }
 
@@ -305,7 +309,7 @@ mod tests {
         let app = router(state);
 
         let mut body = good_body();
-        body.as_object_mut().unwrap().remove("id");
+        body["data"].as_object_mut().unwrap().remove("id");
         let res = post_json(app, serde_json::to_vec(&body).unwrap()).await;
 
         assert_eq!(res.status(), StatusCode::BAD_REQUEST);
@@ -317,10 +321,12 @@ mod tests {
         let app = router(state);
 
         let body = serde_json::json!({
-            "id": "tid-1",
-            "assignee": {},
-            "state": {"name": "in_progress"},
-            "labels": {"nodes": [{"name": "bug"}]}
+            "data": {
+                "id": "tid-1",
+                "assignee": {},
+                "state": {"name": "in_progress"},
+                "labels": [{"name": "bug"}]
+            }
         });
         let res = post_json(app, serde_json::to_vec(&body).unwrap()).await;
 
@@ -333,7 +339,7 @@ mod tests {
         let app = router(state);
 
         let mut body = good_body();
-        body.as_object_mut().unwrap().remove("state");
+        body["data"].as_object_mut().unwrap().remove("state");
         let res = post_json(app, serde_json::to_vec(&body).unwrap()).await;
 
         assert_eq!(res.status(), StatusCode::BAD_REQUEST);
@@ -345,10 +351,12 @@ mod tests {
         let app = router(state);
 
         let body = serde_json::json!({
-            "id": "tid-1",
-            "assignee": {"id": "u1"},
-            "state": {"name": "in_progress"},
-            "labels": {"nodes": [{}]}
+            "data": {
+                "id": "tid-1",
+                "assignee": {"id": "u1"},
+                "state": {"name": "in_progress"},
+                "labels": [{}]
+            }
         });
         let res = post_json(app, serde_json::to_vec(&body).unwrap()).await;
 

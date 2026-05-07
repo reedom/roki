@@ -487,7 +487,7 @@ impl WorkflowConfig {
 **Responsibilities & Constraints**
 
 - Single route `POST /` (path agnostic — Linear is configured by the operator's webhook URL; the skeleton accepts any path).
-- Body parse extracts `id`, `assignee.id`, `state.name`, `labels.nodes[].name` from the Linear webhook envelope. Missing fields → 400 + parse error log.
+- Body parse extracts `data.id`, `data.assignee.id`, `data.state.name`, `data.labels[].name` from the Linear webhook envelope. Missing fields → 400 + parse error log.
 - Handler holds `Arc<tokio::sync::mpsc::Sender<NormalizedTicket>>` (channel capacity 1) and `Arc<AtomicBool> cycle_started` (init `false`), both shared with `runtime`. Per accepted POST: parse body → load `cycle_started` (`Acquire`); if `true` → 503; else `sender.try_send(ticket)` → `Ok(())` = 202, `TrySendError::Full(_)` = 503 (transient pre-cycle backpressure; runtime is mid-iteration), `TrySendError::Closed(_)` = 503 (runtime dropped the receiver after terminal cycle).
 - `runtime` owns the matching `Receiver` and the write side of `cycle_started`. Per iteration: `receiver.recv().await` → admission → on reject (Req 4.5) info log + `continue` (channel buffer drains naturally; no swap needed); → rule first-match → on no-match (Req 5.4) info log + `continue`; on match: `cycle_started.store(true, Release)` → drop receiver → break into cycle.
 - `cycle_started` is set to `true` exactly once in process lifetime: when a cycle starts (Req 8.4) or when an internal cycle error occurs (Req 8.3). Both cases are terminal; the listener stays bound only long enough for `axum::serve` graceful shutdown to drain the in-flight handler.

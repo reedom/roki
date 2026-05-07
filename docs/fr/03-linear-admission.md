@@ -17,15 +17,17 @@ refs:
 
 ## Purpose
 
-Admit assigned tickets without drops, never touch others' tickets, and respect the Linear API rate limit (5,000 req/hr) and Linear's no-aggressive-polling recommendation. Linear writes from inside a phase subprocess go through whatever MCP / CLI the operator's cli line provides; the daemon process itself never writes.
+Admit assigned tickets without drops, never touch others' tickets, and respect Linear's GraphQL rate limit (per-token bucket plus complexity budget; 429 surfaces both raw-rate and complexity-budget exhaustion) and Linear's no-aggressive-polling recommendation. Linear writes from inside a phase subprocess go through whatever MCP / CLI the operator's cli line provides; the daemon process itself never writes.
 
 ## User-visible Behavior
 
 ### Webhook intake
 
-- **HMAC verification**: every webhook is verified against `roki.toml [linear.webhook].secret`. Invalid signature → respond with HTTP `401 Unauthorized` and discard the payload without normalization.
+- **HMAC verification**: every webhook is verified against `roki.toml [linear.webhook].secret`. The `Linear-Signature` header (hex-encoded HMAC-SHA256 of the raw request body) is compared in constant time. Invalid signature → respond with HTTP `401 Unauthorized` and discard the payload without normalization.
+- **Replay protection**: verified payloads must satisfy `|now - webhookTimestamp| ≤ 60 s` (Linear's published replay window). Stale payloads → HTTP `401 Unauthorized`, discarded without normalization.
 - **Normalization**: a verified payload is normalized into the internal issue model (see Capabilities). The normalized model is the only thing later layers see.
 - **Forward to admission**: the normalized event is handed to the admission filter (next section). Admission decides whether to update the diff cache and re-evaluate rules.
+- **Linear-side delivery retries**: Linear retries failed deliveries 3× at 1 m / 1 h / 6 h and disables the webhook on persistent failure. Daemon-side 503 responses (cycle in flight, channel back-pressure) count as failed deliveries for that purpose; operators running long cycles accept the auto-disable risk. The webhook is re-enabled by the operator in the Linear UI; the daemon does not attempt programmatic re-enable.
 
 ### Admission filter
 
@@ -81,7 +83,7 @@ Operators (TUI, external scripts, observability components) can request an out-o
 
 ## Capabilities
 
-- **Webhook receiver**: a single endpoint at the workspace level. HMAC signature verification is mandatory.
+- **Webhook receiver**: a single endpoint at the workspace level. HMAC signature verification (`Linear-Signature` header, hex HMAC-SHA256 of raw body, constant-time compare) and the 60 s `webhookTimestamp` freshness check are mandatory.
 - **Normalized issue model**: minimally contains issue id, title, description, current state, label set, assignee user id, repo identifier (resolved by admission). Later layers only see the normalized model.
 - **Read-only**: no Linear write is ever issued from the daemon process. Writes are confined to phase subprocesses that operators authorize through their cli line.
 - **Polling fallback**: implements the cap + 429 backoff contract above, sharing rate-limit accounting with webhook-driven calls.

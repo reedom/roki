@@ -82,7 +82,7 @@ Tasks are ordered to match implementation order: foundation first, then layers i
 - [x] 3.3 (P) Implement the axum webhook receiver with the cycle-started backpressure pair
   - Bind axum on `[linear.webhook].bind` and `[linear.webhook].port`; route `POST /*` to the handler.
   - Handler holds `Arc<tokio::sync::mpsc::Sender<NormalizedTicket>>` (channel capacity 1) and `Arc<AtomicBool> cycle_started` (init `false`); per accepted POST: parse body → load `cycle_started` (`Acquire`); if `true` → 503; else `sender.try_send(ticket)` → `Ok(())` = 202, `TrySendError::Full` = 503, `TrySendError::Closed` = 503.
-  - Reject malformed JSON or payloads missing `id` / `assignee.id` / `state.name` / `labels.nodes[].name` with HTTP 400 + `tracing::warn!` parse-error log carrying an `error_id`; response body `{"error":"invalid_payload"}`.
+  - Reject malformed JSON or payloads missing `data.id` / `data.assignee.id` / `data.state.name` / `data.labels[].name` with HTTP 400 + `tracing::warn!` parse-error log carrying an `error_id`; response body `{"error":"invalid_payload"}`.
   - Do not verify any HMAC or signature header even when `[linear.webhook].secret` is configured.
   - Add an integration test using `tower::ServiceExt::oneshot` covering: 400 on bad body, 202 on good body when channel has capacity and `cycle_started == false`, 503 when `cycle_started == true`, 503 when the receiver is dropped, concurrent good-body POSTs producing one 202 and one 503 via `TrySendError::Full`.
   - Observable completion: `cargo test -p roki-daemon linear::webhook` passes; the listener emits `NormalizedTicket` over the channel for accepted payloads and replies 4xx / 503 per the contract above.

@@ -136,10 +136,14 @@ session_root = "{session_root}"
     //    second POST below is racing against that flip.
     let webhook_url = format!("http://127.0.0.1:{port}/");
     let payload = serde_json::json!({
-        "id": "tid-1",
-        "assignee": {"id": "u1"},
-        "state": {"name": "in_progress"},
-        "labels": {"nodes": []}
+        "action": "update",
+        "type": "Issue",
+        "data": {
+            "id": "tid-1",
+            "assignee": {"id": "u1"},
+            "state": {"name": "in_progress"},
+            "labels": []
+        }
     });
     let client = reqwest::Client::new();
     let resp1 = client
