@@ -380,21 +380,16 @@ fn parse_phase_body(
         }
     })?;
 
-    // session = "session" is recognised but not implemented in slice 1.
-    if let Some(session_val) = table.get("session") {
-        let kind = session_val.as_str().unwrap_or("");
-        return Err(WorkflowError::UnsupportedRunForm {
-            path: path.to_path_buf(),
-            key: format!("{key_prefix}.session={kind}"),
-        });
-    }
+    let inline_session_field = table.get("session");
 
     // Allow-list of recognised phase-body keys. `cli` is honored only for the
     // `path` form per FR 02; pairing it with `cmd` or `prompt` was previously
-    // accepted and silently ignored, which masked operator typos.
+    // accepted and silently ignored, which masked operator typos. `session`
+    // is allowed at the table level so the targeted inline-form rejection
+    // below can produce a precise error key.
     for key in table.keys() {
         match key.as_str() {
-            "cmd" | "prompt" | "path" | "cli" => {}
+            "cmd" | "prompt" | "path" | "cli" | "session" => {}
             other => {
                 return Err(WorkflowError::UnsupportedRunForm {
                     path: path.to_path_buf(),
@@ -408,6 +403,17 @@ fn parse_phase_body(
     let has_prompt = table.contains_key("prompt");
     let has_path = table.contains_key("path");
     let has_cli = table.contains_key("cli");
+
+    // Inline `cmd`/`prompt` forms must not carry `session = ...`. The shape
+    // of an inline form is fixed (cmd → Command, prompt → Session); slice 2
+    // expects shape overrides to come exclusively from the `.md` file's
+    // frontmatter on the `path` form. (fr:04)
+    if inline_session_field.is_some() && (has_cmd || has_prompt) {
+        return Err(WorkflowError::UnsupportedRunForm {
+            path: path.to_path_buf(),
+            key: format!("{key_prefix}.session"),
+        });
+    }
 
     let count = [has_cmd, has_prompt, has_path]
         .iter()
@@ -462,16 +468,31 @@ fn parse_phase_body(
                 key: format!("{key_prefix}.path"),
             })?;
         let resolved = resolve_workflow_path(workflow_dir, path_str);
-        let cli_override = table
+        let toml_cli_override = table
             .get("cli")
             .and_then(Value::as_str)
             .filter(|s| !s.is_empty())
             .map(str::to_string);
+
+        // Slice-2: workflow .md frontmatter resolves shape + stall_seconds + cli.
+        let body_text = std::fs::read_to_string(&resolved).map_err(|source| {
+            WorkflowError::Unreadable {
+                path: resolved.clone(),
+                source,
+            }
+        })?;
+        let (header, _post) = crate::config::workflow_md::parse_workflow_md_frontmatter(
+            &resolved,
+            &body_text,
+        )?;
+
+        let cli_override = toml_cli_override.or(header.cli);
+
         Ok(crate::engine::outcome::PhaseBody::Path {
             path: resolved,
             cli_override,
-            shape: crate::engine::outcome::PhaseShape::Session,
-            stall_seconds: None,
+            shape: header.shape,
+            stall_seconds: header.stall_seconds,
         })
     }
 }
@@ -921,6 +942,10 @@ path = "phases/run.md"
 cli = "claude"
 "#;
         let toml_path = write_toml(&dir, body);
+        // Slice 2 reads the .md file at config load to pull frontmatter; the
+        // file with no frontmatter exercises the default-shape branch.
+        std::fs::create_dir_all(dir.path().join("phases")).unwrap();
+        std::fs::write(dir.path().join("phases/run.md"), "body\n").unwrap();
         let cfg = WorkflowConfig::load(&toml_path).expect("loads ok");
 
         let expected = dir.path().join("phases/run.md");
@@ -942,11 +967,17 @@ cli = "claude"
 
     #[test]
     fn path_form_absolute_path_is_preserved() {
+        // Slice 2 reads the .md body at config load. Use a real absolute path
+        // (under a separate tempdir, distinct from the workflow dir) so the
+        // file exists; the assertion still proves "absolute paths pass
+        // through unchanged" because the resolver receives an unrelated
+        // workflow_dir and must not join.
         let dir = tempfile::tempdir().unwrap();
-        // Use a literal absolute path to keep the assertion stable across
-        // environments. The body just needs to be a path that survives
-        // loading; the executor reads the file at exec time, not the loader.
-        let body = r#"
+        let md_dir = tempfile::tempdir().unwrap();
+        let abs_md = md_dir.path().join("run.md");
+        std::fs::write(&abs_md, "body\n").unwrap();
+        let body = format!(
+            r#"
 [admission]
 assignee = "me"
 
@@ -959,9 +990,11 @@ status = "in_progress"
 [rule.when.labels]
 has_all = []
 [rule.run]
-path = "/abs/phases/run.md"
-"#;
-        let toml_path = write_toml(&dir, body);
+path = "{}"
+"#,
+            abs_md.display()
+        );
+        let toml_path = write_toml(&dir, &body);
         let cfg = WorkflowConfig::load(&toml_path).expect("loads ok");
 
         match &cfg.rules[0].run {
@@ -971,7 +1004,8 @@ path = "/abs/phases/run.md"
                 shape,
                 stall_seconds,
             } => {
-                assert_eq!(path, &PathBuf::from("/abs/phases/run.md"));
+                assert!(path.is_absolute(), "absolute path must pass through");
+                assert_eq!(path, &abs_md);
                 assert!(cli_override.is_none());
                 assert_eq!(*shape, crate::engine::outcome::PhaseShape::Session);
                 assert!(stall_seconds.is_none());
@@ -1051,6 +1085,84 @@ cli = "claude"
                 assert_eq!(path, missing);
             }
             other => panic!("expected MissingFile, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn path_form_pulls_shape_from_md_frontmatter() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let workflow_md = dir.path().join("foo.md");
+        std::fs::write(
+            &workflow_md,
+            "---\nsession: \"command\"\nstall_seconds: 42\n---\nbody\n",
+        )
+        .unwrap();
+        let workflow_toml = dir.path().join("WORKFLOW.toml");
+        std::fs::write(
+            &workflow_toml,
+            r#"
+[admission]
+assignee = "me"
+
+[[admission.repos]]
+ghq = "github.com/acme/widget"
+
+[[rule]]
+[rule.when]
+status = "in_progress"
+[rule.when.labels]
+has_all = ["x"]
+
+[rule.run]
+path = "foo.md"
+"#,
+        )
+        .unwrap();
+        let workflow = WorkflowConfig::load(&workflow_toml).unwrap();
+        let rule = &workflow.rules[0];
+        match &rule.run {
+            crate::engine::outcome::PhaseBody::Path {
+                shape,
+                stall_seconds,
+                ..
+            } => {
+                assert_eq!(*shape, crate::engine::outcome::PhaseShape::Command);
+                assert_eq!(*stall_seconds, Some(42));
+            }
+            other => panic!("expected PhaseBody::Path, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn inline_cmd_rejects_session_field() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let workflow_toml = dir.path().join("WORKFLOW.toml");
+        std::fs::write(
+            &workflow_toml,
+            r#"
+[admission]
+assignee = "me"
+
+[[admission.repos]]
+ghq = "github.com/acme/widget"
+
+[[rule]]
+[rule.when]
+status = "in_progress"
+[rule.when.labels]
+has_all = ["x"]
+
+[rule.run]
+cmd = "echo hi"
+session = "session"
+"#,
+        )
+        .unwrap();
+        match WorkflowConfig::load(&workflow_toml) {
+            Err(WorkflowError::UnsupportedRunForm { key, .. }) => {
+                assert!(key.contains("session"));
+            }
+            other => panic!("expected UnsupportedRunForm, got {other:?}"),
         }
     }
 }
