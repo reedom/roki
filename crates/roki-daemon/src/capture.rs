@@ -1,55 +1,60 @@
-// Walking-skeleton tasks land in dependency order: this capture layout
-// (task 4.3) precedes the runner (4.4) and runtime wiring (4.5) that call
-// `create` per cycle. Until those land, the function and `CaptureLayout`
-// struct are exercised only by the unit tests below, which triggers
-// `dead_code` for the leaf API. Allow it module-locally instead of leaking
-// the relaxation crate-wide, matching the pattern in `admission`,
-// `config::workflow`, and `linear::ticket`.
-#![allow(dead_code)]
-
-//! Per-cycle capture layout. Synchronous filesystem.
+//! Per-iter capture layout.
 //!
-//! Creates `<session_root>/cycle-<uuid>/` and opens the stdout/stderr file
-//! handles inside it for the runner to redirect into. The skeleton path
-//! intentionally omits the canonical `<ticket-id>/cycle-<uuid>/iter-<n>/...`
-//! layout — that landing is deferred to `roki-runtime-capture-layout`
-//! (see roki-skeleton design.md "Logical Data Model").
+//! Layout: `<session_root>/<ticket-id>/cycle-<uuid>/iter-<n>/{pre,run,post}.{stdout,stderr}`
+//! plus parsed-derivative files (`pre.response.json`, `run.exit_code`,
+//! `post.response.json`). The skeleton's flat `cycle-<uuid>/{stdout,stderr}`
+//! layout is gone.
 
 use std::fs::{self, File};
+use std::io::Write as _;
 use std::path::{Path, PathBuf};
 
 use uuid::Uuid;
 
+use crate::engine::outcome::PhaseKind;
 use crate::error::CaptureError;
 
-/// Per-cycle capture artifact: the directory plus the open stdout/stderr
-/// file handles ready for `Stdio::from(File)` redirection by the runner.
-#[derive(Debug)]
-pub struct CaptureLayout {
-    pub dir: PathBuf,
-    pub stdout: File,
-    pub stderr: File,
+/// Sanitise a ticket id for filesystem use. Keeps `[A-Za-z0-9_-]`; replaces
+/// every other byte (slashes, spaces, unicode) with `_`. Linear-style ids
+/// like `ENG-123` survive verbatim.
+pub fn sanitize_ticket_id(raw: &str) -> String {
+    raw.bytes()
+        .map(|b| match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' => b as char,
+            _ => '_',
+        })
+        .collect()
 }
 
-/// Create the per-cycle capture directory under `session_root` and open the
-/// stdout / stderr file handles inside it.
-///
-/// Layout: `<session_root>/cycle-<uuid>/{stdout,stderr}`.
-///
-/// Errors carry the offending path so the `tracing::error!` line can identify
-/// the cause from the error alone (Req 7.3).
-pub fn create(session_root: &Path, _ticket_id: &str) -> Result<CaptureLayout, CaptureError> {
-    let cycle_id = Uuid::new_v4();
-    let dir = session_root.join(format!("cycle-{cycle_id}"));
-
-    fs::create_dir_all(&dir).map_err(|source| CaptureError::CreateDir {
-        path: dir.clone(),
+/// Create `<session_root>/<sanitised_ticket>/cycle-<uuid>/iter-<n>/` and
+/// return its path. The directory is empty until `open_phase_files` is
+/// called for each phase.
+pub fn create_iter_dir(
+    session_root: &Path,
+    ticket_id: &str,
+    cycle_id: Uuid,
+    iter: u32,
+) -> Result<PathBuf, CaptureError> {
+    let safe_ticket = sanitize_ticket_id(ticket_id);
+    let path = session_root
+        .join(safe_ticket)
+        .join(format!("cycle-{cycle_id}"))
+        .join(format!("iter-{iter}"));
+    fs::create_dir_all(&path).map_err(|source| CaptureError::CreateDir {
+        path: path.clone(),
         source,
     })?;
+    Ok(path)
+}
 
-    let stdout_path = dir.join("stdout");
-    let stderr_path = dir.join("stderr");
-
+/// Open `<phase>.stdout` and `<phase>.stderr` inside `iter_dir`. Returns the
+/// pair `(stdout, stderr)` ready for `Stdio::from(File)` redirection.
+pub fn open_phase_files(
+    iter_dir: &Path,
+    phase: PhaseKind,
+) -> Result<(File, File), CaptureError> {
+    let stdout_path = iter_dir.join(format!("{}.stdout", phase.as_str()));
+    let stderr_path = iter_dir.join(format!("{}.stderr", phase.as_str()));
     let stdout = File::create(&stdout_path).map_err(|source| CaptureError::OpenFile {
         path: stdout_path,
         source,
@@ -58,79 +63,111 @@ pub fn create(session_root: &Path, _ticket_id: &str) -> Result<CaptureLayout, Ca
         path: stderr_path,
         source,
     })?;
+    Ok((stdout, stderr))
+}
 
-    Ok(CaptureLayout {
-        dir,
-        stdout,
-        stderr,
+/// Write `<phase>.response.json` (pretty-printed) inside `iter_dir`. Used
+/// after a successful Pre or Post directive parse.
+pub fn write_response_json(
+    iter_dir: &Path,
+    phase: PhaseKind,
+    value: &serde_json::Value,
+) -> Result<(), CaptureError> {
+    let path = iter_dir.join(format!("{}.response.json", phase.as_str()));
+    let pretty = serde_json::to_vec_pretty(value).map_err(|err| CaptureError::Write {
+        path: path.clone(),
+        source: std::io::Error::other(err),
+    })?;
+    let mut file = File::create(&path).map_err(|source| CaptureError::OpenFile {
+        path: path.clone(),
+        source,
+    })?;
+    file.write_all(&pretty).map_err(|source| CaptureError::Write {
+        path,
+        source,
+    })
+}
+
+/// Write `run.exit_code` inside `iter_dir`. The text contents are
+/// `"<exit>\n"`.
+pub fn write_run_exit_code(iter_dir: &Path, exit_code: i32) -> Result<(), CaptureError> {
+    let path = iter_dir.join("run.exit_code");
+    let mut file = File::create(&path).map_err(|source| CaptureError::OpenFile {
+        path: path.clone(),
+        source,
+    })?;
+    let body = format!("{exit_code}\n");
+    file.write_all(body.as_bytes()).map_err(|source| CaptureError::Write {
+        path,
+        source,
     })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::io::Write;
     use tempfile::TempDir;
 
     #[test]
-    fn happy_path_creates_dir_and_opens_files() {
-        let root = TempDir::new().unwrap();
-        let layout = create(root.path(), "ENG-1").expect("layout should be created");
-
-        assert!(layout.dir.exists(), "cycle dir must exist on disk");
-        assert!(layout.dir.is_dir(), "cycle dir must be a directory");
-
-        let dir_name = layout
-            .dir
-            .file_name()
-            .and_then(|n| n.to_str())
-            .expect("cycle dir name must be utf-8");
-        assert!(
-            dir_name.starts_with("cycle-"),
-            "expected cycle-<uuid> prefix, got {dir_name}"
-        );
-
-        // The skeleton layout is exactly stdout + stderr inside the cycle dir.
-        assert!(layout.dir.join("stdout").is_file());
-        assert!(layout.dir.join("stderr").is_file());
+    fn create_iter_dir_builds_full_path() {
+        let tmp = TempDir::new().unwrap();
+        let path = create_iter_dir(tmp.path(), "ENG-1", Uuid::nil(), 3).unwrap();
+        assert!(path.exists());
+        let s = path.to_string_lossy();
+        assert!(s.contains("ENG-1"));
+        assert!(s.contains(&format!("cycle-{}", Uuid::nil())));
+        assert!(s.ends_with("iter-3"));
     }
 
     #[test]
-    fn capture_files_receive_writes() {
-        let root = TempDir::new().unwrap();
-        let mut layout = create(root.path(), "ENG-1").unwrap();
+    fn sanitiser_keeps_safe_chars_replaces_others() {
+        assert_eq!(sanitize_ticket_id("ENG-123"), "ENG-123");
+        assert_eq!(sanitize_ticket_id("a/b c"), "a_b_c");
+        assert_eq!(sanitize_ticket_id("x_y-z"), "x_y-z");
+    }
 
-        layout.stdout.write_all(b"out").unwrap();
-        layout.stderr.write_all(b"err").unwrap();
-        layout.stdout.sync_all().unwrap();
-        layout.stderr.sync_all().unwrap();
+    #[test]
+    fn open_phase_files_creates_stdout_and_stderr() {
+        let tmp = TempDir::new().unwrap();
+        let dir = create_iter_dir(tmp.path(), "X", Uuid::nil(), 1).unwrap();
+        let (out, err) = open_phase_files(&dir, PhaseKind::Run).unwrap();
+        drop(out);
+        drop(err);
+        assert!(dir.join("run.stdout").is_file());
+        assert!(dir.join("run.stderr").is_file());
+    }
 
-        // Read back via the directory path; the runner will do the same for
-        // the smoke test's stdout / stderr assertions.
-        let stdout_bytes = fs::read(layout.dir.join("stdout")).unwrap();
-        let stderr_bytes = fs::read(layout.dir.join("stderr")).unwrap();
-        assert_eq!(stdout_bytes, b"out");
-        assert_eq!(stderr_bytes, b"err");
+    #[test]
+    fn write_response_json_writes_pretty_payload() {
+        let tmp = TempDir::new().unwrap();
+        let dir = create_iter_dir(tmp.path(), "X", Uuid::nil(), 1).unwrap();
+        let value = serde_json::json!({"directive":"run","note":"hi"});
+        write_response_json(&dir, PhaseKind::Pre, &value).unwrap();
+        let body = std::fs::read_to_string(dir.join("pre.response.json")).unwrap();
+        assert!(body.contains("\"directive\""));
+        assert!(body.contains("\"hi\""));
+    }
+
+    #[test]
+    fn write_run_exit_code_writes_text() {
+        let tmp = TempDir::new().unwrap();
+        let dir = create_iter_dir(tmp.path(), "X", Uuid::nil(), 1).unwrap();
+        write_run_exit_code(&dir, 7).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(dir.join("run.exit_code")).unwrap(),
+            "7\n"
+        );
     }
 
     #[test]
     fn unwritable_session_root_returns_create_dir_error() {
-        // Use a path that descends through a regular file. `create_dir_all`
-        // cannot create a directory under a non-directory parent on either
-        // unix or windows, so this is portable without relying on chmod.
         let tmp = TempDir::new().unwrap();
         let blocker = tmp.path().join("blocker");
-        fs::write(&blocker, b"i am a file").unwrap();
+        std::fs::write(&blocker, b"i am a file").unwrap();
         let bad_root = blocker.join("subdir");
-
-        match create(&bad_root, "ENG-1") {
-            Err(CaptureError::CreateDir { path, .. }) => {
-                assert!(
-                    path.starts_with(&bad_root),
-                    "error path {path:?} must point inside the offending session root {bad_root:?}"
-                );
-            }
-            other => panic!("expected CaptureError::CreateDir, got {other:?}"),
+        match create_iter_dir(&bad_root, "X", Uuid::nil(), 1) {
+            Err(CaptureError::CreateDir { .. }) => {}
+            other => panic!("expected CreateDir error, got {other:?}"),
         }
     }
 }

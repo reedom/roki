@@ -23,8 +23,19 @@ use std::process::{ExitStatus, Stdio};
 
 use tokio::process::Command;
 
-use crate::capture::CaptureLayout;
+use std::fs::File;
+use std::path::PathBuf;
+
 use crate::error::PhaseInfraError as RunnerError;
+
+// Temporary compat shim — CaptureLayout was removed from capture.rs in T12.
+// This module is deleted entirely in T13; this stub keeps it compiling.
+#[allow(dead_code)]
+pub(crate) struct CaptureLayout {
+    pub dir: PathBuf,
+    pub stdout: File,
+    pub stderr: File,
+}
 
 /// Result of spawning and awaiting a single `run.cmd` subprocess.
 ///
@@ -89,9 +100,20 @@ pub async fn spawn(cmd: &str, layout: &CaptureLayout) -> Result<RunOutcome, Runn
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::capture;
     use std::fs;
     use tempfile::TempDir;
+
+    // T12 compat: capture::create is gone; build a CaptureLayout inline.
+    // This module is deleted in T13; the helper lives only long enough to
+    // keep these tests compiling until then.
+    fn make_layout(root: &std::path::Path) -> (CaptureLayout, std::path::PathBuf) {
+        let dir = root.join("cycle-stub");
+        std::fs::create_dir_all(&dir).unwrap();
+        let stdout = File::create(dir.join("stdout")).unwrap();
+        let stderr = File::create(dir.join("stderr")).unwrap();
+        let layout = CaptureLayout { dir: dir.clone(), stdout, stderr };
+        (layout, dir)
+    }
 
     #[tokio::test]
     async fn spawn_captures_stdout_stderr_and_exit_code() {
@@ -101,8 +123,7 @@ mod tests {
         //   the expected bytes; `RunOutcome::exit_status` is 7
         //   (Req 6.5, 7.2).
         let root = TempDir::new().unwrap();
-        let layout = capture::create(root.path(), "ENG-1").unwrap();
-        let dir = layout.dir.clone();
+        let (layout, dir) = make_layout(root.path());
 
         let outcome = spawn("echo hi; echo err >&2; exit 7", &layout)
             .await
@@ -134,7 +155,7 @@ mod tests {
         // Boundary: confirm the happy-zero path is wired through the same
         // `ExitStatus` pipeline (Req 6.5).
         let root = TempDir::new().unwrap();
-        let layout = capture::create(root.path(), "ENG-1").unwrap();
+        let (layout, _dir) = make_layout(root.path());
 
         let outcome = spawn("true", &layout)
             .await
@@ -150,8 +171,7 @@ mod tests {
         // `{{ ticket.id }}` would either be substituted or rejected; under
         // `sh -c` it is a literal string the shell echoes unchanged.
         let root = TempDir::new().unwrap();
-        let layout = capture::create(root.path(), "ENG-1").unwrap();
-        let dir = layout.dir.clone();
+        let (layout, dir) = make_layout(root.path());
 
         let outcome = spawn("printf '{{ ticket.id }}'", &layout)
             .await

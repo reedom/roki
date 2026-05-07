@@ -23,7 +23,6 @@
 //! - **No-cycle outcomes** (admission rejection, rule no-match) — info-log
 //!   and `continue`; the listener stays open for the next POST.
 
-use std::io::Write as _;
 use std::net::{IpAddr, SocketAddr};
 use std::path::Path;
 use std::process::ExitCode;
@@ -34,7 +33,6 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::sync::{mpsc, oneshot};
 
 use crate::admission;
-use crate::capture;
 use crate::config::roki::RokiConfig;
 use crate::config::workflow::WorkflowConfig;
 use crate::error::{SkeletonError, WebhookError};
@@ -42,7 +40,6 @@ use crate::linear::client::{LinearClient, MeId};
 use crate::linear::ticket::NormalizedTicket;
 use crate::linear::webhook::{self, WebhookState};
 use crate::rule;
-use crate::runner;
 
 /// Run the skeleton pipeline.
 ///
@@ -157,22 +154,10 @@ pub(crate) async fn run_inner(config_path: &Path) -> Result<(), SkeletonError> {
     cycle_started.store(true, Ordering::Release);
     drop(rx);
 
-    let layout = capture::create(&cfg.paths.session_root, &admitted.ticket.id)?;
-    let temp_cmd = match &matched_rule.run {
-        crate::engine::outcome::PhaseBody::InlineCmd { cmd } => cmd.clone(),
-        other => panic!("skeleton runtime path supports only InlineCmd, got {other:?}"),
-    };
-    let _outcome = runner::spawn(&temp_cmd, &layout).await?;
-
-    // Flush the runtime-owned capture handles before signalling shutdown.
-    // The runner spawned `try_clone`'d handles for the child; the originals
-    // are intact here and may carry buffered writes the runtime emitted
-    // (none today, but the contract is documented in `runner` so future
-    // pre/post phases inherit the flush).
-    let mut layout = layout;
-    let _ = layout.stdout.flush();
-    let _ = layout.stderr.flush();
-    drop(layout);
+    // Task 13 replaces this block with engine::run_cycle. The skeleton
+    // capture::create / runner::spawn path is gone; runtime.rs is wired to
+    // the engine path in Task 13.
+    let _ = (&cfg, &admitted, &matched_rule);
 
     // 8. Graceful shutdown. Signal axum to drain in-flight handlers, then
     //    join the listener task so a 503 reply for a post-cycle POST
