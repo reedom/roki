@@ -236,6 +236,15 @@ fn parse_rule_entry(
         })
         .and_then(|val| parse_phase_body(path, workflow_dir, &format!("rule[{idx}].run"), val))?;
 
+    // Slice-2 deliberately narrows fr:04: a `[[rule.run]]` whose resolved
+    // shape is Session is unsupported. The narrowing is a scope deferral;
+    // a later slice lifts it.
+    if run.shape() == crate::engine::outcome::PhaseShape::Session {
+        return Err(WorkflowError::SessionRunUnsupported {
+            path: path.to_path_buf(),
+        });
+    }
+
     let pre = match table.get("pre") {
         Some(val) => Some(parse_phase_body(path, workflow_dir, &format!("rule[{idx}].pre"), val)?),
         None => None,
@@ -942,10 +951,15 @@ path = "phases/run.md"
 cli = "claude"
 "#;
         let toml_path = write_toml(&dir, body);
-        // Slice 2 reads the .md file at config load to pull frontmatter; the
-        // file with no frontmatter exercises the default-shape branch.
+        // Slice 2 rejects run-shape Session at load. Use `command` frontmatter
+        // so this test still exercises path resolution + cli pass-through
+        // without tripping the slice-2 narrowing.
         std::fs::create_dir_all(dir.path().join("phases")).unwrap();
-        std::fs::write(dir.path().join("phases/run.md"), "body\n").unwrap();
+        std::fs::write(
+            dir.path().join("phases/run.md"),
+            "---\nsession: \"command\"\n---\nbody\n",
+        )
+        .unwrap();
         let cfg = WorkflowConfig::load(&toml_path).expect("loads ok");
 
         let expected = dir.path().join("phases/run.md");
@@ -958,7 +972,7 @@ cli = "claude"
             } => {
                 assert_eq!(path, &expected, "relative path must be joined to workflow_dir");
                 assert_eq!(cli_override.as_deref(), Some("claude"));
-                assert_eq!(*shape, crate::engine::outcome::PhaseShape::Session);
+                assert_eq!(*shape, crate::engine::outcome::PhaseShape::Command);
                 assert!(stall_seconds.is_none());
             }
             other => panic!("expected Path body, got {other:?}"),
@@ -975,7 +989,8 @@ cli = "claude"
         let dir = tempfile::tempdir().unwrap();
         let md_dir = tempfile::tempdir().unwrap();
         let abs_md = md_dir.path().join("run.md");
-        std::fs::write(&abs_md, "body\n").unwrap();
+        // Slice 2 rejects run-shape Session at load; pin shape to `command`.
+        std::fs::write(&abs_md, "---\nsession: \"command\"\n---\nbody\n").unwrap();
         let body = format!(
             r#"
 [admission]
@@ -1007,7 +1022,7 @@ path = "{}"
                 assert!(path.is_absolute(), "absolute path must pass through");
                 assert_eq!(path, &abs_md);
                 assert!(cli_override.is_none());
-                assert_eq!(*shape, crate::engine::outcome::PhaseShape::Session);
+                assert_eq!(*shape, crate::engine::outcome::PhaseShape::Command);
                 assert!(stall_seconds.is_none());
             }
             other => panic!("expected Path body, got {other:?}"),
@@ -1130,6 +1145,42 @@ path = "foo.md"
                 assert_eq!(*stall_seconds, Some(42));
             }
             other => panic!("expected PhaseBody::Path, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn run_phase_session_shape_is_rejected() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let workflow_md = dir.path().join("foo.md");
+        std::fs::write(
+            &workflow_md,
+            "---\nsession: \"session\"\n---\nbody\n",
+        )
+        .unwrap();
+        let workflow_toml = dir.path().join("WORKFLOW.toml");
+        std::fs::write(
+            &workflow_toml,
+            r#"
+[admission]
+assignee = "me"
+
+[[admission.repos]]
+ghq = "github.com/acme/widget"
+
+[[rule]]
+[rule.when]
+status = "in_progress"
+[rule.when.labels]
+has_all = ["x"]
+
+[rule.run]
+path = "foo.md"
+"#,
+        )
+        .unwrap();
+        match WorkflowConfig::load(&workflow_toml) {
+            Err(WorkflowError::SessionRunUnsupported { .. }) => {}
+            other => panic!("expected SessionRunUnsupported, got {other:?}"),
         }
     }
 
