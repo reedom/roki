@@ -124,8 +124,9 @@ impl SessionSupervisor {
         {
             let watchdog = watchdog.clone();
             let oe = out_events.clone();
+            let sf = stderr_file.clone();
             let turn_rx = turn_rx.clone();
-            tokio::spawn(reader_task(stdout, watchdog, oe, turn_rx, dir_tx));
+            tokio::spawn(reader_task(stdout, watchdog, oe, sf, turn_rx, dir_tx));
         }
         // Stderr drain task takes stderr_file + buffer.
         {
@@ -252,12 +253,8 @@ impl SessionSupervisor {
 
         match event {
             Some(SessionEvent::Directive { value }) => {
-                // Close stderr slot for this turn — subsequent bytes go into
-                // the between-turn buffer (flushed at next begin_turn).
-                {
-                    let mut sf = self.stderr_file.lock().await;
-                    *sf = None;
-                }
+                // stderr_file already closed by reader_task synchronously with
+                // directive detection — see reader_task for rationale.
                 crate::capture::write_response_json(iter_dir, kind, &value)?;
                 let directive_str = value
                     .get("directive")
@@ -288,12 +285,8 @@ impl SessionSupervisor {
                 }
             }
             Some(SessionEvent::SchemaDrift) => {
-                // Close stderr slot for this turn — subsequent bytes go into
-                // the between-turn buffer (flushed at next begin_turn).
-                {
-                    let mut sf = self.stderr_file.lock().await;
-                    *sf = None;
-                }
+                // stderr_file already closed by reader_task synchronously with
+                // directive detection — see reader_task for rationale.
                 Ok(PhaseOutcome::Failure {
                     kind: FailureKind::SchemaDrift,
                 })
@@ -388,6 +381,7 @@ async fn reader_task(
     stdout: tokio::process::ChildStdout,
     watchdog: Watchdog,
     out_events: Arc<Mutex<Option<OutEventsFiles>>>,
+    stderr_file: Arc<Mutex<Option<std::fs::File>>>,
     turn_rx: watch::Receiver<TurnState>,
     dir_tx: mpsc::Sender<SessionEvent>,
 ) {
@@ -423,12 +417,23 @@ async fn reader_task(
                     match scan {
                         DirectiveScan::PreTerminal { value, .. }
                         | DirectiveScan::PostTerminal { value, .. } => {
+                            // Close stderr_file synchronously with directive detection
+                            // so subsequent stderr bytes land in the between-turn
+                            // buffer rather than the just-ended turn's file.
+                            {
+                                let mut sf = stderr_file.lock().await;
+                                *sf = None;
+                            }
                             if dir_tx.send(SessionEvent::Directive { value }).await.is_err() {
                                 break;
                             }
                             last_emitted_generation = state.generation;
                         }
                         DirectiveScan::SchemaDrift => {
+                            {
+                                let mut sf = stderr_file.lock().await;
+                                *sf = None;
+                            }
                             if dir_tx.send(SessionEvent::SchemaDrift).await.is_err() {
                                 break;
                             }
