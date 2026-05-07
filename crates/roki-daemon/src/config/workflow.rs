@@ -9,13 +9,14 @@
 //!
 //! Reads the minimal slice required by the skeleton: `[admission].assignee`,
 //! the first `[[admission.repos]]` entry's `ghq` (or `None` when the array is
-//! empty/missing), and the `[[rule]]` array restricted to `when.status` +
-//! `when.labels.has_all` + `run.cmd` per design `config::workflow`.
+//! empty/missing), and the `[[rule]]` array with `when.status` +
+//! `when.labels.has_all` + optional `pre`, required `run`, optional `post`
+//! phase bodies per design `config::workflow`.
 //!
-//! Validation is strict: any other `when.*` key, any `run.path` /
-//! `run.prompt`, missing `run`, or any `pre.*` / `post.*` block on a rule
-//! entry fails the load with a key-path-bearing error before the binary
-//! binds the listener (Req 5.3, 6.2).
+//! Validation is strict: any other `when.*` key, any unknown phase-body key,
+//! the `session` phase shape, or missing `run` fails the load with a
+//! key-path-bearing error before the binary binds the listener (Req 5.3,
+//! 6.2).
 //!
 //! Presence of `[[cleanup]]`, `[[on_failure]]`, and per-repo
 //! `[[admission.repos]] workflow` overrides is tolerated without evaluation
@@ -52,12 +53,15 @@ pub struct AdmissionRepo {
     pub ghq: String,
 }
 
-/// One `[[rule]]` entry restricted to the skeleton-supported shape.
+/// One `[[rule]]` entry. Restricts to command-shape phases per slice 1; the
+/// `session` shape is rejected at load time.
 #[derive(Clone, Debug)]
 pub struct Rule {
     pub when_status: String,
     pub when_labels_has_all: Vec<String>,
-    pub run_cmd: String,
+    pub pre: Option<crate::engine::outcome::PhaseBody>,
+    pub run: crate::engine::outcome::PhaseBody,
+    pub post: Option<crate::engine::outcome::PhaseBody>,
 }
 
 impl WorkflowConfig {
@@ -211,28 +215,32 @@ fn parse_rule_entry(
         }
     })?;
 
-    // Reject pre.* / post.* blocks on a rule entry; the skeleton owns only
-    // `run` per Req 6.2 / 6.3.
-    if table.contains_key("pre") {
-        return Err(WorkflowError::UnsupportedRunForm {
-            path: path.to_path_buf(),
-            key: format!("rule[{idx}].pre"),
-        });
-    }
-    if table.contains_key("post") {
-        return Err(WorkflowError::UnsupportedRunForm {
-            path: path.to_path_buf(),
-            key: format!("rule[{idx}].post"),
-        });
-    }
-
     let when = parse_when(path, idx, table)?;
-    let run_cmd = parse_run(path, idx, table)?;
+
+    // run is required, pre and post are optional.
+    let run = table
+        .get("run")
+        .ok_or_else(|| WorkflowError::UnsupportedRunForm {
+            path: path.to_path_buf(),
+            key: format!("rule[{idx}].run"),
+        })
+        .and_then(|val| parse_phase_body(path, &format!("rule[{idx}].run"), val))?;
+
+    let pre = match table.get("pre") {
+        Some(val) => Some(parse_phase_body(path, &format!("rule[{idx}].pre"), val)?),
+        None => None,
+    };
+    let post = match table.get("post") {
+        Some(val) => Some(parse_phase_body(path, &format!("rule[{idx}].post"), val)?),
+        None => None,
+    };
 
     Ok(Rule {
         when_status: when.status,
         when_labels_has_all: when.labels_has_all,
-        run_cmd,
+        pre,
+        run,
+        post,
     })
 }
 
@@ -349,60 +357,95 @@ fn parse_when_labels(
     Ok(labels)
 }
 
-fn parse_run(
+fn parse_phase_body(
     path: &Path,
-    idx: usize,
-    rule_table: &toml::map::Map<String, Value>,
-) -> Result<String, WorkflowError> {
-    let run_value = rule_table.get("run").ok_or_else(|| {
+    key_prefix: &str,
+    value: &Value,
+) -> Result<crate::engine::outcome::PhaseBody, WorkflowError> {
+    let table = value.as_table().ok_or_else(|| {
         WorkflowError::UnsupportedRunForm {
             path: path.to_path_buf(),
-            key: format!("rule[{idx}].run"),
-        }
-    })?;
-    let run_table = run_value.as_table().ok_or_else(|| {
-        WorkflowError::UnsupportedRunForm {
-            path: path.to_path_buf(),
-            key: format!("rule[{idx}].run"),
+            key: key_prefix.to_string(),
         }
     })?;
 
-    // Reject `run.path` and `run.prompt` explicitly (Req 6.2). Any other
-    // unsupported key inside `run` is also rejected — the skeleton owns
-    // only `run.cmd`.
-    for key in run_table.keys() {
+    // session = "session" is recognised but not implemented in slice 1.
+    if let Some(session_val) = table.get("session") {
+        let kind = session_val.as_str().unwrap_or("");
+        return Err(WorkflowError::UnsupportedRunForm {
+            path: path.to_path_buf(),
+            key: format!("{key_prefix}.session={kind}"),
+        });
+    }
+
+    // Allow-list of recognised phase-body keys.
+    for key in table.keys() {
         match key.as_str() {
-            "cmd" => {}
+            "cmd" | "prompt" | "path" | "cli" => {}
             other => {
                 return Err(WorkflowError::UnsupportedRunForm {
                     path: path.to_path_buf(),
-                    key: format!("rule[{idx}].run.{other}"),
+                    key: format!("{key_prefix}.{other}"),
                 });
             }
         }
     }
 
-    let cmd = run_table
-        .get("cmd")
-        .ok_or_else(|| WorkflowError::UnsupportedRunForm {
-            path: path.to_path_buf(),
-            key: format!("rule[{idx}].run.cmd"),
-        })?
-        .as_str()
-        .ok_or_else(|| WorkflowError::UnsupportedRunForm {
-            path: path.to_path_buf(),
-            key: format!("rule[{idx}].run.cmd"),
-        })?
-        .to_string();
+    let has_cmd = table.contains_key("cmd");
+    let has_prompt = table.contains_key("prompt");
+    let has_path = table.contains_key("path");
 
-    if cmd.is_empty() {
+    let count = [has_cmd, has_prompt, has_path]
+        .iter()
+        .filter(|present| **present)
+        .count();
+    if count != 1 {
         return Err(WorkflowError::UnsupportedRunForm {
             path: path.to_path_buf(),
-            key: format!("rule[{idx}].run.cmd"),
+            key: key_prefix.to_string(),
         });
     }
 
-    Ok(cmd)
+    if has_cmd {
+        let cmd = table
+            .get("cmd")
+            .and_then(Value::as_str)
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| WorkflowError::UnsupportedRunForm {
+                path: path.to_path_buf(),
+                key: format!("{key_prefix}.cmd"),
+            })?
+            .to_string();
+        Ok(crate::engine::outcome::PhaseBody::InlineCmd { cmd })
+    } else if has_prompt {
+        let prompt = table
+            .get("prompt")
+            .and_then(Value::as_str)
+            .ok_or_else(|| WorkflowError::UnsupportedRunForm {
+                path: path.to_path_buf(),
+                key: format!("{key_prefix}.prompt"),
+            })?
+            .to_string();
+        Ok(crate::engine::outcome::PhaseBody::InlinePrompt { prompt })
+    } else {
+        let path_str = table
+            .get("path")
+            .and_then(Value::as_str)
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| WorkflowError::UnsupportedRunForm {
+                path: path.to_path_buf(),
+                key: format!("{key_prefix}.path"),
+            })?
+            .to_string();
+        let cli_override = table.get("cli").and_then(Value::as_str).map(str::to_string);
+        // Path variant currently stores the path string in `body`. Task 10
+        // executor reads the file at launch and renders the post-frontmatter
+        // body.
+        Ok(crate::engine::outcome::PhaseBody::Path {
+            body: path_str,
+            cli_override,
+        })
+    }
 }
 
 // `_path` parameter naming is intentional on the helper that does not need
@@ -452,7 +495,12 @@ cmd = "echo hello"
         let rule = &cfg.rules[0];
         assert_eq!(rule.when_status, "In Progress");
         assert_eq!(rule.when_labels_has_all, vec!["needs-impl".to_string()]);
-        assert_eq!(rule.run_cmd, "echo hello");
+        match &rule.run {
+            crate::engine::outcome::PhaseBody::InlineCmd { cmd } => assert_eq!(cmd, "echo hello"),
+            other => panic!("expected InlineCmd, got {other:?}"),
+        }
+        assert!(rule.pre.is_none());
+        assert!(rule.post.is_none());
     }
 
     #[test]
@@ -487,37 +535,6 @@ cmd = "echo hi"
                 assert!(key.starts_with("rule[0]"), "key path: {key}");
             }
             other => panic!("expected UnsupportedWhen, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn rejects_run_path_with_key_path() {
-        let dir = tempfile::tempdir().unwrap();
-        let body = r#"
-[admission]
-assignee = "me"
-
-[[admission.repos]]
-ghq = "github.com/acme/widget"
-
-[[rule]]
-[rule.when]
-status = "In Progress"
-[rule.when.labels]
-has_all = []
-[rule.run]
-path = "scripts/build.sh"
-"#;
-        let path = write_toml(&dir, body);
-
-        let err = WorkflowConfig::load(&path)
-            .expect_err("run.path must be rejected");
-        match err {
-            WorkflowError::UnsupportedRunForm { key, .. } => {
-                assert!(key.contains("run.path"), "key path: {key}");
-                assert!(key.starts_with("rule[0]"), "key path: {key}");
-            }
-            other => panic!("expected UnsupportedRunForm, got {other:?}"),
         }
     }
 
@@ -665,7 +682,7 @@ cmd = "echo hi"
     }
 
     #[test]
-    fn rejects_run_prompt() {
+    fn rejects_run_with_unknown_key() {
         let dir = tempfile::tempdir().unwrap();
         let body = r#"
 [admission]
@@ -676,26 +693,26 @@ ghq = "github.com/acme/widget"
 
 [[rule]]
 [rule.when]
-status = "In Progress"
+status = "in_progress"
 [rule.when.labels]
 has_all = []
 [rule.run]
-prompt = "do the thing"
+cmd = "echo hi"
+foo = "bar"
 "#;
         let path = write_toml(&dir, body);
 
-        let err = WorkflowConfig::load(&path)
-            .expect_err("run.prompt must be rejected");
+        let err = WorkflowConfig::load(&path).expect_err("unknown run key rejected");
         match err {
             WorkflowError::UnsupportedRunForm { key, .. } => {
-                assert!(key.contains("run.prompt"), "key path: {key}");
+                assert!(key.contains("foo"), "key path: {key}");
             }
             other => panic!("expected UnsupportedRunForm, got {other:?}"),
         }
     }
 
     #[test]
-    fn rejects_pre_block_on_rule() {
+    fn accepts_pre_run_post_inline_cmds() {
         let dir = tempfile::tempdir().unwrap();
         let body = r#"
 [admission]
@@ -705,23 +722,122 @@ assignee = "me"
 ghq = "github.com/acme/widget"
 
 [[rule]]
-[rule.pre]
-cmd = "echo pre"
 [rule.when]
-status = "In Progress"
+status = "in_progress"
 [rule.when.labels]
 has_all = []
+[rule.pre]
+cmd = "echo pre"
 [rule.run]
-cmd = "echo hi"
+cmd = "echo run"
+[rule.post]
+cmd = "echo post"
 "#;
         let path = write_toml(&dir, body);
 
-        let err = WorkflowConfig::load(&path)
-            .expect_err("rule.pre must be rejected");
+        let cfg = WorkflowConfig::load(&path).expect("loads ok");
+        let rule = &cfg.rules[0];
+        match &rule.pre {
+            Some(crate::engine::outcome::PhaseBody::InlineCmd { cmd }) => assert_eq!(cmd, "echo pre"),
+            other => panic!("expected pre InlineCmd, got {other:?}"),
+        }
+        match &rule.run {
+            crate::engine::outcome::PhaseBody::InlineCmd { cmd } => assert_eq!(cmd, "echo run"),
+            other => panic!("expected run InlineCmd, got {other:?}"),
+        }
+        match &rule.post {
+            Some(crate::engine::outcome::PhaseBody::InlineCmd { cmd }) => assert_eq!(cmd, "echo post"),
+            other => panic!("expected post InlineCmd, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn accepts_inline_prompt_form() {
+        let dir = tempfile::tempdir().unwrap();
+        let body = r#"
+[admission]
+assignee = "me"
+
+[[admission.repos]]
+ghq = "github.com/acme/widget"
+
+[[rule]]
+[rule.when]
+status = "in_progress"
+[rule.when.labels]
+has_all = []
+[rule.pre]
+prompt = "decide what to do"
+[rule.run]
+cmd = "echo run"
+"#;
+        let path = write_toml(&dir, body);
+
+        let cfg = WorkflowConfig::load(&path).expect("loads ok");
+        match &cfg.rules[0].pre {
+            Some(crate::engine::outcome::PhaseBody::InlinePrompt { prompt }) => {
+                assert_eq!(prompt, "decide what to do");
+            }
+            other => panic!("expected pre InlinePrompt, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn rejects_session_shape() {
+        let dir = tempfile::tempdir().unwrap();
+        let body = r#"
+[admission]
+assignee = "me"
+
+[[admission.repos]]
+ghq = "github.com/acme/widget"
+
+[[rule]]
+[rule.when]
+status = "in_progress"
+[rule.when.labels]
+has_all = []
+[rule.pre]
+session = "session"
+prompt = "x"
+[rule.run]
+cmd = "echo run"
+"#;
+        let path = write_toml(&dir, body);
+
+        let err = WorkflowConfig::load(&path).expect_err("session shape rejected");
         match err {
             WorkflowError::UnsupportedRunForm { key, .. } => {
-                assert!(key.contains("pre"), "key path: {key}");
+                assert!(key.contains("session"), "key path: {key}");
             }
+            other => panic!("expected UnsupportedRunForm, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn rejects_run_with_both_cmd_and_prompt() {
+        let dir = tempfile::tempdir().unwrap();
+        let body = r#"
+[admission]
+assignee = "me"
+
+[[admission.repos]]
+ghq = "github.com/acme/widget"
+
+[[rule]]
+[rule.when]
+status = "in_progress"
+[rule.when.labels]
+has_all = []
+[rule.run]
+cmd = "echo a"
+prompt = "do x"
+"#;
+        let path = write_toml(&dir, body);
+
+        let err = WorkflowConfig::load(&path).expect_err("both cmd+prompt is ambiguous");
+        match err {
+            WorkflowError::UnsupportedRunForm { .. } => {}
             other => panic!("expected UnsupportedRunForm, got {other:?}"),
         }
     }

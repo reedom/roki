@@ -82,7 +82,9 @@ mod tests {
         Rule {
             when_status: status.to_string(),
             when_labels_has_all: has_all.iter().map(|s| s.to_string()).collect(),
-            run_cmd: cmd.to_string(),
+            pre: None,
+            run: crate::engine::outcome::PhaseBody::InlineCmd { cmd: cmd.to_string() },
+            post: None,
         }
     }
 
@@ -93,7 +95,10 @@ mod tests {
 
         let hit = first_match(&t, &rules)
             .expect("rule must match on status + has_all containment");
-        assert_eq!(hit.run_cmd, "echo a");
+        match &hit.run {
+            crate::engine::outcome::PhaseBody::InlineCmd { cmd } => assert_eq!(cmd, "echo a"),
+            other => panic!("expected InlineCmd, got {other:?}"),
+        }
     }
 
     #[test]
@@ -124,7 +129,10 @@ mod tests {
         ];
 
         let hit = first_match(&t, &rules).expect("first rule must match");
-        assert_eq!(hit.run_cmd, "echo first");
+        match &hit.run {
+            crate::engine::outcome::PhaseBody::InlineCmd { cmd } => assert_eq!(cmd, "echo first"),
+            other => panic!("expected InlineCmd, got {other:?}"),
+        }
     }
 
     #[test]
@@ -159,6 +167,9 @@ mod tests {
         ];
 
         let hit = first_match(&t, &rules).expect("second rule must match");
-        assert_eq!(hit.run_cmd, "echo hit");
+        match &hit.run {
+            crate::engine::outcome::PhaseBody::InlineCmd { cmd } => assert_eq!(cmd, "echo hit"),
+            other => panic!("expected InlineCmd, got {other:?}"),
+        }
     }
 }

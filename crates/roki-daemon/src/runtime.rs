@@ -158,7 +158,11 @@ pub(crate) async fn run_inner(config_path: &Path) -> Result<(), SkeletonError> {
     drop(rx);
 
     let layout = capture::create(&cfg.paths.session_root, &admitted.ticket.id)?;
-    let _outcome = runner::spawn(&matched_rule.run_cmd, &layout).await?;
+    let temp_cmd = match &matched_rule.run {
+        crate::engine::outcome::PhaseBody::InlineCmd { cmd } => cmd.clone(),
+        other => panic!("skeleton runtime path supports only InlineCmd, got {other:?}"),
+    };
+    let _outcome = runner::spawn(&temp_cmd, &layout).await?;
 
     // Flush the runtime-owned capture handles before signalling shutdown.
     // The runner spawned `try_clone`'d handles for the child; the originals
