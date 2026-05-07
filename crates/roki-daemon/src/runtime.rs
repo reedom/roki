@@ -148,28 +148,50 @@ pub(crate) async fn run_inner(config_path: &Path) -> Result<(), SkeletonError> {
         }
     };
 
-    // 7. Lock the cycle, drop the receiver, run the cycle. Setting the
-    //    atomic before dropping the receiver guarantees every subsequent
-    //    POST observes 503 (atomic == true OR `TrySendError::Closed`).
+    // 7. Lock the cycle, drop the receiver, dispatch into the engine.
     cycle_started.store(true, Ordering::Release);
     drop(rx);
 
-    // Task 13 replaces this block with engine::run_cycle. The skeleton
-    // capture::create / runner::spawn path is gone; runtime.rs is wired to
-    // the engine path in Task 13.
-    let _ = (&cfg, &admitted, &matched_rule);
+    let executor = crate::engine::CommandPhaseExecutor {
+        default_cli: cfg.default_ai_command.cli.clone(),
+    };
+    let outcome = crate::engine::run_cycle(
+        &executor,
+        &admitted,
+        &matched_rule,
+        &cfg.paths.session_root,
+        &cfg,
+    )
+    .await?;
 
-    // 8. Graceful shutdown. Signal axum to drain in-flight handlers, then
-    //    join the listener task so a 503 reply for a post-cycle POST
-    //    actually reaches the client before the binary exits.
+    // 8. Graceful shutdown.
     let _ = shutdown_tx.send(());
-    match listener_handle.await {
-        Ok(Ok(())) => Ok(()),
-        Ok(Err(err)) => Err(SkeletonError::Webhook(err)),
-        Err(join_err) => Err(SkeletonError::Webhook(WebhookError::BindFailed {
-            addr: addr.to_string(),
-            source: std::io::Error::other(join_err),
-        })),
+    let listener_result = listener_handle.await;
+
+    // Cycle failures terminate the binary with exit 1.
+    match outcome {
+        crate::engine::CycleOutcome::Completed { .. } => match listener_result {
+            Ok(Ok(())) => Ok(()),
+            Ok(Err(err)) => Err(SkeletonError::Webhook(err)),
+            Err(join_err) => Err(SkeletonError::Webhook(WebhookError::BindFailed {
+                addr: addr.to_string(),
+                source: std::io::Error::other(join_err),
+            })),
+        },
+        crate::engine::CycleOutcome::Failed { kind, iter } => {
+            tracing::error!(
+                failure_kind = %kind.as_str(),
+                iter,
+                "cycle failed"
+            );
+            let _ = listener_result;
+            Err(SkeletonError::PhaseInfra(
+                crate::error::PhaseInfraError::CycleFailed {
+                    kind: kind.as_str(),
+                    iter,
+                },
+            ))
+        }
     }
 }
 

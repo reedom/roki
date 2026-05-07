@@ -8,7 +8,6 @@ mod engine;
 pub mod error;
 mod linear;
 mod rule;
-mod runner;
 mod runtime;
 
 #[tokio::main]

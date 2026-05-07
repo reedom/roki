@@ -193,6 +193,12 @@ pub enum PhaseInfraError {
     #[error("ghq base path not found for '{ghq}'")]
     RepoNotFound { ghq: String },
 
+    #[error("cycle failed: {kind} at iter {iter}")]
+    CycleFailed {
+        kind: &'static str,
+        iter: u32,
+    },
+
     #[error(transparent)]
     Capture(#[from] CaptureError),
 }
