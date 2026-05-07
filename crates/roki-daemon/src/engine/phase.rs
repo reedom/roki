@@ -379,26 +379,44 @@ async fn resolve_ghq_base(ghq: &str) -> Result<std::path::PathBuf, PhaseInfraErr
 }
 
 /// Tee one process's stdout into the on-disk capture file while ticking the
-/// watchdog on every read. Task 11 will also forward bytes into the
-/// run-terminal scanner; for now `_kind` and `_iter_dir` are placeholders so
-/// the wiring is a single-call addition.
+/// watchdog on every read. During `Run`, every line is also fed to the
+/// run-terminal scanner; the first claude/codex `result` event is
+/// pretty-printed to `<iter>/run.terminal.json` mid-stream so downstream
+/// readers don't have to wait for child exit. Pre/post phases skip the scan
+/// because the slice-1 directive scan still consumes `<phase>.stdout` after
+/// exit.
 async fn tee_stdout(
-    mut stdout_pipe: tokio::process::ChildStdout,
+    stdout_pipe: tokio::process::ChildStdout,
     mut raw_writer: std::fs::File,
     watchdog: crate::engine::stall::Watchdog,
-    _kind: crate::engine::outcome::PhaseKind,
-    _iter_dir: std::path::PathBuf,
+    kind: crate::engine::outcome::PhaseKind,
+    iter_dir: std::path::PathBuf,
 ) {
+    use crate::engine::stream::{scan_run_terminal_line, LineSplitter};
     use std::io::Write;
-    use tokio::io::AsyncReadExt;
-    let mut buf = [0u8; 4096];
+
+    let mut splitter = LineSplitter::new(stdout_pipe);
+    let mut terminal_written = false;
+
     loop {
-        match stdout_pipe.read(&mut buf).await {
-            Ok(0) => break,
-            Ok(n) => {
-                watchdog.tick_stdout();
-                let _ = raw_writer.write_all(&buf[..n]);
+        let line_res = splitter.next_line().await;
+        watchdog.tick_stdout();
+        match line_res {
+            Ok(Some(line)) => {
+                let _ = raw_writer.write_all(line.as_bytes());
+                let _ = raw_writer.write_all(b"\n");
+                if matches!(kind, crate::engine::outcome::PhaseKind::Run) && !terminal_written {
+                    if let Some(value) = scan_run_terminal_line(&line) {
+                        if let Err(err) = crate::capture::write_run_terminal_json(&iter_dir, &value)
+                        {
+                            tracing::warn!(target: "roki.engine.run_terminal", error = ?err, "run.terminal.json write failed");
+                        } else {
+                            terminal_written = true;
+                        }
+                    }
+                }
             }
+            Ok(None) => break,
             Err(_) => break,
         }
     }
@@ -733,6 +751,73 @@ mod tests {
     fn strip_frontmatter_passthrough_when_absent() {
         let raw = "no frontmatter here";
         assert_eq!(super::strip_frontmatter(raw), raw);
+    }
+
+    #[tokio::test]
+    async fn run_phase_extracts_terminal_result_event() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let iter_dir = crate::capture::create_iter_dir(
+            tmp.path(),
+            "ENG-1",
+            uuid::Uuid::nil(),
+            1,
+        )
+        .unwrap();
+        let body = crate::engine::outcome::PhaseBody::InlineCmd {
+            cmd: r#"printf '%s\n' '{"type":"thinking"}' '{"type":"result","is_error":false,"result":"ok"}'"#
+                .to_string(),
+        };
+        let ctx = PhaseContext::new(&admitted(), Uuid::nil(), &cfg());
+        let cwd = tmp.path().to_path_buf();
+        let outcome = super::execute_at(
+            "echo unused",
+            crate::engine::outcome::PhaseKind::Run,
+            &body,
+            &ctx,
+            &iter_dir,
+            &cwd,
+            30,
+        )
+        .await
+        .unwrap();
+        match outcome {
+            crate::engine::outcome::PhaseOutcome::RunDone { exit_code, .. } => {
+                assert_eq!(exit_code, 0);
+            }
+            other => panic!("expected RunDone, got {other:?}"),
+        }
+        let body_text = std::fs::read_to_string(iter_dir.join("run.terminal.json")).unwrap();
+        assert!(body_text.contains("\"is_error\""));
+        assert!(body_text.contains("\"result\""));
+    }
+
+    #[tokio::test]
+    async fn run_phase_omits_terminal_when_no_result_event() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let iter_dir = crate::capture::create_iter_dir(
+            tmp.path(),
+            "ENG-1",
+            uuid::Uuid::nil(),
+            1,
+        )
+        .unwrap();
+        let body = crate::engine::outcome::PhaseBody::InlineCmd {
+            cmd: "echo plain".to_string(),
+        };
+        let ctx = PhaseContext::new(&admitted(), Uuid::nil(), &cfg());
+        let cwd = tmp.path().to_path_buf();
+        let _ = super::execute_at(
+            "echo unused",
+            crate::engine::outcome::PhaseKind::Run,
+            &body,
+            &ctx,
+            &iter_dir,
+            &cwd,
+            30,
+        )
+        .await
+        .unwrap();
+        assert!(!iter_dir.join("run.terminal.json").exists());
     }
 
     #[tokio::test]
