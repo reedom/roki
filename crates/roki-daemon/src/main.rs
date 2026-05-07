@@ -4,6 +4,7 @@ mod admission;
 mod capture;
 mod cli;
 mod config;
+mod engine;
 pub mod error;
 mod linear;
 mod rule;
