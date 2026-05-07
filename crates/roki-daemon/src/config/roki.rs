@@ -82,11 +82,19 @@ pub struct DefaultAiSessionSection {
     pub cli: Option<String>,
 }
 
-/// `[engine]` section. No fields are required at the skeleton level;
-/// canonical keys (`max_iterations`) are accepted-without-applying.
-#[derive(Clone, Debug, Default)]
+/// `[engine]` section.
+///
+/// `max_iterations` is enforced at load time: absent → default 10,
+/// present but zero → `TypeMismatch` error.
+#[derive(Clone, Debug)]
 pub struct EngineSection {
-    pub max_iterations: Option<u32>,
+    pub max_iterations: u32,
+}
+
+impl Default for EngineSection {
+    fn default() -> Self {
+        Self { max_iterations: 10 }
+    }
 }
 
 /// `[paths]` section.
@@ -266,9 +274,7 @@ impl RawRokiConfig {
             )?,
         };
 
-        let engine = EngineSection {
-            max_iterations: raw_engine.max_iterations,
-        };
+        let engine = parse_engine(path, raw_engine)?;
 
         let log = LogSection {
             destination: raw_log.destination,
@@ -287,6 +293,21 @@ impl RawRokiConfig {
             default_ai_session: raw_default_ai.session,
         })
     }
+}
+
+fn parse_engine(path: &Path, raw: RawEngine) -> Result<EngineSection, RokiConfigError> {
+    let max_iterations = match raw.max_iterations {
+        None => 10,
+        Some(0) => {
+            return Err(RokiConfigError::TypeMismatch {
+                path: path.to_path_buf(),
+                key: "engine.max_iterations".to_string(),
+                expected: "u32 >= 1",
+            });
+        }
+        Some(n) => n,
+    };
+    Ok(EngineSection { max_iterations })
 }
 
 fn required_field<T>(
@@ -514,5 +535,65 @@ session_root = "/var/roki/sessions"
             }
             other => panic!("expected MissingFile, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn max_iterations_defaults_to_ten_when_absent() {
+        let dir = tempfile::tempdir().unwrap();
+        let toml_body = r#"
+[linear]
+token = "x"
+
+[linear.webhook]
+bind = "127.0.0.1"
+port = 8000
+
+[default.ai.command]
+cli = "echo"
+
+[engine]
+
+[paths]
+workflow = "/tmp/w.toml"
+session_root = "/tmp/sess"
+
+[log]
+"#;
+        let path = dir.path().join("roki.toml");
+        std::fs::write(&path, toml_body).unwrap();
+
+        let cfg = RokiConfig::load(&path).expect("load");
+        assert_eq!(cfg.engine.max_iterations, 10);
+    }
+
+    #[test]
+    fn max_iterations_zero_is_rejected() {
+        let dir = tempfile::tempdir().unwrap();
+        let toml_body = r#"
+[linear]
+token = "x"
+
+[linear.webhook]
+bind = "127.0.0.1"
+port = 8000
+
+[default.ai.command]
+cli = "echo"
+
+[engine]
+max_iterations = 0
+
+[paths]
+workflow = "/tmp/w.toml"
+session_root = "/tmp/sess"
+
+[log]
+"#;
+        let path = dir.path().join("roki.toml");
+        std::fs::write(&path, toml_body).unwrap();
+
+        let err = RokiConfig::load(&path).expect_err("rejects zero");
+        let msg = format!("{err}");
+        assert!(msg.contains("max_iterations"), "msg: {msg}");
     }
 }
