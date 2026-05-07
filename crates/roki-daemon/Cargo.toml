@@ -27,6 +27,10 @@ path = "tests/e2e/session_smoke.rs"
 name = "stall_smoke"
 path = "tests/e2e/stall_smoke.rs"
 
+[[test]]
+name = "run_terminal_smoke"
+path = "tests/e2e/run_terminal_smoke.rs"
+
 [features]
 # Test-only seam: gates the `ROKI_LINEAR_GRAPHQL_URL` env-var override inside
 # `linear::client` so the release binary always targets the hardcoded endpoint.
