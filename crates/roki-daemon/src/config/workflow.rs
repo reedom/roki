@@ -22,7 +22,7 @@
 //! `[[admission.repos]] workflow` overrides is tolerated without evaluation
 //! per Req 2.5.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use toml::Value;
 
@@ -98,7 +98,12 @@ impl WorkflowConfig {
 
         let admission = parse_admission(path, &root)?;
         let repo = parse_first_repo(path, &root)?;
-        let rules = parse_rules(path, &root)?;
+        // The workflow file's parent directory is the base for resolving
+        // relative `path = "..."` phase bodies. Falling back to "." keeps
+        // operator paths interpretable when the workflow file path itself
+        // has no parent (e.g. a bare filename).
+        let workflow_dir = path.parent().map(Path::to_path_buf).unwrap_or_else(|| PathBuf::from("."));
+        let rules = parse_rules(path, &workflow_dir, &root)?;
 
         Ok(WorkflowConfig {
             admission,
@@ -182,7 +187,11 @@ fn parse_first_repo(
     Ok(Some(AdmissionRepo { ghq }))
 }
 
-fn parse_rules(path: &Path, root: &Value) -> Result<Vec<Rule>, WorkflowError> {
+fn parse_rules(
+    path: &Path,
+    workflow_dir: &Path,
+    root: &Value,
+) -> Result<Vec<Rule>, WorkflowError> {
     let Some(rule_value) = root.get("rule") else {
         // No rules is not a load-time error; rule no-match is a runtime
         // info-log per Req 5.4.
@@ -198,13 +207,14 @@ fn parse_rules(path: &Path, root: &Value) -> Result<Vec<Rule>, WorkflowError> {
 
     let mut rules = Vec::with_capacity(raw_rules.len());
     for (idx, entry) in raw_rules.iter().enumerate() {
-        rules.push(parse_rule_entry(path, idx, entry)?);
+        rules.push(parse_rule_entry(path, workflow_dir, idx, entry)?);
     }
     Ok(rules)
 }
 
 fn parse_rule_entry(
     path: &Path,
+    workflow_dir: &Path,
     idx: usize,
     entry: &Value,
 ) -> Result<Rule, WorkflowError> {
@@ -224,14 +234,14 @@ fn parse_rule_entry(
             path: path.to_path_buf(),
             key: format!("rule[{idx}].run"),
         })
-        .and_then(|val| parse_phase_body(path, &format!("rule[{idx}].run"), val))?;
+        .and_then(|val| parse_phase_body(path, workflow_dir, &format!("rule[{idx}].run"), val))?;
 
     let pre = match table.get("pre") {
-        Some(val) => Some(parse_phase_body(path, &format!("rule[{idx}].pre"), val)?),
+        Some(val) => Some(parse_phase_body(path, workflow_dir, &format!("rule[{idx}].pre"), val)?),
         None => None,
     };
     let post = match table.get("post") {
-        Some(val) => Some(parse_phase_body(path, &format!("rule[{idx}].post"), val)?),
+        Some(val) => Some(parse_phase_body(path, workflow_dir, &format!("rule[{idx}].post"), val)?),
         None => None,
     };
 
@@ -359,6 +369,7 @@ fn parse_when_labels(
 
 fn parse_phase_body(
     path: &Path,
+    workflow_dir: &Path,
     key_prefix: &str,
     value: &Value,
 ) -> Result<crate::engine::outcome::PhaseBody, WorkflowError> {
@@ -378,7 +389,9 @@ fn parse_phase_body(
         });
     }
 
-    // Allow-list of recognised phase-body keys.
+    // Allow-list of recognised phase-body keys. `cli` is honored only for the
+    // `path` form per FR 02; pairing it with `cmd` or `prompt` was previously
+    // accepted and silently ignored, which masked operator typos.
     for key in table.keys() {
         match key.as_str() {
             "cmd" | "prompt" | "path" | "cli" => {}
@@ -394,6 +407,7 @@ fn parse_phase_body(
     let has_cmd = table.contains_key("cmd");
     let has_prompt = table.contains_key("prompt");
     let has_path = table.contains_key("path");
+    let has_cli = table.contains_key("cli");
 
     let count = [has_cmd, has_prompt, has_path]
         .iter()
@@ -403,6 +417,16 @@ fn parse_phase_body(
         return Err(WorkflowError::UnsupportedRunForm {
             path: path.to_path_buf(),
             key: key_prefix.to_string(),
+        });
+    }
+
+    // `cli` is meaningful only with `path`. Reject pairings with `cmd` or
+    // `prompt` so the operator does not author a `cli` that the executor
+    // silently drops.
+    if has_cli && !has_path {
+        return Err(WorkflowError::UnsupportedRunForm {
+            path: path.to_path_buf(),
+            key: format!("{key_prefix}.cli"),
         });
     }
 
@@ -421,6 +445,7 @@ fn parse_phase_body(
         let prompt = table
             .get("prompt")
             .and_then(Value::as_str)
+            .filter(|s| !s.is_empty())
             .ok_or_else(|| WorkflowError::UnsupportedRunForm {
                 path: path.to_path_buf(),
                 key: format!("{key_prefix}.prompt"),
@@ -435,22 +460,32 @@ fn parse_phase_body(
             .ok_or_else(|| WorkflowError::UnsupportedRunForm {
                 path: path.to_path_buf(),
                 key: format!("{key_prefix}.path"),
-            })?
-            .to_string();
-        let cli_override = table.get("cli").and_then(Value::as_str).map(str::to_string);
-        // Path variant currently stores the path string in `body`. Task 10
-        // executor reads the file at launch and renders the post-frontmatter
-        // body.
+            })?;
+        let resolved = resolve_workflow_path(workflow_dir, path_str);
+        let cli_override = table
+            .get("cli")
+            .and_then(Value::as_str)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string);
         Ok(crate::engine::outcome::PhaseBody::Path {
-            body: path_str,
+            path: resolved,
             cli_override,
         })
     }
 }
 
-// `_path` parameter naming is intentional on the helper that does not need
-// the path: keeping a uniform helper signature aids future per-key error
-// uplift without touching call sites.
+/// Resolve a `path = "..."` value against the workflow file's parent.
+/// Absolute paths pass through unchanged; relative paths join the workflow
+/// directory so the executor reads the same file regardless of the daemon's
+/// current working directory.
+fn resolve_workflow_path(workflow_dir: &Path, path_str: &str) -> PathBuf {
+    let p = PathBuf::from(path_str);
+    if p.is_absolute() {
+        p
+    } else {
+        workflow_dir.join(p)
+    }
+}
 
 #[cfg(test)]
 mod tests {
@@ -861,6 +896,131 @@ ghq = "github.com/acme/widget"
                 assert_eq!(key, "admission.assignee");
             }
             other => panic!("expected MissingField, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn path_form_is_resolved_against_workflow_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        let body = r#"
+[admission]
+assignee = "me"
+
+[[admission.repos]]
+ghq = "github.com/acme/widget"
+
+[[rule]]
+[rule.when]
+status = "in_progress"
+[rule.when.labels]
+has_all = []
+[rule.run]
+path = "phases/run.md"
+cli = "claude"
+"#;
+        let toml_path = write_toml(&dir, body);
+        let cfg = WorkflowConfig::load(&toml_path).expect("loads ok");
+
+        let expected = dir.path().join("phases/run.md");
+        match &cfg.rules[0].run {
+            crate::engine::outcome::PhaseBody::Path { path, cli_override } => {
+                assert_eq!(path, &expected, "relative path must be joined to workflow_dir");
+                assert_eq!(cli_override.as_deref(), Some("claude"));
+            }
+            other => panic!("expected Path body, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn path_form_absolute_path_is_preserved() {
+        let dir = tempfile::tempdir().unwrap();
+        // Use a literal absolute path to keep the assertion stable across
+        // environments. The body just needs to be a path that survives
+        // loading; the executor reads the file at exec time, not the loader.
+        let body = r#"
+[admission]
+assignee = "me"
+
+[[admission.repos]]
+ghq = "github.com/acme/widget"
+
+[[rule]]
+[rule.when]
+status = "in_progress"
+[rule.when.labels]
+has_all = []
+[rule.run]
+path = "/abs/phases/run.md"
+"#;
+        let toml_path = write_toml(&dir, body);
+        let cfg = WorkflowConfig::load(&toml_path).expect("loads ok");
+
+        match &cfg.rules[0].run {
+            crate::engine::outcome::PhaseBody::Path { path, cli_override } => {
+                assert_eq!(path, &PathBuf::from("/abs/phases/run.md"));
+                assert!(cli_override.is_none());
+            }
+            other => panic!("expected Path body, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn rejects_cli_paired_with_inline_cmd() {
+        let dir = tempfile::tempdir().unwrap();
+        let body = r#"
+[admission]
+assignee = "me"
+
+[[admission.repos]]
+ghq = "github.com/acme/widget"
+
+[[rule]]
+[rule.when]
+status = "in_progress"
+[rule.when.labels]
+has_all = []
+[rule.run]
+cmd = "echo run"
+cli = "claude"
+"#;
+        let toml_path = write_toml(&dir, body);
+        let err = WorkflowConfig::load(&toml_path)
+            .expect_err("cli paired with cmd must be rejected");
+        match err {
+            WorkflowError::UnsupportedRunForm { key, .. } => {
+                assert!(key.contains("cli"), "key path must mention cli: {key}");
+            }
+            other => panic!("expected UnsupportedRunForm, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn rejects_cli_paired_with_inline_prompt() {
+        let dir = tempfile::tempdir().unwrap();
+        let body = r#"
+[admission]
+assignee = "me"
+
+[[admission.repos]]
+ghq = "github.com/acme/widget"
+
+[[rule]]
+[rule.when]
+status = "in_progress"
+[rule.when.labels]
+has_all = []
+[rule.run]
+prompt = "do x"
+cli = "claude"
+"#;
+        let toml_path = write_toml(&dir, body);
+        let err = WorkflowConfig::load(&toml_path)
+            .expect_err("cli paired with prompt must be rejected");
+        match err {
+            WorkflowError::UnsupportedRunForm { key, .. } => {
+                assert!(key.contains("cli"), "key path must mention cli: {key}");
+            }
+            other => panic!("expected UnsupportedRunForm, got {other:?}"),
         }
     }
 

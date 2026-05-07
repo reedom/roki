@@ -184,12 +184,23 @@ pub(crate) async fn run_inner(config_path: &Path) -> Result<(), SkeletonError> {
                 iter,
                 "cycle failed"
             );
-            let _ = listener_result;
+            match listener_result {
+                Ok(Ok(())) => {}
+                Ok(Err(err)) => {
+                    tracing::error!(
+                        error = %err,
+                        "webhook listener errored after cycle failure"
+                    );
+                }
+                Err(join_err) => {
+                    tracing::error!(
+                        error = %join_err,
+                        "webhook listener task panicked after cycle failure"
+                    );
+                }
+            }
             Err(SkeletonError::PhaseInfra(
-                crate::error::PhaseInfraError::CycleFailed {
-                    kind: kind.as_str(),
-                    iter,
-                },
+                crate::error::PhaseInfraError::CycleFailed { kind, iter },
             ))
         }
     }

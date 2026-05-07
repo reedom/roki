@@ -14,6 +14,8 @@ use std::path::PathBuf;
 
 use thiserror::Error;
 
+use crate::engine::outcome::{FailureKind, PhaseKind};
+
 /// Errors raised while loading `roki.toml`.
 ///
 /// Covers requirement 1.2 (missing config path) and 2.3 (schema validation
@@ -190,12 +192,36 @@ pub enum PhaseInfraError {
         source: std::io::Error,
     },
 
+    #[error("phase failed to read workflow body at {path}: {source}")]
+    WorkflowBodyUnreadable {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+
+    #[error("phase '{cmd}' has no stdin handle but a rendered stdin body was prepared")]
+    StdinUnavailable { cmd: String },
+
+    #[error("phase failed to write stdin for '{cmd}': {source}")]
+    StdinWrite {
+        cmd: String,
+        #[source]
+        source: std::io::Error,
+    },
+
     #[error("ghq base path not found for '{ghq}'")]
     RepoNotFound { ghq: String },
 
-    #[error("cycle failed: {kind} at iter {iter}")]
+    #[error("cycle failed: {} at iter {iter}", kind.as_str())]
     CycleFailed {
-        kind: &'static str,
+        kind: FailureKind,
+        iter: u32,
+    },
+
+    #[error("phase executor returned unexpected outcome variant '{got_variant}' for phase {} at iter {iter}", phase.as_str())]
+    ExecutorContract {
+        phase: PhaseKind,
+        got_variant: &'static str,
         iter: u32,
     },
 
@@ -392,6 +418,24 @@ mod tests {
             source: io_err(),
         });
         assert!(format!("{e}").contains("/tmp/foo"));
+
+        let e = PhaseInfraError::CycleFailed {
+            kind: FailureKind::IterExhausted,
+            iter: 3,
+        };
+        let s = format!("{e}");
+        assert!(s.contains("iter_exhausted"), "msg: {s}");
+        assert!(s.contains("iter 3"), "msg: {s}");
+
+        let e = PhaseInfraError::ExecutorContract {
+            phase: PhaseKind::Pre,
+            got_variant: "RunDone",
+            iter: 2,
+        };
+        let s = format!("{e}");
+        assert!(s.contains("RunDone"), "msg: {s}");
+        assert!(s.contains("pre"), "msg: {s}");
+        assert!(s.contains("iter 2"), "msg: {s}");
     }
 
     #[test]

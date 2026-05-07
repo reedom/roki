@@ -47,9 +47,22 @@ impl PhaseExecutor for CommandPhaseExecutor {
         ctx: &PhaseContext,
         iter_dir: &Path,
     ) -> Result<PhaseOutcome, PhaseInfraError> {
-        // 1. Resolve cwd via `ghq list -p <ghq>`.
         let cwd = resolve_ghq_base(&ctx.repo.ghq).await?;
+        execute_at(&self.default_cli, kind, body, ctx, iter_dir, &cwd).await
+    }
+}
 
+/// Inner pipeline shared by production and unit tests. Takes a resolved
+/// `cwd` so tests can bypass `ghq list -p` and exercise the full argv +
+/// stdin + env + capture path against a tempdir.
+async fn execute_at(
+    default_cli: &str,
+    kind: PhaseKind,
+    body: &PhaseBody,
+    ctx: &PhaseContext,
+    iter_dir: &Path,
+    cwd: &Path,
+) -> Result<PhaseOutcome, PhaseInfraError> {
         // 2. Build argv + stdin body.
         let (argv_template, stdin_template_opt) = match body {
             PhaseBody::InlineCmd { cmd } => {
@@ -57,37 +70,66 @@ impl PhaseExecutor for CommandPhaseExecutor {
                 (format!("sh -c {}", shell_words::quote(cmd)), None)
             }
             PhaseBody::InlinePrompt { prompt } => {
-                (self.default_cli.clone(), Some(prompt.clone()))
+                (default_cli.to_string(), Some(prompt.clone()))
             }
-            PhaseBody::Path { body: path_str, cli_override } => {
-                // Read the workflow body from disk. Frontmatter is stripped;
-                // anything after a closing `---` (or the whole file if no
-                // frontmatter) is the rendered body. cli_override wins over
-                // default_cli when present.
-                let raw = match tokio::fs::read_to_string(path_str).await {
+            PhaseBody::Path { path, cli_override } => {
+                // Read the workflow body from disk. The path was resolved at
+                // config-load time against the workflow file's parent so the
+                // executor reads the same file regardless of the daemon's
+                // working directory. Frontmatter is stripped; anything after
+                // a closing `---` (or the whole file if no frontmatter) is
+                // the rendered body. cli_override wins over default_cli.
+                let raw = match tokio::fs::read_to_string(path).await {
                     Ok(s) => s,
                     Err(source) => {
-                        return Err(PhaseInfraError::Spawn {
-                            cmd: format!("read {path_str}"),
+                        return Err(PhaseInfraError::WorkflowBodyUnreadable {
+                            path: path.clone(),
                             source,
                         });
                     }
                 };
                 let body_text = strip_frontmatter(&raw).to_string();
-                let cli = cli_override.clone().unwrap_or_else(|| self.default_cli.clone());
+                let cli = cli_override.clone().unwrap_or_else(|| default_cli.to_string());
                 (cli, Some(body_text))
             }
         };
 
-        // 3. Liquid render argv + stdin.
+        // 3. Liquid render argv + stdin. Render failures are directive-level
+        // failures routed via `FailureKind::TemplateError`; the underlying
+        // Liquid error is captured in a `tracing::warn` so the operator log
+        // identifies the failed expression and which stage (argv or stdin)
+        // tripped the renderer.
         let argv_rendered = match render_str(&argv_template, ctx) {
             Ok(s) => s,
-            Err(_) => return Ok(PhaseOutcome::Failure { kind: FailureKind::TemplateError }),
+            Err(err) => {
+                tracing::warn!(
+                    phase = kind.as_str(),
+                    iter = ctx.cycle.iter,
+                    stage = "argv",
+                    template = %argv_template,
+                    error = %err,
+                    "phase template render failed"
+                );
+                return Ok(PhaseOutcome::Failure {
+                    kind: FailureKind::TemplateError,
+                });
+            }
         };
         let stdin_rendered = match stdin_template_opt {
             Some(t) => match render_str(&t, ctx) {
                 Ok(s) => Some(s),
-                Err(_) => return Ok(PhaseOutcome::Failure { kind: FailureKind::TemplateError }),
+                Err(err) => {
+                    tracing::warn!(
+                        phase = kind.as_str(),
+                        iter = ctx.cycle.iter,
+                        stage = "stdin",
+                        error = %err,
+                        "phase template render failed"
+                    );
+                    return Ok(PhaseOutcome::Failure {
+                        kind: FailureKind::TemplateError,
+                    });
+                }
             },
             None => None,
         };
@@ -119,7 +161,7 @@ impl PhaseExecutor for CommandPhaseExecutor {
         let env_pairs = roki_env_pairs(ctx);
         let mut cmd = Command::new(bin);
         cmd.args(rest)
-            .current_dir(&cwd)
+            .current_dir(cwd)
             .stdout(Stdio::from(stdout_handle))
             .stderr(Stdio::from(stderr_handle));
         if stdin_rendered.is_some() {
@@ -145,16 +187,22 @@ impl PhaseExecutor for CommandPhaseExecutor {
             source,
         })?;
         if let Some(body) = stdin_rendered.as_ref() {
-            if let Some(mut stdin) = child.stdin.take() {
-                stdin
-                    .write_all(body.as_bytes())
-                    .await
-                    .map_err(|source| PhaseInfraError::Spawn {
-                        cmd: argv_rendered.clone(),
-                        source,
-                    })?;
-                drop(stdin);
-            }
+            // We set `Stdio::piped()` above whenever stdin_rendered is Some,
+            // so child.stdin must be present here. If the handle is already
+            // gone, the child would receive an empty stdin and the rendered
+            // body would be silently dropped; surface that as an infra error
+            // rather than letting the AI subprocess run without its prompt.
+            let mut stdin = child.stdin.take().ok_or_else(|| PhaseInfraError::StdinUnavailable {
+                cmd: argv_rendered.clone(),
+            })?;
+            stdin
+                .write_all(body.as_bytes())
+                .await
+                .map_err(|source| PhaseInfraError::StdinWrite {
+                    cmd: argv_rendered.clone(),
+                    source,
+                })?;
+            drop(stdin);
         }
 
         // 8. Wait.
@@ -210,7 +258,6 @@ impl PhaseExecutor for CommandPhaseExecutor {
                 }
             }
         }
-    }
 }
 
 /// Strip optional YAML frontmatter (`---` … `---` at file start) and return
@@ -444,6 +491,121 @@ mod tests {
         match out {
             PhaseOutcome::Failure { kind: FailureKind::Unparseable } => {}
             other => panic!("expected Unparseable failure, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn run_phase_propagates_roki_env_vars_to_child() {
+        // FR contract: ROKI_TICKET_ID, ROKI_REPO_GHQ, ROKI_CYCLE_* arrive
+        // intact in the child process. Use the production execute_at path so
+        // the env_clear + roki_env_pairs + Command::env loop are exercised.
+        let tmp = tempfile::tempdir().unwrap();
+        let iter_dir = crate::capture::create_iter_dir(tmp.path(), "ENG-9", Uuid::nil(), 1).unwrap();
+        let mut ctx = PhaseContext::new(&admitted(), Uuid::nil(), &cfg());
+        ctx.set_iter(1);
+        let body = PhaseBody::InlineCmd {
+            cmd: r#"printf 'TID=%s|GHQ=%s|ITER=%s' "$ROKI_TICKET_ID" "$ROKI_REPO" "$ROKI_CYCLE_ITER""#
+                .to_string(),
+        };
+        let cwd = tmp.path().to_path_buf();
+
+        let out = super::execute_at("echo", PhaseKind::Run, &body, &ctx, &iter_dir, &cwd)
+            .await
+            .unwrap();
+        match out {
+            PhaseOutcome::RunDone { exit_code, .. } => assert_eq!(exit_code, 0),
+            other => panic!("unexpected outcome: {other:?}"),
+        }
+        let stdout = std::fs::read_to_string(iter_dir.join("run.stdout")).unwrap();
+        assert!(stdout.contains("TID=ENG-9"), "stdout={stdout}");
+        assert!(
+            stdout.contains(&format!("GHQ={}", env!("CARGO_MANIFEST_DIR"))),
+            "stdout={stdout}"
+        );
+        assert!(stdout.contains("ITER=1"), "stdout={stdout}");
+    }
+
+    #[tokio::test]
+    async fn pre_phase_inline_prompt_feeds_stdin_to_default_cli() {
+        // InlinePrompt: argv comes from default_cli, the rendered prompt is
+        // written to the child's stdin. Use `cat` as default_cli so stdout
+        // mirrors stdin and we can assert the directive JSON parses through.
+        let tmp = tempfile::tempdir().unwrap();
+        let iter_dir = crate::capture::create_iter_dir(tmp.path(), "ENG-9", Uuid::nil(), 1).unwrap();
+        let ctx = PhaseContext::new(&admitted(), Uuid::nil(), &cfg());
+        let body = PhaseBody::InlinePrompt {
+            prompt: r#"{"directive":"run","outcome":"piped"}"#.to_string(),
+        };
+        let cwd = tmp.path().to_path_buf();
+
+        let out = super::execute_at("cat", PhaseKind::Pre, &body, &ctx, &iter_dir, &cwd)
+            .await
+            .unwrap();
+        match out {
+            PhaseOutcome::PreDirective { directive, payload } => {
+                assert_eq!(directive, PreDirective::Run);
+                assert_eq!(payload["outcome"], "piped");
+            }
+            other => panic!("unexpected outcome: {other:?}"),
+        }
+        let resp = std::fs::read_to_string(iter_dir.join("pre.response.json")).unwrap();
+        assert!(resp.contains("\"directive\""));
+    }
+
+    #[tokio::test]
+    async fn pre_phase_path_body_reads_file_strips_frontmatter_and_honors_cli_override() {
+        let tmp = tempfile::tempdir().unwrap();
+        let iter_dir = crate::capture::create_iter_dir(tmp.path(), "ENG-9", Uuid::nil(), 1).unwrap();
+        let workflow_body =
+            "---\ncli: ignored-by-frontmatter-not-implemented\n---\n{\"directive\":\"end\",\"outcome\":\"path-ok\"}";
+        let body_path = tmp.path().join("phase.md");
+        std::fs::write(&body_path, workflow_body).unwrap();
+
+        let ctx = PhaseContext::new(&admitted(), Uuid::nil(), &cfg());
+        let body = PhaseBody::Path {
+            path: body_path.clone(),
+            cli_override: Some("cat".to_string()),
+        };
+        let cwd = tmp.path().to_path_buf();
+
+        // default_cli intentionally bogus to assert cli_override wins.
+        let out = super::execute_at(
+            "/bin/no-such-cli",
+            PhaseKind::Pre,
+            &body,
+            &ctx,
+            &iter_dir,
+            &cwd,
+        )
+        .await
+        .unwrap();
+        match out {
+            PhaseOutcome::PreDirective { directive, payload } => {
+                assert_eq!(directive, PreDirective::End);
+                assert_eq!(payload["outcome"], "path-ok");
+            }
+            other => panic!("unexpected outcome: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn path_body_missing_file_returns_workflow_body_unreadable() {
+        let tmp = tempfile::tempdir().unwrap();
+        let iter_dir = crate::capture::create_iter_dir(tmp.path(), "ENG-9", Uuid::nil(), 1).unwrap();
+        let missing = tmp.path().join("does-not-exist.md");
+        let ctx = PhaseContext::new(&admitted(), Uuid::nil(), &cfg());
+        let body = PhaseBody::Path {
+            path: missing.clone(),
+            cli_override: Some("cat".to_string()),
+        };
+        let cwd = tmp.path().to_path_buf();
+
+        let err = super::execute_at("cat", PhaseKind::Pre, &body, &ctx, &iter_dir, &cwd)
+            .await
+            .expect_err("missing workflow body must surface infra error");
+        match err {
+            PhaseInfraError::WorkflowBodyUnreadable { path: p, .. } => assert_eq!(p, missing),
+            other => panic!("expected WorkflowBodyUnreadable, got {other:?}"),
         }
     }
 

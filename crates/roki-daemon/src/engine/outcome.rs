@@ -6,6 +6,8 @@
 
 #![allow(dead_code)]
 
+use std::path::PathBuf;
+
 use serde::Deserialize;
 
 /// Which phase position the engine is executing.
@@ -37,10 +39,13 @@ pub enum PhaseBody {
     /// `[default.ai.command].cli` (or a frontmatter override, but inline form
     /// has no frontmatter, so always the default).
     InlinePrompt { prompt: String },
-    /// `path = "workflow/<file>.md"`. The frontmatter optionally overrides
-    /// `cli`; the body (post-frontmatter) is rendered as the stdin body.
+    /// `path = "workflow/<file>.md"`. Resolved at config-load time against
+    /// the workflow file's parent directory so the executor reads the same
+    /// file regardless of the daemon's working directory. The frontmatter
+    /// optionally overrides `cli`; the body (post-frontmatter) is rendered
+    /// as the stdin body.
     Path {
-        body: String,
+        path: PathBuf,
         cli_override: Option<String>,
     },
 }
@@ -101,6 +106,21 @@ pub enum PhaseOutcome {
     Failure {
         kind: FailureKind,
     },
+}
+
+impl PhaseOutcome {
+    /// Static name of the variant. Used in `PhaseInfraError::ExecutorContract`
+    /// when the cycle driver receives an outcome variant the phase does not
+    /// produce, so the operator log identifies which variant tripped the
+    /// executor contract.
+    pub fn variant_name(&self) -> &'static str {
+        match self {
+            PhaseOutcome::PreDirective { .. } => "PreDirective",
+            PhaseOutcome::PostDirective { .. } => "PostDirective",
+            PhaseOutcome::RunDone { .. } => "RunDone",
+            PhaseOutcome::Failure { .. } => "Failure",
+        }
+    }
 }
 
 /// Directive-level failure kinds. Distinct from `PhaseInfraError`, which

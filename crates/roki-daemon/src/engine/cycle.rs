@@ -64,7 +64,20 @@ pub async fn run_cycle(
                     } => {
                         ctx.set_pre(payload);
                     }
-                    other => panic!("Pre executor returned non-Pre outcome: {other:?}"),
+                    other => {
+                        let got_variant = other.variant_name();
+                        tracing::error!(
+                            phase = "pre",
+                            iter,
+                            got_variant,
+                            "phase executor returned outcome variant that does not belong to the requested phase"
+                        );
+                        return Err(PhaseInfraError::ExecutorContract {
+                            phase: PhaseKind::Pre,
+                            got_variant,
+                            iter,
+                        });
+                    }
                 }
             }
         }
@@ -80,7 +93,20 @@ pub async fn run_cycle(
             } => {
                 ctx.set_run(exit_code, duration_seconds);
             }
-            other => panic!("Run executor returned non-Run outcome: {other:?}"),
+            other => {
+                let got_variant = other.variant_name();
+                tracing::error!(
+                    phase = "run",
+                    iter,
+                    got_variant,
+                    "phase executor returned outcome variant that does not belong to the requested phase"
+                );
+                return Err(PhaseInfraError::ExecutorContract {
+                    phase: PhaseKind::Run,
+                    got_variant,
+                    iter,
+                });
+            }
         }
 
         // Post.
@@ -93,7 +119,20 @@ pub async fn run_cycle(
                     ctx.set_post(payload);
                     directive
                 }
-                other => panic!("Post executor returned non-Post outcome: {other:?}"),
+                other => {
+                    let got_variant = other.variant_name();
+                    tracing::error!(
+                        phase = "post",
+                        iter,
+                        got_variant,
+                        "phase executor returned outcome variant that does not belong to the requested phase"
+                    );
+                    return Err(PhaseInfraError::ExecutorContract {
+                        phase: PhaseKind::Post,
+                        got_variant,
+                        iter,
+                    });
+                }
             }
         } else {
             PostDirective::End
@@ -348,6 +387,69 @@ mod tests {
         let outcome =
             run_cycle(&exec, &admitted(), &r, tmp.path(), &cfg(10)).await.unwrap();
         assert_eq!(outcome, CycleOutcome::Completed { iters: 1 });
+    }
+
+    #[tokio::test]
+    async fn executor_returning_wrong_variant_yields_typed_infra_error() {
+        // Misbehaving executor returns a Run-shaped outcome from a Pre call.
+        // Cycle driver must surface this as a typed PhaseInfraError rather
+        // than panicking, so a single buggy phase impl cannot crash the
+        // daemon process.
+        let tmp = tempfile::tempdir().unwrap();
+        let exec = FakeExec::new(vec![(
+            1,
+            PhaseKind::Pre,
+            PhaseOutcome::RunDone { exit_code: 0, duration_seconds: 0 },
+        )]);
+        let r = rule(Some(PhaseBody::InlineCmd { cmd: "true".into() }), None);
+        let err = run_cycle(&exec, &admitted(), &r, tmp.path(), &cfg(10))
+            .await
+            .expect_err("wrong variant must surface as Err");
+        match err {
+            PhaseInfraError::ExecutorContract { phase, got_variant, iter } => {
+                assert_eq!(phase, PhaseKind::Pre);
+                assert_eq!(got_variant, "RunDone");
+                assert_eq!(iter, 1);
+            }
+            other => panic!("expected ExecutorContract, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn post_directive_pre_runs_pre_again_on_next_iteration() {
+        // PostDirective::Pre must clear skip_pre so iter 2 re-runs the pre
+        // phase. Symmetrical to the post-Run test above.
+        let tmp = tempfile::tempdir().unwrap();
+        let exec = FakeExec::new(vec![
+            (1, PhaseKind::Pre, PhaseOutcome::PreDirective {
+                directive: PreDirective::Run,
+                payload: serde_json::json!({}),
+            }),
+            (1, PhaseKind::Run, PhaseOutcome::RunDone { exit_code: 0, duration_seconds: 0 }),
+            (1, PhaseKind::Post, PhaseOutcome::PostDirective {
+                directive: PostDirective::Pre,
+                payload: serde_json::json!({}),
+            }),
+            (2, PhaseKind::Pre, PhaseOutcome::PreDirective {
+                directive: PreDirective::Run,
+                payload: serde_json::json!({}),
+            }),
+            (2, PhaseKind::Run, PhaseOutcome::RunDone { exit_code: 0, duration_seconds: 0 }),
+            (2, PhaseKind::Post, PhaseOutcome::PostDirective {
+                directive: PostDirective::End,
+                payload: serde_json::json!({}),
+            }),
+        ]);
+        let r = rule(
+            Some(PhaseBody::InlineCmd { cmd: "true".into() }),
+            Some(PhaseBody::InlineCmd { cmd: "true".into() }),
+        );
+        let outcome =
+            run_cycle(&exec, &admitted(), &r, tmp.path(), &cfg(10)).await.unwrap();
+        assert_eq!(outcome, CycleOutcome::Completed { iters: 2 });
+        let calls = exec.calls.lock().unwrap().clone();
+        let pre_iter2 = calls.iter().find(|(i, k)| *i == 2 && *k == PhaseKind::Pre);
+        assert!(pre_iter2.is_some(), "iter 2 pre must run after PostDirective::Pre, calls: {calls:?}");
     }
 
     #[tokio::test]
