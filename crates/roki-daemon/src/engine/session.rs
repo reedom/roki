@@ -141,6 +141,93 @@ impl SessionSupervisor {
         let _ = self.turn.send(new_state);
         Ok(generation)
     }
+
+    /// Drive one turn end-to-end:
+    ///   1. open the per-turn capture triple,
+    ///   2. write `body_bytes` to the child's stdin (no close),
+    ///   3. await a directive event from the reader task,
+    ///   4. write `<phase>.response.json` and return `PhaseOutcome`.
+    ///
+    /// `stall_override` lets the cycle apply a `PhaseBody::Path::stall_seconds`
+    /// override for the turn; the supervisor reverts to the default after.
+    pub async fn run_turn(
+        &self,
+        iter_dir: &Path,
+        kind: PhaseKind,
+        body_bytes: &[u8],
+        stall_override: Option<u32>,
+    ) -> Result<crate::engine::outcome::PhaseOutcome, PhaseInfraError> {
+        use crate::engine::outcome::{FailureKind, PhaseOutcome, PostDirective, PreDirective};
+        use tokio::io::AsyncWriteExt;
+
+        let _ = self.begin_turn(iter_dir, kind).await?;
+
+        if let Some(seconds) = stall_override {
+            self.watchdog.set_stall_seconds(seconds);
+        } else {
+            self.watchdog.set_stall_seconds(self.default_stall_seconds);
+        }
+
+        // Write body to stdin — keep stdin open across turns.
+        {
+            let mut stdin_guard = self.stdin.lock().await;
+            let stdin = stdin_guard
+                .as_mut()
+                .ok_or(PhaseInfraError::SessionStdinClosed { phase: kind })?;
+            stdin
+                .write_all(body_bytes)
+                .await
+                .map_err(|_| PhaseInfraError::SessionStdinClosed { phase: kind })?;
+            stdin
+                .flush()
+                .await
+                .map_err(|_| PhaseInfraError::SessionStdinClosed { phase: kind })?;
+        }
+
+        // Await directive (or schema drift, or exit).
+        let mut rx_guard = self.dir_rx.lock().await;
+        let event = rx_guard.recv().await;
+
+        match event {
+            Some(SessionEvent::Directive { value }) => {
+                crate::capture::write_response_json(iter_dir, kind, &value)?;
+                let directive_str = value
+                    .get("directive")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_default();
+                match kind {
+                    PhaseKind::Pre => {
+                        let dir = PreDirective::try_from_str(directive_str)
+                            .ok_or(PhaseInfraError::SessionStdoutClosed { phase: kind })?;
+                        Ok(PhaseOutcome::PreDirective {
+                            directive: dir,
+                            payload: value,
+                        })
+                    }
+                    PhaseKind::Post => {
+                        let dir = PostDirective::try_from_str(directive_str)
+                            .ok_or(PhaseInfraError::SessionStdoutClosed { phase: kind })?;
+                        Ok(PhaseOutcome::PostDirective {
+                            directive: dir,
+                            payload: value,
+                        })
+                    }
+                    PhaseKind::Run => Err(PhaseInfraError::ExecutorContract {
+                        phase: kind,
+                        got_variant: "PreDirective/PostDirective on Run",
+                        iter: 0,
+                    }),
+                }
+            }
+            Some(SessionEvent::SchemaDrift) => Ok(PhaseOutcome::Failure {
+                kind: FailureKind::SchemaDrift,
+            }),
+            Some(SessionEvent::Exit) => Ok(PhaseOutcome::Failure {
+                kind: FailureKind::ProcessCrash,
+            }),
+            None => Err(PhaseInfraError::SessionStdoutClosed { phase: kind }),
+        }
+    }
 }
 
 async fn reader_task(
@@ -256,5 +343,45 @@ mod tests {
         assert!(iter_dir.join("pre.stdout").is_file());
         assert!(iter_dir.join("pre.stderr").is_file());
         assert!(iter_dir.join("pre.events.jsonl").is_file());
+    }
+
+    /// Bash fake AI: reads stdin lines and emits a directive object on stdout
+    /// per stdin line. Used to verify run_turn end-to-end.
+    fn fake_session_cfg() -> SessionConfig {
+        let script = r#"
+while IFS= read -r line; do
+  printf '{"type":"thinking"}\n'
+  printf '{"directive":"end","echo":"%s"}\n' "$line"
+done
+"#;
+        SessionConfig {
+            cli: "bash".to_string(),
+            argv: vec!["bash".to_string(), "-c".to_string(), script.to_string()],
+            default_stall_seconds: 5,
+            cwd: std::env::temp_dir(),
+            envs: Vec::new(),
+        }
+    }
+
+    #[tokio::test]
+    async fn run_turn_returns_post_directive_end() {
+        let sup = SessionSupervisor::spawn(fake_session_cfg()).await.unwrap();
+        let tmp = tempfile::TempDir::new().unwrap();
+        let iter_dir = create_iter_dir(tmp.path(), "ENG-1", Uuid::nil(), 1).unwrap();
+        let outcome = sup
+            .run_turn(&iter_dir, PhaseKind::Post, b"hello\n", None)
+            .await
+            .unwrap();
+        match outcome {
+            crate::engine::outcome::PhaseOutcome::PostDirective { directive, payload } => {
+                assert_eq!(directive, crate::engine::outcome::PostDirective::End);
+                assert_eq!(payload.get("echo").and_then(|v| v.as_str()), Some("hello"));
+            }
+            other => panic!("expected PostDirective(End), got {other:?}"),
+        }
+        let events = std::fs::read_to_string(iter_dir.join("post.events.jsonl")).unwrap();
+        assert!(events.contains("\"thinking\""));
+        assert!(events.contains("\"end\""));
+        assert!(iter_dir.join("post.response.json").is_file());
     }
 }
