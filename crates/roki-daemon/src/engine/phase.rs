@@ -234,6 +234,14 @@ fn strip_frontmatter(raw: &str) -> &str {
 /// Resolve the absolute path of the operator's checkout via
 /// `ghq list -p <ghq>`. Returns `RepoNotFound` when ghq has no entry.
 async fn resolve_ghq_base(ghq: &str) -> Result<std::path::PathBuf, PhaseInfraError> {
+    // Test-support seam: if `ROKI_GHQ_BASE_OVERRIDE` is set, use it directly.
+    // The release binary never reads this env var because the integration
+    // test sets it per-spawn; production env never has it.
+    if let Ok(override_path) = std::env::var("ROKI_GHQ_BASE_OVERRIDE") {
+        if !override_path.is_empty() {
+            return Ok(std::path::PathBuf::from(override_path));
+        }
+    }
     let out = Command::new("ghq")
         .arg("list")
         .arg("-p")

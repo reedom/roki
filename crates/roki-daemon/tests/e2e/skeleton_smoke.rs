@@ -117,6 +117,7 @@ session_root = "{session_root}"
         .arg("--config")
         .arg(&roki_path)
         .env("ROKI_LINEAR_GRAPHQL_URL", linear.uri())
+        .env("ROKI_GHQ_BASE_OVERRIDE", work.path())
         .kill_on_drop(true)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
@@ -196,32 +197,41 @@ session_root = "{session_root}"
         "Req 8.2: binary should exit success on a clean cycle, got {status:?}"
     );
 
-    // 9. Locate the per-cycle capture dir and read the stdout / stderr
-    //    files. Layout per `capture::create`:
-    //    `<session_root>/cycle-<uuid>/{stdout,stderr}` (skeleton scope per
-    //    design Logical Data Model).
-    let cycle_dir = std::fs::read_dir(&session_root)
-        .expect("session_root readable")
+    // 9. Locate the per-iter capture dir and read the run stdout / stderr
+    //    files. Layout per `capture::create_iter_dir`:
+    //    `<session_root>/<ticket-id>/cycle-<uuid>/iter-1/run.{stdout,stderr}`.
+    let ticket_dir = session_root.join("tid-1");
+    assert!(
+        ticket_dir.is_dir(),
+        "Req 7.2: ticket dir must exist at {ticket_dir:?}"
+    );
+    let cycle_entry = std::fs::read_dir(&ticket_dir)
+        .expect("ticket dir readable")
         .filter_map(Result::ok)
-        .find(|entry| {
-            entry
-                .file_name()
-                .to_string_lossy()
-                .starts_with("cycle-")
-        })
-        .expect("cycle-<uuid> dir should exist under session_root");
+        .find(|entry| entry.file_name().to_string_lossy().starts_with("cycle-"))
+        .expect("cycle-<uuid> dir should exist under ticket dir");
+    let iter1 = cycle_entry.path().join("iter-1");
+    assert!(iter1.is_dir(), "iter-1 dir must exist at {iter1:?}");
 
-    let stdout_bytes =
-        std::fs::read_to_string(cycle_dir.path().join("stdout")).expect("read stdout file");
-    let stderr_bytes =
-        std::fs::read_to_string(cycle_dir.path().join("stderr")).expect("read stderr file");
+    let stdout_bytes = std::fs::read_to_string(iter1.join("run.stdout"))
+        .expect("read run.stdout");
+    let stderr_bytes = std::fs::read_to_string(iter1.join("run.stderr"))
+        .expect("read run.stderr");
     assert!(
         stdout_bytes.contains("out"),
-        "Req 7.2: stdout capture must contain `out`, got {stdout_bytes:?}"
+        "Req 7.2: run.stdout must contain `out`, got {stdout_bytes:?}"
     );
     assert!(
         stderr_bytes.contains("err"),
-        "Req 7.2: stderr capture must contain `err`, got {stderr_bytes:?}"
+        "Req 7.2: run.stderr must contain `err`, got {stderr_bytes:?}"
+    );
+
+    let exit_code_text = std::fs::read_to_string(iter1.join("run.exit_code"))
+        .expect("read run.exit_code");
+    assert_eq!(
+        exit_code_text.trim(),
+        "0",
+        "exit code file must contain the run subprocess exit (0 here)"
     );
 }
 
