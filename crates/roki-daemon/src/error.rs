@@ -49,10 +49,7 @@ pub enum RokiConfigError {
     },
 }
 
-/// Errors raised while loading `WORKFLOW.toml`.
-///
-/// Covers schema validation (Req 2.3) and the explicit walking-skeleton
-/// rejections of `when.assignee` (Req 5.3) and `run.path` (Req 6.2).
+/// Errors raised while loading `WORKFLOW.toml` or `workflow/*.md` frontmatter.
 #[derive(Debug, Error)]
 pub enum WorkflowError {
     #[error("WORKFLOW.toml not found: {path}")]
@@ -80,6 +77,27 @@ pub enum WorkflowError {
 
     #[error("invalid workflow.toml at {path}: unsupported run.* form '{key}'")]
     UnsupportedRunForm { path: PathBuf, key: String },
+
+    #[error(
+        "invalid workflow.toml at {path}: run phase resolved to session shape \
+         (slice-2 unsupported; lift via path-form .md frontmatter `session: \"command\"`)"
+    )]
+    SessionRunUnsupported { path: PathBuf },
+
+    #[error(
+        "invalid workflow .md frontmatter at {path}: \
+         field 'session' has unsupported value '{value}' (allowed: \"session\", \"command\")"
+    )]
+    InvalidSessionField { path: PathBuf, value: String },
+
+    #[error(
+        "invalid workflow .md frontmatter at {path}: \
+         field 'stall_seconds' must be an integer >= 1, got '{value}'"
+    )]
+    InvalidStallSeconds { path: PathBuf, value: String },
+
+    #[error("workflow .md frontmatter parse error at {path}: {reason}")]
+    WorkflowMdFrontmatter { path: PathBuf, reason: String },
 }
 
 /// Errors raised by the Linear GraphQL client during `viewer { id }` resolve.
@@ -435,6 +453,47 @@ mod tests {
         assert!(s.contains("RunDone"), "msg: {s}");
         assert!(s.contains("pre"), "msg: {s}");
         assert!(s.contains("iter 2"), "msg: {s}");
+    }
+
+    #[test]
+    fn workflow_session_run_unsupported_display() {
+        let e = WorkflowError::SessionRunUnsupported {
+            path: PathBuf::from("/tmp/W.toml"),
+        };
+        assert!(format!("{e}").contains("/tmp/W.toml"));
+        assert!(format!("{e}").contains("session shape"));
+    }
+
+    #[test]
+    fn workflow_invalid_session_field_display() {
+        let e = WorkflowError::InvalidSessionField {
+            path: PathBuf::from("/tmp/foo.md"),
+            value: "yolo".to_string(),
+        };
+        let s = format!("{e}");
+        assert!(s.contains("/tmp/foo.md"));
+        assert!(s.contains("yolo"));
+    }
+
+    #[test]
+    fn workflow_invalid_stall_seconds_display() {
+        let e = WorkflowError::InvalidStallSeconds {
+            path: PathBuf::from("/tmp/foo.md"),
+            value: "0".to_string(),
+        };
+        assert!(format!("{e}").contains("stall_seconds"));
+        assert!(format!("{e}").contains("0"));
+    }
+
+    #[test]
+    fn workflow_md_frontmatter_display() {
+        let e = WorkflowError::WorkflowMdFrontmatter {
+            path: PathBuf::from("/tmp/foo.md"),
+            reason: "missing closing '---'".to_string(),
+        };
+        let s = format!("{e}");
+        assert!(s.contains("/tmp/foo.md"));
+        assert!(s.contains("missing closing"));
     }
 
     #[test]
