@@ -68,7 +68,6 @@ pub async fn run_cycle(
                 }
             }
         }
-        skip_pre = false;
 
         // Run.
         match executor.execute(PhaseKind::Run, &rule.run, &ctx, &iter_dir).await? {

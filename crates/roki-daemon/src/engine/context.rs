@@ -125,21 +125,21 @@ impl From<&NormalizedTicket> for TicketView {
 ///
 /// Returns `(name, value)` tuples ready for `Command::envs`.
 pub fn roki_env_pairs(ctx: &PhaseContext) -> Vec<(String, String)> {
-    let mut pairs: Vec<(String, String)> = Vec::new();
-
-    pairs.push(("ROKI_TICKET_ID".to_string(), ctx.ticket.id.clone()));
-    pairs.push(("ROKI_REPO".to_string(), ctx.repo.ghq.clone()));
-    pairs.push(("ROKI_CYCLE_ID".to_string(), ctx.cycle.id.clone()));
-    pairs.push(("ROKI_CYCLE_KIND".to_string(), ctx.cycle.kind.to_string()));
-    pairs.push((
-        "ROKI_CYCLE_TRIGGER".to_string(),
-        ctx.cycle.trigger.to_string(),
-    ));
-    pairs.push(("ROKI_CYCLE_ITER".to_string(), ctx.cycle.iter.to_string()));
-    pairs.push((
-        "ROKI_CONFIG_MAX_ITERATIONS".to_string(),
-        ctx.config.max_iterations.to_string(),
-    ));
+    let mut pairs: Vec<(String, String)> = vec![
+        ("ROKI_TICKET_ID".to_string(), ctx.ticket.id.clone()),
+        ("ROKI_REPO".to_string(), ctx.repo.ghq.clone()),
+        ("ROKI_CYCLE_ID".to_string(), ctx.cycle.id.clone()),
+        ("ROKI_CYCLE_KIND".to_string(), ctx.cycle.kind.to_string()),
+        (
+            "ROKI_CYCLE_TRIGGER".to_string(),
+            ctx.cycle.trigger.to_string(),
+        ),
+        ("ROKI_CYCLE_ITER".to_string(), ctx.cycle.iter.to_string()),
+        (
+            "ROKI_CONFIG_MAX_ITERATIONS".to_string(),
+            ctx.config.max_iterations.to_string(),
+        ),
+    ];
 
     if let Some(payload) = ctx.pre.as_ref() {
         push_payload_scalars(&mut pairs, "ROKI_PRE_", payload);
@@ -198,7 +198,7 @@ pub fn to_liquid_object(ctx: &PhaseContext) -> liquid::Object {
     // through serde_json is the simplest path that respects the existing
     // serde derives on the view types.
     let value = serde_json::to_value(ctx).expect("PhaseContext serialises");
-    let object = match value {
+    match value {
         Value::Object(map) => map
             .into_iter()
             .map(|(k, v)| {
@@ -209,8 +209,7 @@ pub fn to_liquid_object(ctx: &PhaseContext) -> liquid::Object {
             })
             .collect(),
         _ => liquid::Object::new(),
-    };
-    object
+    }
 }
 
 #[cfg(test)]

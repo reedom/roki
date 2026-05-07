@@ -16,7 +16,4 @@ pub mod phase;
 pub mod template;
 
 pub use cycle::{run_cycle, CycleOutcome};
-pub use outcome::{
-    FailureKind, PhaseBody, PhaseKind, PhaseOutcome, PostDirective, PreDirective,
-};
-pub use phase::{CommandPhaseExecutor, PhaseExecutor};
+pub use phase::CommandPhaseExecutor;

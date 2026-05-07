@@ -273,6 +273,7 @@ mod tests {
     use super::*;
     use crate::admission::AdmittedTicket;
     use crate::config::roki::*;
+    use crate::engine::outcome::PreDirective;
     use crate::linear::ticket::NormalizedTicket;
     use std::path::PathBuf;
     use uuid::Uuid;
@@ -418,7 +419,7 @@ mod tests {
         let out = exec.execute(PhaseKind::Pre, &body, &ctx, &iter_dir).await.unwrap();
         match out {
             PhaseOutcome::PreDirective { directive, payload } => {
-                assert_eq!(directive, super::PreDirective::Run);
+                assert_eq!(directive, PreDirective::Run);
                 assert_eq!(payload["outcome"], "ok");
             }
             other => panic!("unexpected outcome: {other:?}"),
@@ -458,5 +459,3 @@ mod tests {
         assert_eq!(super::strip_frontmatter(raw), raw);
     }
 }
-
-use super::outcome::{PostDirective, PreDirective}; // used by the test module
