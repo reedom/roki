@@ -21,7 +21,7 @@ Out-of-scope, deferred to later slices:
 - Worktree creation via `wt`. Session cwd stays at the ghq base path.
 - Persistent daemon lifecycle, queue preemption, cold-start enumeration, hot reload.
 - Per-repo `WORKFLOW.toml` overrides.
-- `run`-phase session shape. Slice 2 rejects `[[rule.run]]` with `session = "session"` at config load. The FR convention treats run as command-shape; lifting this restriction is a separate later slice.
+- `run`-phase session shape. `fr:04 §29-36` allows operators to mix shapes freely; slice 2 narrows that surface temporarily by rejecting `run` resolved to `PhaseShape::Session` at config load (`WorkflowError::SessionRunUnsupported`). The narrowing is a slice-2 scope deferral, not an FR contract change — a later slice lifts it.
 
 ## 2. Architecture
 
@@ -81,29 +81,30 @@ Stays inside `crates/roki-daemon`. No `roki-engine` extraction. The session supe
 pub enum PhaseShape { Session, Command }
 ```
 
-Per-phase shape is determined at config load:
+Per-phase shape is determined at config load. Override surface is **strictly per `fr:04 §Subprocess shapes`**: inline forms have no override knob; the override lives in `workflow/*.md` frontmatter for the path form.
 
-| Body form              | Default shape | Override via                               | Notes                                       |
-| ---------------------- | ------------- | ------------------------------------------ | ------------------------------------------- |
-| inline `cmd = "..."`   | `Command`     | n/a — `session = "*"` is a load error      | inline cmd has its own argv; reusing across turns is meaningless |
-| inline `prompt = "..."`| `Session`     | `session = "command"` flips to one-shot   | matches `fr:04 §Subprocess shapes`           |
-| `path = "..."`         | `Command`     | `session = "session"` flips to long-lived | matches `fr:04 §Subprocess shapes`           |
+| Body form              | Shape resolution                                                                                  |
+| ---------------------- | ------------------------------------------------------------------------------------------------- |
+| inline `cmd = "..."`   | always `Command`. No frontmatter exists; no override.                                            |
+| inline `prompt = "..."`| always `Session`. No frontmatter exists; no override. Matches `fr:04 §29-34` row "any inline `*.prompt`". |
+| `path = "workflow/foo.md"` | resolved from the `.md` frontmatter `session:` field. Default `Session`. `session: "command"` flips to one-shot. Any other value is `WorkflowError::InvalidSessionField`. |
 
-Run-phase body must resolve to `PhaseShape::Command`. Slice 2 rejects `[[rule.run]] session = "session"` at load with `WorkflowError::SessionRunUnsupported` (deferred surface). Pre and post may be either shape independently of each other.
+Run-phase body must resolve to `PhaseShape::Command`. Slice 2 rejects a run that resolves to `Session` with `WorkflowError::SessionRunUnsupported` (scope deferral, not an fr contract change — see §1).
 
 ### 3.2 `PhaseBody`
 
 ```rust
 pub enum PhaseBody {
-    InlineCmd    { cmd: String,             stall_seconds: Option<u32> },
-    InlinePrompt { prompt: String,          shape: PhaseShape, stall_seconds: Option<u32> },
-    Path         { path: PathBuf, cli: Option<String>, shape: PhaseShape, stall_seconds: Option<u32> },
+    InlineCmd    { cmd: String },                                          // shape: Command (constant)
+    InlinePrompt { prompt: String },                                       // shape: Session (constant)
+    Path         { path: PathBuf, cli: Option<String>,                     // shape + stall_seconds parsed
+                   shape: PhaseShape, stall_seconds: Option<u32> },        //   from .md frontmatter
 }
 ```
 
-`stall_seconds: Option<u32>` is a per-file override. When `None`, the phase falls back to `[default.ai.{session,command}].stall_seconds` resolved by shape at execution time. Validated at load: must be `>= 1` if present.
+`Path::shape` and `Path::stall_seconds` come from the workflow .md frontmatter (§3.4). Inline variants carry neither; their shape is fixed by variant identity, and their stall window is the shape default from `roki.toml`.
 
-Slice 1's `Rule { pre: Option<PhaseBody>, run: PhaseBody, post: Option<PhaseBody> }` is unchanged structurally; only the variant payloads change. The slice-1 invariant that `run` is `PhaseBody::*` (any variant) still holds — the new shape check happens after parse, in `Rule::validate`.
+Slice 1's `Rule { pre: Option<PhaseBody>, run: PhaseBody, post: Option<PhaseBody> }` is unchanged structurally; only the `Path` variant grows new fields. The shape-of-run check fires in `Rule::validate` after `parse_phase_body` resolves `Path::shape`.
 
 ### 3.3 `[default.ai.session]`
 
@@ -116,6 +117,22 @@ stall_seconds = 600   # default per docs/reference/config.md
 Loader applies `stall_seconds = 600` if absent; validates `>= 1`. `[default.ai.command]` (slice 1) keeps its 300-second default.
 
 `cli` is required when any phase resolves to `PhaseShape::Session`; missing-cli is reported as `ConfigError::MissingSessionCli` at cycle start (not config load), because the shape resolution depends on which `[[rule]]` matches at admission time.
+
+### 3.4 `workflow/*.md` frontmatter parsing (new in slice 2)
+
+Slice 1 stores only the `path` string for `PhaseBody::Path` and reads the file body at execute time. Slice 2 additionally parses the YAML frontmatter at config-load time and resolves `shape` + `stall_seconds` once.
+
+Recognized fields:
+
+| Field            | Type   | Default     | Validation                                          |
+| ---------------- | ------ | ----------- | --------------------------------------------------- |
+| `session`        | string | `"session"` | one of `"session"` / `"command"`; else load error  |
+| `stall_seconds`  | int    | absent      | `>= 1`; else load error                             |
+| `cli`            | string | absent      | already honored by slice 1 as a CLI override        |
+
+The frontmatter delimiter is `---` at file start and `---` on a line of its own (slice 1 already strips these to compute the Liquid stdin body; slice 2 reuses that stripping to feed a YAML parser). Unknown fields are accepted silently — they are operator-authored documentation that the engine does not consume. Missing frontmatter is treated as `session: "session"` (default) with no `stall_seconds` override.
+
+The frontmatter is parsed once at `roki-daemon` startup and cached on the `Path` variant; it is **not** re-read between iterations. (Hot reload is deferred per §1.)
 
 ## 4. SessionSupervisor
 
@@ -176,8 +193,8 @@ reader_task(stdout: ChildStdout, events_writer: Arc<Mutex<Option<FileHandles>>>,
                         write iter_dir/<phase>.response.json (pretty)
                         send Event::Directive { value } on dir_chan
                         directive_sent_for_this_turn = true
-        Err(_)     → write line to events.jsonl as advisory (raw bytes); do not parse further
-    if directive_sent: lines after still go to events.jsonl until the next turn swap
+        Err(_)     → skip (line stays in <phase>.stdout via the byte-tee path; not appended to events.jsonl per fr:04 §72)
+    if directive_sent: parseable lines after still go to events.jsonl until the next turn swap
   }
   send Event::Exit on dir_chan
 ```
@@ -197,7 +214,11 @@ A directive value outside the legal set is `Failure(SchemaDrift)`. A line that p
 
 ### 4.4 Stderr handling
 
-Stderr is drained on its own task to prevent OS-level pipe-fill stalls. Writes are appended to a per-turn file `iter_dir/<phase>.stderr` opened by `run_turn` and rotated at the next turn (same atomic-swap mechanism as stdout's `events.jsonl`). Bytes that arrive between turns (extremely rare with stream-json CLIs) are written to a fallback `cycle-<uuid>/session.stderr` so they are not silently dropped.
+Stderr is drained on its own task to prevent OS-level pipe-fill stalls. The drain task writes to whichever per-turn file is currently active; `run_turn` swaps the active file on each entry (same atomic-swap mechanism as stdout's `events.jsonl`).
+
+Between-turn bytes (after a directive arrives, before the next `run_turn` opens its file) accumulate in an in-memory `Vec<u8>` owned by the supervisor. The next `run_turn` flushes that buffer into the new turn's `<phase>.stderr` before resuming the live drain. This keeps the on-disk surface inside `fr:04 §Capture`'s per-iter contract — only `<phase>.stderr` files exist; no cycle-level stderr file is introduced. Bytes that arrive after the cycle's final turn are flushed during `shutdown` into the last-active `<phase>.stderr` file.
+
+The buffer is bounded at 64 KiB (`SESSION_BETWEEN_TURN_STDERR_CAP`); if the cli emits more between turns the supervisor logs `phase_stderr_truncated` and discards the overflow. 64 KiB is two orders of magnitude above any observed claude/codex between-turn stderr volume.
 
 ### 4.5 Concurrency
 
@@ -250,7 +271,7 @@ When stall fires between turns (the supervisor sits idle waiting for the next `r
 
 ### 5.4 Per-turn stall override
 
-`PhaseBody.stall_seconds` overrides the shape default for that turn only. Implementation: `SessionSupervisor::run_turn` updates the watchdog's `stall_seconds` field via an `AtomicU32` swap before writing to stdin, and reverts to the supervisor default after the turn returns.
+`PhaseBody::Path { stall_seconds: Some(N), .. }` overrides the shape default for the duration of that turn (session) or invocation (command). Inline `cmd` and inline `prompt` bodies have no override; they use the shape default unconditionally. Implementation: when the active phase is path-form with a non-`None` stall override, `SessionSupervisor::run_turn` updates the watchdog's `stall_seconds` field via an `AtomicU32` swap before writing to stdin and reverts to the supervisor default after the turn returns. `CommandPhaseExecutor::execute` constructs its watchdog with the resolved value directly.
 
 ## 6. Stream-JSON capture
 
@@ -268,13 +289,12 @@ When stall fires between turns (the supervisor sits idle waiting for the next `r
         run.stdout  run.stderr  run.exit_code  run.terminal.json  # run still command-shape
         post.stdout  post.stderr  post.events.jsonl  post.response.json
       iter-2/ ...
-      session.stderr       # fallback for stderr bytes that arrive between turns (usually empty)
 ```
 
 ### 6.2 events.jsonl write semantics
 
-- One line per JSON object. Object is the verbatim line text from stdout (no re-serialisation). Reason: preserves the CLI's exact wire formatting for debugging.
-- Lines that fail to parse as JSON are still appended (the bytes are part of the agent's output and operators want forensics).
+- One line per **parseable** JSON object. Object is the verbatim line text from stdout (no re-serialisation). Reason: preserves the CLI's exact wire formatting for debugging. Per `fr:04 §70-72`.
+- Lines that fail to parse as JSON are **not** written to events.jsonl. Their bytes already sit in `<phase>.stdout` (which captures every byte from the subprocess), so forensics is preserved without polluting the parsed-event stream.
 - Append-only; never rewritten.
 
 ### 6.3 response.json write semantics
@@ -296,11 +316,9 @@ pub struct SessionPhaseFiles {
     pub stderr:  File,    // append for the duration of the turn
     pub events:  File,    // append; closed at next turn swap
 }
-
-pub fn open_session_fallback_stderr(cycle_root: &Path) -> Result<File, CaptureError>;
 ```
 
-Slice 1's `open_phase_files`, `write_response_json`, `write_run_exit_code` are kept verbatim. The session helpers live alongside them.
+Slice 1's `open_phase_files`, `write_response_json`, `write_run_exit_code` are kept verbatim. The session helper lives alongside them. No cycle-level stderr file is introduced; between-turn stderr is handled in supervisor RAM per §4.4.
 
 ## 7. run.terminal.json
 
@@ -453,11 +471,11 @@ Slice 1's `phase_started` / `phase_completed` / `phase_failed` are reused for bo
 | --------------------- | ------------------------------------------------------------------------------------------------------------------------------- |
 | `engine::stream`      | Line splitter on partial UTF-8, very long lines (64 KiB+), windows-style `\r\n`, claude `result` recognition (positive + negative on missing `type`, wrong `type`, malformed JSON), codex same shape |
 | `engine::stall`       | Deterministic clock via `tokio::time::pause`; simulated child writes; assert SIGTERM at `stall_seconds`, SIGKILL at `stall_seconds + GRACE_PERIOD`, healthy path on continuous bytes |
-| `engine::session`     | Fake child via `tokio::io::duplex`; two-turn directive flow; advisory event before terminal; advisory event after terminal stays in events.jsonl; stdin write to closed child surfaces `SessionStdinClosed`; iter_exhausted shutdown sequence; stall during turn produces `Failure(Stall)`; stall between turns produces next-turn `Failure(ProcessCrash)` |
+| `engine::session`     | Fake child via `tokio::io::duplex`; two-turn directive flow; advisory parseable event before terminal; advisory parseable event after terminal stays in events.jsonl; unparseable line is dropped from events.jsonl but bytes remain in `<phase>.stdout`; between-turn stderr buffer flushes to next turn's `<phase>.stderr`; between-turn stderr cap (64 KiB) truncates with `phase_stderr_truncated` log; stdin write to closed child surfaces `SessionStdinClosed`; iter_exhausted shutdown sequence; stall during turn produces `Failure(Stall)`; stall between turns produces next-turn `Failure(ProcessCrash)` |
 | `engine::directive`   | New streaming variant: pick first legal directive, ignore subsequent, ignore lines without `directive`                          |
 | `engine::cycle`       | Mixed-shape transitions (pre=session, run=command, post=session) via fakes; pure-session-pre-and-post; pure-command (slice 1 regression) |
 | `engine::phase`       | Run-phase tee: terminal-written-mid-stream, terminal-not-written (no `result` event), terminal `type` mismatch                  |
-| `config::workflow`    | `session = "session"` accepted on `prompt`/`path`; `session = "command"` accepted on same; `session = "*"` rejected on `cmd`; `[[rule.run]] session = "session"` rejected; `stall_seconds` override parsed and validated `>= 1` |
+| `config::workflow`    | inline `cmd` always Command; inline `prompt` always Session; `path` reads `session:` from .md frontmatter (default Session, accepts `"command"`, rejects other values as `InvalidSessionField`); `path` reads `stall_seconds` from .md frontmatter (validated `>= 1`); `[[rule.run]]` resolved to Session rejected as `SessionRunUnsupported`; missing frontmatter on path treated as default Session with no stall override |
 | `capture`             | `open_session_phase_files` happy path; `open_session_fallback_stderr`; concurrent appends from reader + drain tasks (via real fds in tempdir) |
 
 ### 11.2 Integration tests
@@ -491,11 +509,12 @@ Existing `iteration_smoke.rs` (slice 1) is untouched: it uses `cmd`-form phases,
 
 ### 12.1 Slice 1 call sites that change
 
-- `engine::outcome::PhaseBody` variants gain `shape` and `stall_seconds` fields. All match arms in `phase.rs`, `cycle.rs`, `template.rs`, `context.rs`, `config/workflow.rs` are updated.
+- `engine::outcome::PhaseBody::Path` gains `shape: PhaseShape` and `stall_seconds: Option<u32>` fields, parsed from the workflow .md frontmatter. `InlineCmd` and `InlinePrompt` are unchanged in field shape — their phase shape is fixed by variant identity.
 - `engine::outcome::FailureKind` gains `Stall` and `SessionSpawn`. Failure-table tests in `cycle.rs` are extended.
-- `engine::cycle::run_cycle` switches on `phase.shape` per phase to dispatch between `CommandPhaseExecutor` and `SessionSupervisor`. The `PhaseExecutor` trait is retained for command-shape so slice-1 unit tests continue to pass.
+- `engine::cycle::run_cycle` resolves each phase's shape (variant-fixed for inline forms; field-driven for `Path`) and dispatches between `CommandPhaseExecutor` and `SessionSupervisor`. The `PhaseExecutor` trait is retained for command-shape so slice-1 unit tests continue to pass.
 - `engine::phase::CommandPhaseExecutor::execute` is rewritten: stdout is teed via a tokio task instead of redirected to a `File` directly, in order to (a) feed the watchdog and (b) extract `run.terminal.json`. The behaviour for non-stream-json stdout is unchanged on disk.
-- `config::workflow::parse_phase_body` accepts `session` field on `prompt`/`path` and rejects on `cmd`. Slice 1's `WorkflowError::SessionShapeUnsupported` is removed; replaced by `WorkflowError::SessionRunUnsupported` for the run-only restriction.
+- `config::workflow::parse_phase_body` no longer accepts `session` on inline tables. The slice-1 `WorkflowError::SessionShapeUnsupported` is removed; load errors now surface as `InvalidSessionField` (path-form .md frontmatter only) or `SessionRunUnsupported` (run resolved to Session).
+- `config::workflow` gains `parse_workflow_md_frontmatter` which reads YAML between the leading `---/---` delimiters and extracts `session`, `stall_seconds`, `cli`. Called once per `path` reference at config load.
 - `config::roki` loader reads `[default.ai.session]` table. Default `stall_seconds = 600`.
 
 ### 12.2 capture.rs additions
