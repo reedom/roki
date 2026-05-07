@@ -91,7 +91,7 @@ pub async fn run_cycle(
                 exit_code,
                 duration_seconds,
             } => {
-                ctx.set_run(exit_code, duration_seconds);
+                ctx.set_run(exit_code, duration_seconds, None);
             }
             other => {
                 let got_variant = other.variant_name();

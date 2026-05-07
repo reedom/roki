@@ -190,7 +190,12 @@ impl ObjectView for NilSection {
         true
     }
     fn get<'s>(&'s self, _index: &str) -> Option<&'s dyn ValueView> {
-        Some(&self.nil)
+        // Return self (rather than Value::Nil) so that nested key access like
+        // `run.terminal.is_error` keeps walking through NilSection at every
+        // level — Liquid would otherwise raise "Unknown index" when indexing
+        // into Nil. The terminal render still produces an empty string because
+        // NilSection's `to_kstr` returns "".
+        Some(self)
     }
 }
 
@@ -292,7 +297,7 @@ mod tests {
     #[test]
     fn renders_run_exit_code_when_set() {
         let mut ctx = super::PhaseContext::new(&admitted(), Uuid::nil(), &cfg());
-        ctx.set_run(5, 12);
+        ctx.set_run(5, 12, None);
         let out = render_str("exit={{ run.exit_code }} dur={{ run.duration_seconds }}", &ctx).unwrap();
         assert_eq!(out, "exit=5 dur=12");
     }

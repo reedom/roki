@@ -48,6 +48,9 @@ pub struct ConfigView {
 pub struct RunView {
     pub exit_code: i32,
     pub duration_seconds: u64,
+    /// `Some(value)` iff `iter-N/run.terminal.json` was written for the
+    /// current iter (claude/codex `result` event surfaced).
+    pub terminal: Option<serde_json::Value>,
 }
 
 /// Engine-side execution context. Mutated through `set_iter`, `set_pre`,
@@ -90,6 +93,7 @@ impl PhaseContext {
 
     pub fn set_iter(&mut self, iter: u32) {
         self.cycle.iter = iter;
+        self.run = None;
     }
 
     pub fn set_pre(&mut self, payload: Value) {
@@ -100,10 +104,16 @@ impl PhaseContext {
         self.post = Some(payload);
     }
 
-    pub fn set_run(&mut self, exit_code: i32, duration_seconds: u64) {
+    pub fn set_run(
+        &mut self,
+        exit_code: i32,
+        duration_seconds: u64,
+        terminal: Option<serde_json::Value>,
+    ) {
         self.run = Some(RunView {
             exit_code,
             duration_seconds,
+            terminal,
         });
     }
 }
@@ -313,10 +323,33 @@ mod tests {
     #[test]
     fn env_pairs_export_run_exit_code_and_duration() {
         let mut ctx = PhaseContext::new(&admitted(), Uuid::nil(), &cfg(10));
-        ctx.set_run(7, 42);
+        ctx.set_run(7, 42, None);
         let pairs = roki_env_pairs(&ctx);
         assert!(pairs.iter().any(|(k, v)| k == "ROKI_RUN_EXIT_CODE" && v == "7"));
         assert!(pairs.iter().any(|(k, v)| k == "ROKI_RUN_DURATION_SECONDS" && v == "42"));
+    }
+
+    #[test]
+    fn run_terminal_exposed_via_liquid() {
+        let mut ctx = PhaseContext::new(&admitted(), Uuid::nil(), &cfg(10));
+        let terminal = serde_json::json!({"is_error": false, "result": "ok"});
+        ctx.set_run(0, 12, Some(terminal));
+        let rendered = crate::engine::template::render_str(
+            "{{ run.terminal.is_error }}/{{ run.terminal.result }}",
+            &ctx,
+        )
+        .unwrap();
+        assert_eq!(rendered, "false/ok");
+    }
+
+    #[test]
+    fn run_terminal_clears_between_iters() {
+        let mut ctx = PhaseContext::new(&admitted(), Uuid::nil(), &cfg(10));
+        ctx.set_run(0, 1, Some(serde_json::json!({"is_error": false})));
+        ctx.set_iter(2);
+        let rendered =
+            crate::engine::template::render_str("{{ run.terminal.is_error }}", &ctx).unwrap();
+        assert_eq!(rendered, "");
     }
 
     #[test]
