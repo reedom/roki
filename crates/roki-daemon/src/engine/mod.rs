@@ -13,9 +13,12 @@ pub mod cycle;
 pub mod directive;
 pub mod outcome;
 pub mod phase;
+pub mod session;
 pub mod stall;
 pub mod stream;
 pub mod template;
 
 pub use cycle::{run_cycle, CycleOutcome};
 pub use phase::CommandPhaseExecutor;
+#[allow(unused_imports)]
+pub use session::{SessionConfig, SessionSupervisor};
