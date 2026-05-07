@@ -164,7 +164,7 @@ Recognized fields:
 
 Each phase declares exactly one of `path` / `prompt` / `cmd` (mutually exclusive):
 
-- `path = "<file>"` — file form. The file's frontmatter chooses `session: "session"` (long-lived AI reused within the cycle) or `session: "command"` (one-shot subprocess). The body is a Liquid template.
+- `path = "<file>"` — file form. Relative paths resolve against the directory of the WORKFLOW.toml that declared them; absolute paths pass through. The file's frontmatter chooses `session: "session"` (long-lived AI reused within the cycle) or `session: "command"` (one-shot subprocess). The body is a Liquid template.
 - `prompt = "<inline string>"` — inline session form. Always uses `default.ai.session.cli` from `roki.toml`.
 - `cmd = "<inline string>"` — inline command form. The operator writes the full command line; the daemon spawns the process directly.
 
