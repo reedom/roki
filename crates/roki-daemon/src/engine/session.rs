@@ -230,6 +230,59 @@ impl SessionSupervisor {
     }
 }
 
+/// Reason the cycle is asking the supervisor to wind down.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SessionShutdownReason {
+    /// Cycle ended via terminal directive — child should exit cleanly when
+    /// stdin closes.
+    Completed,
+    /// `iter == max_iterations` and post returned `pre`/`run`. Per fr:01
+    /// §123-125: close stdin, wait the stall window, SIGTERM if still alive.
+    IterExhausted,
+    /// Earlier failure on a phase. Child may be partially through a turn;
+    /// terminate without waiting on stdin.
+    Failed,
+}
+
+impl SessionSupervisor {
+    pub async fn shutdown(&self, reason: SessionShutdownReason) {
+        use std::time::Duration;
+        use tokio::time::Instant;
+
+        // Close stdin first (Completed / IterExhausted want a graceful exit).
+        if !matches!(reason, SessionShutdownReason::Failed) {
+            let mut stdin_guard = self.stdin.lock().await;
+            *stdin_guard = None; // drop the writer, stdin EOFs
+        }
+
+        // Wait up to default_stall_seconds for the child to exit on its own.
+        let deadline = Instant::now() + Duration::from_secs(self.default_stall_seconds as u64);
+        loop {
+            let mut child_guard = self.child.lock().await;
+            let Some(child) = child_guard.as_mut() else {
+                return;
+            };
+            if child.try_wait().ok().flatten().is_some() {
+                *child_guard = None;
+                return;
+            }
+            drop(child_guard);
+            if Instant::now() >= deadline || matches!(reason, SessionShutdownReason::Failed) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+
+        // Stall window expired (or Failed reason) — SIGTERM, grace, SIGKILL.
+        let mut child_guard = self.child.lock().await;
+        let Some(child) = child_guard.as_mut() else {
+            return;
+        };
+        crate::engine::stall::terminate_child_external(child).await;
+        *child_guard = None;
+    }
+}
+
 async fn reader_task(
     stdout: tokio::process::ChildStdout,
     watchdog: Watchdog,
@@ -383,5 +436,37 @@ done
         assert!(events.contains("\"thinking\""));
         assert!(events.contains("\"end\""));
         assert!(iter_dir.join("post.response.json").is_file());
+    }
+
+    #[tokio::test]
+    async fn shutdown_completed_closes_stdin_and_waits_for_clean_exit() {
+        // The fake_session_cfg loop exits as soon as stdin closes, so a
+        // Completed shutdown should observe a clean exit without SIGTERM.
+        let sup = SessionSupervisor::spawn(fake_session_cfg()).await.unwrap();
+        sup.shutdown(SessionShutdownReason::Completed).await;
+        // Subsequent shutdown is a no-op.
+        sup.shutdown(SessionShutdownReason::Completed).await;
+    }
+
+    #[tokio::test]
+    async fn shutdown_iter_exhausted_terminates_after_stall_window() {
+        // Use a child that ignores stdin close. Shutdown must SIGTERM after
+        // the stall window (here 1 s).
+        let cfg = SessionConfig {
+            cli: "bash".to_string(),
+            argv: vec![
+                "bash".to_string(),
+                "-c".to_string(),
+                "trap '' TERM; sleep 30".to_string(),
+            ],
+            default_stall_seconds: 1,
+            cwd: std::env::temp_dir(),
+            envs: Vec::new(),
+        };
+        let sup = SessionSupervisor::spawn(cfg).await.unwrap();
+        let started = std::time::Instant::now();
+        sup.shutdown(SessionShutdownReason::IterExhausted).await;
+        // SIGTERM after 1 s stdin-close-wait + 5 s grace + SIGKILL — should finish well before 30 s.
+        assert!(started.elapsed() < std::time::Duration::from_secs(15));
     }
 }

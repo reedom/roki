@@ -110,6 +110,11 @@ pub(crate) async fn terminate_child(child: &mut Child) {
     let _ = child.wait().await;
 }
 
+/// Public alias usable from `engine::session`.
+pub async fn terminate_child_external(child: &mut Child) {
+    terminate_child(child).await
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
