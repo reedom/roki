@@ -31,11 +31,36 @@ pub trait PhaseExecutor: Send + Sync {
     ) -> Result<PhaseOutcome, PhaseInfraError>;
 }
 
+/// Stall window resolution at construction time. Lets the executor honour
+/// either the shape default or a per-file override without re-reading
+/// config in the hot path.
+#[derive(Debug, Clone, Copy)]
+pub enum StallWindow {
+    /// Use this many seconds. Wired in by Task 17 once per-phase override
+    /// flows through the executor.
+    #[allow(dead_code)]
+    Override(u32),
+    /// Use the command-shape default from `[default.ai.command].stall_seconds`.
+    CommandDefault(u32),
+}
+
+impl StallWindow {
+    pub fn seconds(self) -> u32 {
+        match self {
+            StallWindow::Override(n) | StallWindow::CommandDefault(n) => n,
+        }
+    }
+}
+
 /// Production phase executor for command-shape phases.
 pub struct CommandPhaseExecutor {
     /// `[default.ai.command].cli` from `roki.toml`. Used as the argv source
     /// for inline-prompt and path bodies that don't carry a `cli` override.
     pub default_cli: String,
+    /// Resolved stall window applied to every command-shape phase. A
+    /// per-file `stall_seconds` override on a `Path` body still wins inside
+    /// `execute`; this field is the fallback when the body has no override.
+    pub stall: StallWindow,
 }
 
 #[async_trait]
@@ -48,13 +73,26 @@ impl PhaseExecutor for CommandPhaseExecutor {
         iter_dir: &Path,
     ) -> Result<PhaseOutcome, PhaseInfraError> {
         let cwd = resolve_ghq_base(&ctx.repo.ghq).await?;
-        execute_at(&self.default_cli, kind, body, ctx, iter_dir, &cwd).await
+        let resolved_stall = body
+            .stall_seconds_override()
+            .unwrap_or_else(|| self.stall.seconds());
+        execute_at(
+            &self.default_cli,
+            kind,
+            body,
+            ctx,
+            iter_dir,
+            &cwd,
+            resolved_stall,
+        )
+        .await
     }
 }
 
 /// Inner pipeline shared by production and unit tests. Takes a resolved
 /// `cwd` so tests can bypass `ghq list -p` and exercise the full argv +
-/// stdin + env + capture path against a tempdir.
+/// stdin + env + capture path against a tempdir. `stall_seconds` is the
+/// already-resolved watchdog window (per-file override or shape default).
 async fn execute_at(
     default_cli: &str,
     kind: PhaseKind,
@@ -62,6 +100,7 @@ async fn execute_at(
     ctx: &PhaseContext,
     iter_dir: &Path,
     cwd: &Path,
+    stall_seconds: u32,
 ) -> Result<PhaseOutcome, PhaseInfraError> {
         // 2. Build argv + stdin body.
         let (argv_template, stdin_template_opt) = match body {
@@ -146,24 +185,16 @@ async fn execute_at(
             });
         };
 
-        // 5. Open stdout / stderr capture files.
+        // 5. Open the on-disk stdout/stderr files via the existing helper.
         let (stdout_file, stderr_file) = crate::capture::open_phase_files(iter_dir, kind)?;
-        let stdout_handle = stdout_file.try_clone().map_err(|source| PhaseInfraError::Spawn {
-            cmd: argv_rendered.clone(),
-            source,
-        })?;
-        let stderr_handle = stderr_file.try_clone().map_err(|source| PhaseInfraError::Spawn {
-            cmd: argv_rendered.clone(),
-            source,
-        })?;
 
-        // 6. Build the Command.
+        // 6. Build the Command (piped stdio so we can tee).
         let env_pairs = roki_env_pairs(ctx);
         let mut cmd = Command::new(bin);
         cmd.args(rest)
             .current_dir(cwd)
-            .stdout(Stdio::from(stdout_handle))
-            .stderr(Stdio::from(stderr_handle));
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
         if stdin_rendered.is_some() {
             cmd.stdin(Stdio::piped());
         } else {
@@ -180,12 +211,14 @@ async fn execute_at(
             cmd.env(k, v);
         }
 
-        // 7. Spawn and write stdin.
+        // 7. Spawn.
         let started = Instant::now();
         let mut child = cmd.spawn().map_err(|source| PhaseInfraError::Spawn {
             cmd: argv_rendered.clone(),
             source,
         })?;
+
+        // 8. Write stdin once if needed; close it.
         if let Some(body) = stdin_rendered.as_ref() {
             // We set `Stdio::piped()` above whenever stdin_rendered is Some,
             // so child.stdin must be present here. If the handle is already
@@ -205,17 +238,47 @@ async fn execute_at(
             drop(stdin);
         }
 
-        // 8. Wait.
+        // 9. Tee stdout and drain stderr via tokio tasks while the watchdog
+        //    polls the child for stall. Per-byte `tick_stdout` keeps the
+        //    watchdog honest; the stall surfaces as `FailureKind::Stall`.
+        let stdout_pipe = child.stdout.take().expect("piped");
+        let stderr_pipe = child.stderr.take().expect("piped");
+        let watchdog = crate::engine::stall::Watchdog::new(stall_seconds);
+
+        let stdout_task = {
+            let wd = watchdog.clone();
+            let raw = stdout_file;
+            let kind_for_task = kind;
+            let iter_dir_for_task = iter_dir.to_path_buf();
+            tokio::spawn(async move {
+                tee_stdout(stdout_pipe, raw, wd, kind_for_task, iter_dir_for_task).await;
+            })
+        };
+
+        let stderr_task = {
+            let raw = stderr_file;
+            tokio::spawn(async move {
+                drain_stderr(stderr_pipe, raw).await;
+            })
+        };
+
+        // 10. Watchdog drives termination on stall. When it fires, the
+        //     child has been signalled (SIGTERM, then SIGKILL after grace),
+        //     so `child.wait()` will succeed with a signal-encoded status.
+        let stall_outcome = watchdog.run(&mut child).await;
+        let _ = stdout_task.await;
+        let _ = stderr_task.await;
         let exit_status = child.wait().await.map_err(|source| PhaseInfraError::Wait {
             cmd: argv_rendered.clone(),
             source,
         })?;
         let duration_seconds = started.elapsed().as_secs();
 
-        // Drop the capture handles we kept so the post-exit reads see the
-        // child's bytes flushed.
-        drop(stdout_file);
-        drop(stderr_file);
+        if stall_outcome == crate::engine::stall::StallOutcome::StalledThenTerminated {
+            return Ok(PhaseOutcome::Failure {
+                kind: FailureKind::Stall,
+            });
+        }
 
         // 9. Translate exit + stdout into PhaseOutcome.
         match kind {
@@ -313,6 +376,52 @@ async fn resolve_ghq_base(ghq: &str) -> Result<std::path::PathBuf, PhaseInfraErr
             ghq: ghq.to_string(),
         })?;
     Ok(std::path::PathBuf::from(line))
+}
+
+/// Tee one process's stdout into the on-disk capture file while ticking the
+/// watchdog on every read. Task 11 will also forward bytes into the
+/// run-terminal scanner; for now `_kind` and `_iter_dir` are placeholders so
+/// the wiring is a single-call addition.
+async fn tee_stdout(
+    mut stdout_pipe: tokio::process::ChildStdout,
+    mut raw_writer: std::fs::File,
+    watchdog: crate::engine::stall::Watchdog,
+    _kind: crate::engine::outcome::PhaseKind,
+    _iter_dir: std::path::PathBuf,
+) {
+    use std::io::Write;
+    use tokio::io::AsyncReadExt;
+    let mut buf = [0u8; 4096];
+    loop {
+        match stdout_pipe.read(&mut buf).await {
+            Ok(0) => break,
+            Ok(n) => {
+                watchdog.tick_stdout();
+                let _ = raw_writer.write_all(&buf[..n]);
+            }
+            Err(_) => break,
+        }
+    }
+}
+
+/// Drain stderr to the on-disk capture file. We don't tick the watchdog on
+/// stderr — only stdout silence counts as a stall per fr:04.
+async fn drain_stderr(
+    mut stderr_pipe: tokio::process::ChildStderr,
+    mut raw_writer: std::fs::File,
+) {
+    use std::io::Write;
+    use tokio::io::AsyncReadExt;
+    let mut buf = [0u8; 4096];
+    loop {
+        match stderr_pipe.read(&mut buf).await {
+            Ok(0) => break,
+            Ok(n) => {
+                let _ = raw_writer.write_all(&buf[..n]);
+            }
+            Err(_) => break,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -509,7 +618,7 @@ mod tests {
         };
         let cwd = tmp.path().to_path_buf();
 
-        let out = super::execute_at("echo", PhaseKind::Run, &body, &ctx, &iter_dir, &cwd)
+        let out = super::execute_at("echo", PhaseKind::Run, &body, &ctx, &iter_dir, &cwd, 300)
             .await
             .unwrap();
         match out {
@@ -538,7 +647,7 @@ mod tests {
         };
         let cwd = tmp.path().to_path_buf();
 
-        let out = super::execute_at("cat", PhaseKind::Pre, &body, &ctx, &iter_dir, &cwd)
+        let out = super::execute_at("cat", PhaseKind::Pre, &body, &ctx, &iter_dir, &cwd, 300)
             .await
             .unwrap();
         match out {
@@ -578,6 +687,7 @@ mod tests {
             &ctx,
             &iter_dir,
             &cwd,
+            300,
         )
         .await
         .unwrap();
@@ -604,7 +714,7 @@ mod tests {
         };
         let cwd = tmp.path().to_path_buf();
 
-        let err = super::execute_at("cat", PhaseKind::Pre, &body, &ctx, &iter_dir, &cwd)
+        let err = super::execute_at("cat", PhaseKind::Pre, &body, &ctx, &iter_dir, &cwd, 300)
             .await
             .expect_err("missing workflow body must surface infra error");
         match err {
@@ -623,5 +733,39 @@ mod tests {
     fn strip_frontmatter_passthrough_when_absent() {
         let raw = "no frontmatter here";
         assert_eq!(super::strip_frontmatter(raw), raw);
+    }
+
+    #[tokio::test]
+    async fn command_phase_stalls_on_idle_child() {
+        // Idle stdout for longer than the stall window must surface as
+        // FailureKind::Stall via the watchdog-driven termination path.
+        let tmp = tempfile::TempDir::new().unwrap();
+        let iter_dir = crate::capture::create_iter_dir(
+            tmp.path(),
+            "ENG-1",
+            Uuid::nil(),
+            1,
+        )
+        .unwrap();
+        let body = PhaseBody::InlineCmd {
+            cmd: "sleep 30".to_string(),
+        };
+        let ctx = PhaseContext::new(&admitted(), Uuid::nil(), &cfg());
+        let cwd = tmp.path().to_path_buf();
+        let outcome = super::execute_at(
+            "echo unused",
+            PhaseKind::Run,
+            &body,
+            &ctx,
+            &iter_dir,
+            &cwd,
+            1, // 1-second stall window
+        )
+        .await
+        .unwrap();
+        match outcome {
+            PhaseOutcome::Failure { kind: FailureKind::Stall } => {}
+            other => panic!("expected Failure(Stall), got {other:?}"),
+        }
     }
 }

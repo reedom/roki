@@ -154,6 +154,9 @@ pub(crate) async fn run_inner(config_path: &Path) -> Result<(), SkeletonError> {
 
     let executor = crate::engine::CommandPhaseExecutor {
         default_cli: cfg.default_ai_command.cli.clone(),
+        stall: crate::engine::phase::StallWindow::CommandDefault(
+            cfg.default_ai_command.stall_seconds,
+        ),
     };
     let outcome = crate::engine::run_cycle(
         &executor,
