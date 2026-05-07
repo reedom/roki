@@ -34,7 +34,7 @@ Operators specify the path with `--config <path>` ([12-daemon-lifecycle](12-daem
 - **Observability HTTP API** (`[api]`, optional): bind address and port for the **read-only** observability surface consumed by `roki-tui` and `roki events`. Default loopback. If `[api].port` is unset the server does not start.
 - **AI default CLIs**: the cli line and stall window the daemon uses when a workflow phase declares `session = "session"` (long-lived stream-json AI reused within one cycle's pre/post chain) or `session = "command"` (one-shot subprocess) without specifying its own cli line.
 - **Engine knobs**: per-cycle iteration cap and (future) concurrency cap.
-- **Paths**: where to load WORKFLOW.toml from, where to put session tempdirs, where to put worktrees.
+- **Paths**: where to load WORKFLOW.toml from, where to put session tempdirs.
 - **Log destination**: the structured event log goes to stdout, a file, or both, with operator-set rotation policy.
 
 Any invalid value or resolution failure (`[admission].assignee` cannot be resolved against the Linear API token holder, `[default.ai.session].cli` missing, WORKFLOW.toml path missing, token missing, `[linear.webhook]` missing, etc.) **refuses startup** and emits the offending field in the structured log. `[api]` is optional and its absence is logged at info severity but does not refuse startup.
@@ -73,7 +73,6 @@ max_iterations = 10
 [paths]
 workflow = "./WORKFLOW.toml"
 session_root = "~/.cache/roki/sessions"
-worktree_root = "~/wt"
 
 [log]
 destination = "stdout"      # "stdout" | "file" | "both"

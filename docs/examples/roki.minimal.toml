@@ -19,4 +19,3 @@ cli = "claude -p --output-format stream-json --max-turns 100"
 [paths]
 workflow = "./WORKFLOW.toml"
 session_root = "~/.cache/roki/sessions"
-worktree_root = "~/wt"

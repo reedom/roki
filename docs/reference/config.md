@@ -42,7 +42,6 @@ Per workspace, specified with `--config <path>` ([cli.md](cli.md)). Not hot-relo
 | `[engine].max_iterations` | no | int | `10` | min `1` | [fr:01 §Iteration cap](../fr/01-engine-model.md) |
 | `[paths].workflow` | yes | path | — | Refuses startup if file missing / unreadable | [fr:02](../fr/02-configuration.md) |
 | `[paths].session_root` | yes | path | — | Refuses startup if parent directory missing or not writable | [fr:05](../fr/05-worktree-and-session.md) |
-| `[paths].worktree_root` | yes | path | — | Refuses startup if parent directory missing or not writable | [fr:05](../fr/05-worktree-and-session.md) |
 | `[log].destination` | no | enum (`stdout` / `file` / `both`) | `stdout` | — | [fr:08 §Tier 1](../fr/08-observability-logs.md) |
 | `[log].file_path` | yes when `destination ∈ {file, both}` | path | — | Refuses startup if parent directory missing or not writable | [fr:08 §Tier 1](../fr/08-observability-logs.md) |
 | `[log].level` | no | enum (`error` / `warn` / `info` / `debug` / `trace`) | `info` | — | [fr:08 §Tier 1](../fr/08-observability-logs.md) |

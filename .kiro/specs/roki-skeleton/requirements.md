@@ -63,7 +63,7 @@ Naming, CLI surface, and config keys follow the canonical references `ref:cli` (
 - **Adjacent expectations**:
   - Later specs may extend each scope item but must not regress the skeleton smoke test `crates/roki-daemon/tests/e2e/skeleton_smoke.rs`.
   - The skeleton does not own worktree lifecycle, the canonical capture-file layout, the structured event catalog, polling, signature verification, or recovery semantics; later specs introduce them.
-  - Per `fr:02`, `[linear].token`, `[linear.webhook].secret`, `[linear.webhook].bind`, `[linear.webhook].port`, `[default.ai.session].cli`, `[default.ai.command].cli`, `[paths].workflow`, `[paths].session_root`, and `[paths].worktree_root` are required keys at the canonical schema level. The skeleton may relax `[linear.webhook].secret`, `[default.ai.session].cli`, and `[paths].worktree_root` requirement enforcement so deferred specs can tighten them later without contradiction.
+  - Per `fr:02`, `[linear].token`, `[linear.webhook].secret`, `[linear.webhook].bind`, `[linear.webhook].port`, `[default.ai.session].cli`, `[default.ai.command].cli`, `[paths].workflow`, and `[paths].session_root` are required keys at the canonical schema level. The skeleton may relax `[linear.webhook].secret` and `[default.ai.session].cli` requirement enforcement so deferred specs can tighten them later without contradiction.
 
 ## Requirements
 
@@ -82,7 +82,7 @@ Naming, CLI surface, and config keys follow the canonical references `ref:cli` (
 1. When the configuration file is loaded, the roki daemon shall read the `[linear]`, `[linear.webhook]`, `[default.ai.command]`, `[engine]`, `[paths]`, and `[log]` sections of `roki.toml` per `ref:config`.
 2. The roki daemon shall resolve `[paths].workflow` and load that file as `WORKFLOW.toml`, reading `[admission]`, `[[admission.repos]]`, and `[[rule]]`.
 3. If a required field within those sections is missing or fails type validation, then the roki daemon shall exit with a non-zero status and emit a configuration error identifying the offending field.
-4. Where `[default.ai.session]`, `[linear.webhook].secret`, `[paths].worktree_root`, or any other configuration key not listed above is present, the roki daemon shall accept the value without applying it during the skeleton phase.
+4. Where `[default.ai.session]`, `[linear.webhook].secret`, or any other configuration key not listed above is present, the roki daemon shall accept the value without applying it during the skeleton phase.
 5. Where `[[cleanup]]`, `[[on_failure]]`, or any per-repo `[[admission.repos]] workflow` override is present in `WORKFLOW.toml`, the roki daemon shall accept the configuration without evaluating those entries during the skeleton phase.
 
 ### Requirement 3: Linear Webhook Reception

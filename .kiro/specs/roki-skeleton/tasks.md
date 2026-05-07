@@ -42,7 +42,7 @@ Tasks are ordered to match implementation order: foundation first, then layers i
 
 - [x] 2. Config layer: load and validate the canonical `roki.toml` and `WORKFLOW.toml` slices
 - [x] 2.1 (P) Implement the `roki.toml` loader covering the six sections required by the skeleton
-  - Deserialize `[linear]`, `[linear.webhook]`, `[default.ai.command]`, `[engine]`, `[paths]`, `[log]` per `ref:config`; tolerate unknown keys and accepted-without-applying keys (`[default.ai.session]`, `[linear.webhook].secret`, `[paths].worktree_root`).
+  - Deserialize `[linear]`, `[linear.webhook]`, `[default.ai.command]`, `[engine]`, `[paths]`, `[log]` per `ref:config`; tolerate unknown keys and accepted-without-applying keys (`[default.ai.session]`, `[linear.webhook].secret`).
   - Enforce the required-field set listed in design `config::roki` (`[linear].token`, `[linear.webhook].bind`, `[linear.webhook].port`, `[default.ai.command].cli`, `[paths].workflow`, `[paths].session_root`); on missing or type-mismatched fields, return a `RokiConfigError` whose message names the offending key path.
   - Hand-roll `Debug` for the loaded config so `[linear].token` is masked in log output.
   - Add unit tests covering: missing required field rejection, unknown / accepted-without-applying keys silently retained, `Debug` token masking.

@@ -261,7 +261,7 @@ Notes after the diagram:
 | 2.1 | Read six canonical `roki.toml` sections | `config::roki` | `RokiConfig` | startup |
 | 2.2 | Resolve `[paths].workflow` and load `WORKFLOW.toml` minimally | `config::roki`, `config::workflow` | `WorkflowConfig::load` | startup |
 | 2.3 | Required-field / type validation → non-zero exit + offending field | `config::roki`, `config::workflow` | `ConfigError` variants | startup |
-| 2.4 | Accept (without applying) `[default.ai.session]`, `[linear.webhook].secret`, `[paths].worktree_root`, and any non-listed key | `config::roki` | `RokiConfig` permissive struct | startup |
+| 2.4 | Accept (without applying) `[default.ai.session]`, `[linear.webhook].secret`, and any non-listed key | `config::roki` | `RokiConfig` permissive struct | startup |
 | 2.5 | Accept (without evaluating) `[[cleanup]]`, `[[on_failure]]`, per-repo `[[admission.repos]] workflow` overrides | `config::workflow` | `WorkflowConfig` permissive struct | startup |
 | 3.1 | Bind axum on `[linear.webhook].bind` / `.port` | `linear::webhook`, `runtime` | `axum::Router` | startup |
 | 3.2 | Parse JSON body → `NormalizedTicket` → forward to admission | `linear::webhook`, `linear::ticket`, `admission` | `NormalizedTicket` | end-to-end |
@@ -357,7 +357,7 @@ pub async fn run() -> anyhow::Result<std::process::ExitCode>;
 **Responsibilities & Constraints**
 
 - Reads `[linear]`, `[linear.webhook]`, `[default.ai.command]`, `[engine]`, `[paths]`, `[log]` per [`ref:config`](../../docs/reference/config.md).
-- Required-field set the skeleton **enforces**: `[linear].token`, `[linear.webhook].bind`, `[linear.webhook].port`, `[default.ai.command].cli`, `[paths].workflow`, `[paths].session_root`. (`[linear.webhook].secret`, `[default.ai.session].cli`, `[paths].worktree_root` are accepted-without-applying per Req 2.4.)
+- Required-field set the skeleton **enforces**: `[linear].token`, `[linear.webhook].bind`, `[linear.webhook].port`, `[default.ai.command].cli`, `[paths].workflow`, `[paths].session_root`. (`[linear.webhook].secret`, `[default.ai.session].cli` are accepted-without-applying per Req 2.4.)
 - Type validation matches the canonical schema (string / int / bind addr / port / path).
 - Unknown keys (within the read sections or outside them) are tolerated to honor Req 2.4.
 
@@ -631,7 +631,7 @@ Path layout is intentionally simpler than the canonical `<session_root>/<ticket-
 
 ### Unit Tests
 
-- `config::roki::load`: rejects missing `[linear].token` with key-path-bearing error; accepts unknown / `secret` / `worktree_root` keys silently (Req 2.3, 2.4).
+- `config::roki::load`: rejects missing `[linear].token` with key-path-bearing error; accepts unknown / `secret` keys silently (Req 2.3, 2.4).
 - `config::workflow::load`: rejects `when.assignee = ...`, `run.path = ...`, missing `run`; accepts the canonical happy-path TOML (Req 5.3, 6.2).
 - `admission::accept`: assignee mismatch → `Reject`; `me` resolved id matches → `Accept`; missing `[[admission.repos]]` → `NoRepos` (Req 4.1, 4.2, 4.4).
 - `rule::first_match`: status equality + `has_all` containment hit → returns rule; status mismatch → `None`; `has_all` not contained → `None` (Req 5.1, 5.2, 5.4).

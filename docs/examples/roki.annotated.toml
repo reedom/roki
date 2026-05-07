@@ -82,9 +82,8 @@ workflow = "./WORKFLOW.toml"
 # log capture only; never used as a phase subprocess cwd.
 session_root = "~/.cache/roki/sessions"
 
-# Per-ticket worktree root. The daemon creates worktrees here lazily on first
-# `pre.directive: "run"` of a cycle.
-worktree_root = "~/wt"
+# Worktree paths are owned by worktrunk (see ~/.config/worktrunk/config.toml).
+# The daemon does not configure or enumerate worktree directories itself.
 
 # ============================================================
 # [log] — Structured event log destination

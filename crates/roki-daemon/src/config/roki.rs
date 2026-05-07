@@ -13,7 +13,7 @@
 //! `[log]`) per [`ref:config`](../../../docs/reference/config.md).
 //! Required-field set per design `config::roki`. Unknown keys and
 //! accepted-without-applying keys (`[default.ai.session]`,
-//! `[linear.webhook].secret`, `[paths].worktree_root`) load silently.
+//! `[linear.webhook].secret`) load silently.
 //!
 //! `[linear].token` is held in process memory; the hand-rolled `Debug`
 //! impl on `LinearSection` masks it as `***` so tracing emissions of the
@@ -94,8 +94,6 @@ pub struct EngineSection {
 pub struct PathsSection {
     pub workflow: PathBuf,
     pub session_root: PathBuf,
-    /// Accepted-without-applying per Req 2.4.
-    pub worktree_root: Option<PathBuf>,
 }
 
 /// `[log]` section. No fields are required at the skeleton level;
@@ -219,7 +217,6 @@ struct RawEngine {
 struct RawPaths {
     workflow: Option<PathBuf>,
     session_root: Option<PathBuf>,
-    worktree_root: Option<PathBuf>,
 }
 
 #[derive(Default, Deserialize)]
@@ -267,7 +264,6 @@ impl RawRokiConfig {
                 "paths.session_root",
                 raw_paths.session_root,
             )?,
-            worktree_root: raw_paths.worktree_root,
         };
 
         let engine = EngineSection {
@@ -355,7 +351,6 @@ max_iterations = 5
 [paths]
 workflow = "/etc/roki/WORKFLOW.toml"
 session_root = "/var/roki/sessions"
-worktree_root = "/var/roki/worktrees"
 
 [log]
 level = "info"
@@ -381,10 +376,6 @@ destination = "stdout"
         assert_eq!(
             cfg.paths.session_root,
             std::path::PathBuf::from("/var/roki/sessions")
-        );
-        assert_eq!(
-            cfg.paths.worktree_root,
-            Some(std::path::PathBuf::from("/var/roki/worktrees"))
         );
     }
 
