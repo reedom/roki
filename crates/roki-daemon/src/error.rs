@@ -168,26 +168,33 @@ pub enum CaptureError {
     },
 }
 
-/// Errors raised by the subprocess runner.
-///
-/// Spawn covers Req 6.1 / 8.3 (command-form runner). Wait covers Req 8.3
-/// (non-zero exit on runner-internal failure distinct from a non-zero
-/// child exit, which is captured but not itself an error here).
+/// Errors raised by the engine's phase executor that are infrastructure-level
+/// rather than directive-level failures. These propagate up through
+/// `runtime::run_inner` and exit the binary with `ExitCode::FAILURE`. They
+/// are distinct from `engine::outcome::FailureKind`, which represents
+/// directive-level failures (`unparseable`, `schema_drift`, `process_crash`,
+/// `template_error`, `iter_exhausted`) routed inside the cycle.
 #[derive(Debug, Error)]
-pub enum RunnerError {
-    #[error("runner failed to spawn '{cmd}': {source}")]
+pub enum PhaseInfraError {
+    #[error("phase failed to spawn '{cmd}': {source}")]
     Spawn {
         cmd: String,
         #[source]
         source: std::io::Error,
     },
 
-    #[error("runner failed to wait on '{cmd}': {source}")]
+    #[error("phase failed to wait on '{cmd}': {source}")]
     Wait {
         cmd: String,
         #[source]
         source: std::io::Error,
     },
+
+    #[error("ghq base path not found for '{ghq}'")]
+    RepoNotFound { ghq: String },
+
+    #[error(transparent)]
+    Capture(#[from] CaptureError),
 }
 
 /// Top-level aggregate error for the skeleton daemon.
@@ -216,7 +223,7 @@ pub enum SkeletonError {
     Capture(#[from] CaptureError),
 
     #[error(transparent)]
-    Runner(#[from] RunnerError),
+    PhaseInfra(#[from] PhaseInfraError),
 }
 
 #[cfg(test)]
@@ -355,18 +362,40 @@ mod tests {
     }
 
     #[test]
-    fn runner_display_carries_cmd() {
-        let e = RunnerError::Spawn {
-            cmd: "sh -c 'true'".into(),
+    fn phase_infra_display_carries_paths_and_cmds() {
+        let e = PhaseInfraError::Spawn {
+            cmd: "claude --foo".into(),
             source: io_err(),
         };
-        assert!(format!("{e}").contains("sh -c 'true'"));
+        assert!(format!("{e}").contains("claude --foo"));
 
-        let e = RunnerError::Wait {
-            cmd: "cargo build".into(),
+        let e = PhaseInfraError::Wait {
+            cmd: "claude --foo".into(),
             source: io_err(),
         };
-        assert!(format!("{e}").contains("cargo build"));
+        assert!(format!("{e}").contains("claude --foo"));
+
+        let e = PhaseInfraError::RepoNotFound {
+            ghq: "github.com/acme/widget".into(),
+        };
+        let s = format!("{e}");
+        assert!(s.contains("github.com/acme/widget"), "msg: {s}");
+
+        let e = PhaseInfraError::Capture(CaptureError::CreateDir {
+            path: PathBuf::from("/tmp/foo"),
+            source: io_err(),
+        });
+        assert!(format!("{e}").contains("/tmp/foo"));
+    }
+
+    #[test]
+    fn skeleton_error_aggregates_phase_infra() {
+        let inner = PhaseInfraError::Spawn {
+            cmd: "x".into(),
+            source: io_err(),
+        };
+        let outer: SkeletonError = inner.into();
+        assert!(format!("{outer}").contains("x"));
     }
 
     #[test]
@@ -413,12 +442,5 @@ mod tests {
         };
         let outer: SkeletonError = inner.into();
         assert!(format!("{outer}").contains("/tmp/c"));
-
-        let inner = RunnerError::Spawn {
-            cmd: "foo".into(),
-            source: io_err(),
-        };
-        let outer: SkeletonError = inner.into();
-        assert!(format!("{outer}").contains("foo"));
     }
 }

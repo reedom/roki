@@ -24,7 +24,7 @@ use std::process::{ExitStatus, Stdio};
 use tokio::process::Command;
 
 use crate::capture::CaptureLayout;
-use crate::error::RunnerError;
+use crate::error::PhaseInfraError as RunnerError;
 
 /// Result of spawning and awaiting a single `run.cmd` subprocess.
 ///
