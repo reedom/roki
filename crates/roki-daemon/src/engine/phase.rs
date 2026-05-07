@@ -325,7 +325,11 @@ async fn execute_at(
 
 /// Strip optional YAML frontmatter (`---` … `---` at file start) and return
 /// the body. Returns the input unchanged when no frontmatter is present.
-fn strip_frontmatter(raw: &str) -> &str {
+//
+// Exposed to `engine::cycle` so the session-shape dispatch helper can render
+// path-form bodies through the same frontmatter-stripping path as the
+// command-shape executor.
+pub(crate) fn strip_frontmatter(raw: &str) -> &str {
     let trimmed = raw.trim_start();
     if !trimmed.starts_with("---") {
         return raw;
@@ -343,7 +347,11 @@ fn strip_frontmatter(raw: &str) -> &str {
 
 /// Resolve the absolute path of the operator's checkout via
 /// `ghq list -p <ghq>`. Returns `RepoNotFound` when ghq has no entry.
-async fn resolve_ghq_base(ghq: &str) -> Result<std::path::PathBuf, PhaseInfraError> {
+//
+// Exposed to `engine::cycle` so the cycle driver can resolve cwd once when
+// constructing a `SessionSupervisor` for session-shape phases (the supervisor
+// is built before any phase invocation, so cwd cannot come from the executor).
+pub(crate) async fn resolve_ghq_base(ghq: &str) -> Result<std::path::PathBuf, PhaseInfraError> {
     // Test-support seam: if `ROKI_GHQ_BASE_OVERRIDE` is set, use it directly.
     // The release binary never reads this env var because the integration
     // test sets it per-spawn; production env never has it.
