@@ -62,7 +62,4 @@ The cycle engine ([01-engine-model](01-engine-model.md)) decides when to spawn c
 - **Roadmap**: `roadmap.md` > Constraints > Platform.
 - **Requirements**:
   - `roki-mvp Req 1`: Daemon Lifecycle and CLI.
-- **Design**:
-  - `Daemon Bootstrap` section of `.kiro/specs/roki-mvp/design.md` (pending rewrite).
-  - `.kiro/specs/roki-mvp/design-bootstrap.md` (pending rewrite).
 - **Related FR**: [02-configuration](02-configuration.md), [07-recovery](07-recovery.md), [04-phase-execution](04-phase-execution.md), [08-observability-logs](08-observability-logs.md), [01-engine-model](01-engine-model.md).

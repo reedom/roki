@@ -8,11 +8,8 @@ The **per-feature narrative** layer:
 
 | Layer | Location | Axis | Primary readers |
 |---|---|---|---|
-| **Roadmap** | `.kiro/steering/roadmap.md` | Project-wide scope and the list of specs | Everyone / planning decisions |
-| **FR (this directory)** | `docs/fr/<NN>-<feature>.md` | **Per-feature (Feature) narrative** (independent of any kiro spec) | Operators, new contributors, spec authors |
+| **FR (this directory)** | `docs/fr/<NN>-<feature>.md` | **Per-feature (Feature) narrative** | Operators, new contributors, spec authors |
 | **Reference** | [`docs/reference/`](../reference/) | Exhaustive lookup tables (CLI / config / artifacts / log events) | Operators looking things up at runtime |
-| **Requirements** | `.kiro/specs/<spec>/requirements.md` | Per EARS Acceptance Criterion | Implementers and verifiers |
-| **Design** | `.kiro/specs/<spec>/design.md` | Architecture, data structures, interfaces | Implementers |
 
 FR is designed so that **someone who wants to understand a feature can read just one file** and be done.
 For that reason FR boundaries do not match kiro spec boundaries: features that span multiple specs (e.g. configuration, observability) are kept in a single file.

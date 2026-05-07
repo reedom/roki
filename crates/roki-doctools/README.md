@@ -13,7 +13,7 @@ refs:
 
 Cross-reference graph tooling. Reads YAML `refs:` frontmatter across the repo and answers dependency, doc-of-record, and per-kind index queries.
 
-Schema and conventions: [`.kiro/steering/refs.md`](../../.kiro/steering/refs.md). Kind manifest: [`docs/kinds.md`](../../docs/kinds.md).
+Kind manifest: [`docs/kinds.md`](../../docs/kinds.md).
 
 ## Subcommands
 

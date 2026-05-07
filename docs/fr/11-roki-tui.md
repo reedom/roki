@@ -113,6 +113,4 @@ The ticket-detail view exposes "open in `roki log`" shortcuts that print the app
   - `roki-observability Req 8` – `Req 11`: roki-tui binary / escalation ack / refresh action / terminal compatibility.
   - `roki-observability Req 6.4`: defense-in-depth sanitization on the TUI side.
   - `roki-observability Req 14.4`: TUI startup logging.
-- **Design**:
-  - `roki-tui` section of `.kiro/specs/roki-observability/design.md` (pending rewrite).
 - **Related FR**: [08-observability-logs](08-observability-logs.md), [06-failure-handling](06-failure-handling.md), [10-http-api](10-http-api.md), [09-log-access-cli](09-log-access-cli.md).

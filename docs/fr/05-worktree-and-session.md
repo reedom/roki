@@ -79,7 +79,4 @@ One ticket → one repo by construction. The admission step resolves it; the wor
 - **Roadmap**: `roadmap.md` > Scope > In > "Daemon-driven multi-repo worktree materialization via wt + ghq".
 - **Requirements**:
   - `roki-mvp Req 4.3`, `Req 4.6` – `Req 4.9`: worktree creation, path safety, cleanup, terminal-failure retention, filesystem errors.
-- **Design**:
-  - `.kiro/specs/roki-mvp/design-worktree-workspace.md` (pending rewrite).
-  - `Workspace Manager` section of `.kiro/specs/roki-mvp/design.md` (pending rewrite).
 - **Related FR**: [02-configuration](02-configuration.md), [07-recovery](07-recovery.md), [04-phase-execution](04-phase-execution.md), [01-engine-model](01-engine-model.md), [09-log-access-cli](09-log-access-cli.md).

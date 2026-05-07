@@ -28,9 +28,9 @@ This skill is the daemon-side counterpart of `kiro-discovery`'s Step 1 + Step 2.
 
 Gather **only metadata**. Do NOT read full file contents.
 
-- **Specs inventory**: Glob `.kiro/specs/*/spec.json`, read each `spec.json` for `name`, `phase`, and `approvals` fields. Note which feature names exist and which are approved through to `tasks`.
-- **Steering existence**: Check which files exist in `.kiro/steering/` (`product.md`, `tech.md`, `structure.md`, `roadmap.md`). Do NOT read their contents yet.
-- **Roadmap**: If `.kiro/steering/roadmap.md` exists, read it to restore project-level context (approach, scope, spec list, dependency order).
+- **Specs inventory**: Glob `<spec-dir>/*/spec.json`, read each `spec.json` for `name`, `phase`, and `approvals` fields. Note which feature names exist and which are approved through to `tasks`.
+- **Steering existence**: Check which steering files exist (`product.md`, `tech.md`, `structure.md`, `roadmap.md`). Do NOT read their contents yet.
+- **Roadmap**: If `roadmap.md` exists, read it to restore project-level context (approach, scope, spec list, dependency order).
 - **Top-level structure**: List the project root to note key directories. Do NOT recurse.
 
 Budget: this step should consume well under one full turn. Greenfield projects (`specs/` empty, no steering) are valid input.

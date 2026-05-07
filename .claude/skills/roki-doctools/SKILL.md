@@ -9,7 +9,7 @@ description: This skill should be used when the user asks to "validate the doc g
 
 `roki-doctools` is the cross-reference graph CLI for this repository. It reads YAML `refs:` frontmatter from every Markdown file under the configured doc roots (steering, specs, fr, reference, examples, crate READMEs) and answers questions about a directed graph whose nodes are docs and whose edges are `implements` / `depends_on` / `related` / `provides` / `modules`. Use it to validate graph integrity, query impact and dependencies, locate the doc of record for a source file, and regenerate per-kind indexes.
 
-The schema this tool consumes is documented in `.kiro/steering/refs.md`. The kind manifest (which kinds exist, where their files live, which kinds have a generated index) is `docs/kinds.md`. The CLI source is `crates/roki-doctools/src/main.rs`.
+The schema this tool consumes is documented in `docs/reference/frontmatter.md`. The kind manifest (which kinds exist, where their files live, which kinds have a generated index) is `docs/kinds.md`. The CLI source is `crates/roki-doctools/src/main.rs`.
 
 ## When to invoke this tool
 
@@ -145,9 +145,8 @@ Common errors and fixes are catalogued in **`references/troubleshooting.md`**.
 ### Authoritative sources
 
 - **`.claude/rules/refs.md`** — judgment-call rule auto-surfaced by the post-edit hook on the four triggers (new `.md`, `requirements.md` edit, source change, `kinds.md` edit). Read first when the hook output asks for a judgment call.
-- **`.kiro/steering/refs.md`** — schema and conventions (project rule).
 - **`docs/kinds.md`** — kind manifest (path globs, id patterns, index outputs).
-- **`docs/reference/frontmatter.md`** — generated frontmatter field reference.
+- **`docs/reference/frontmatter.md`** — frontmatter schema and field reference.
 - **`crates/roki-doctools/README.md`** — short crate-level usage summary.
 - **`crates/roki-doctools/src/main.rs`** — implementation; consult to confirm exact behavior when documentation is ambiguous.
 - **`.claude/hooks/refs-postedit.sh`** — the post-edit hook itself; consult when surprised by what the hook does or does not surface.

@@ -72,7 +72,6 @@ Skip sweep when the edit is a typo, formatting, or pure clarification with no be
 
 ## Schema pointers
 
-- Conventions / authoring workflow: `.kiro/steering/refs.md`
 - Field-level reference: `docs/reference/frontmatter.md`
 - Kind manifest: `docs/kinds.md`
 - Feature narrative: `docs/fr/17-doc-cross-references.md`

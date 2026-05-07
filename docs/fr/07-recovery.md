@@ -116,6 +116,4 @@ On orderly shutdown ([12-daemon-lifecycle](12-daemon-lifecycle.md)):
 - **Requirements**:
   - `roki-mvp Req 8`: per-ticket bookkeeping covered by the diff cache plus the cycle engine ([01-engine-model](01-engine-model.md)).
   - `roki-mvp Req 10`: Restart Recovery Without Persistent Storage.
-- **Design**:
-  - `Diff Cache` / `Cold Start` sections of `.kiro/specs/roki-mvp/design.md` (pending rewrite).
 - **Related FR**: [12-daemon-lifecycle](12-daemon-lifecycle.md), [02-configuration](02-configuration.md), [03-linear-admission](03-linear-admission.md), [05-worktree-and-session](05-worktree-and-session.md), [06-failure-handling](06-failure-handling.md), [01-engine-model](01-engine-model.md).

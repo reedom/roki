@@ -104,7 +104,5 @@ For every phase iteration, the daemon emits one structured event when the subpro
 - **Roadmap**: `roadmap.md` > Scope > In > "Optional HTTP API + ratatui TUI for observability" — base layer that the observability surface assumes.
 - **Requirements**:
   - `roki-mvp Req 11`: Structured Logging.
-- **Design**:
-  - `Observability Pipeline` section of `.kiro/specs/roki-mvp/design.md` (pending rewrite).
 - **Related reference**: [`docs/reference/log-events.md`](../reference/log-events.md) (pending rewrite for the new event catalog), [`docs/reference/config.md`](../reference/config.md) (`[log]` section).
 - **Related FR**: [06-failure-handling](06-failure-handling.md), [10-http-api](10-http-api.md), [01-engine-model](01-engine-model.md), [09-log-access-cli](09-log-access-cli.md).

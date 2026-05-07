@@ -1,5 +1,5 @@
 ---
-paths: .kiro/specs/**/*.md
+paths: docs/**/*.md
 ---
 
 # No fake decisions

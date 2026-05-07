@@ -58,7 +58,7 @@ Long-lived "thinking" component for this ticket. Decide phase order, validate pr
 
 # First turn (mode-dependent)
 
-- **SPEC_DRIVEN**: resolve the target spec name from the ticket body, structurally validate `<repo>/.kiro/specs/<target>/{spec.json,requirements.md,design.md,tasks.md}` (presence, EARS keyword in `requirements.md`, actionable sub-task in `tasks.md`, `approvals.tasks.approved == true` in `spec.json`). On pass return `action=run_phase phase=implement` with the resolved target spec name in `additional_context`. On fail write a Linear comment naming the missing artifact and the recommended `/kiro-spec-*` command, then `action=stop outcome=spec_incomplete`.
+- **SPEC_DRIVEN**: resolve the target spec name from the ticket body, structurally validate `<repo>/<spec-dir>/<target>/{spec.json,requirements.md,design.md,tasks.md}` (presence, EARS keyword in `requirements.md`, actionable sub-task in `tasks.md`, `approvals.tasks.approved == true` in `spec.json`). On pass return `action=run_phase phase=implement` with the resolved target spec name in `additional_context`. On fail write a Linear comment naming the missing artifact, then `action=stop outcome=spec_incomplete`.
 - **NEEDS_CLASSIFY**: return `action=run_phase phase=classify`. On `phase_complete(classify)` branch on `result.path`: Path B → `action=run_phase phase=implement` (direct mode); Path A / C / D / E → write a Linear comment quoting `result.suggested_command` and `result.suggested_label`, then `action=stop outcome=needs_operator`.
 
 # Events you receive (one JSON object per line on stdin)

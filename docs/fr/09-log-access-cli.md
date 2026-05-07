@@ -141,5 +141,4 @@ This layout is **not** part of the operator-facing contract. Future versions may
 
 - **Roadmap**: `roadmap.md` > Boundary Strategy > "Shared seams to watch".
 - **Requirements**: pending — to be added in the requirements rewrite that follows the FR rewrite.
-- **Design**: `.kiro/specs/roki-mvp/design.md` will gain a `Log Access CLIs` section in a later phase.
 - **Related FR**: [08-observability-logs](08-observability-logs.md), [10-http-api](10-http-api.md), [01-engine-model](01-engine-model.md), [05-worktree-and-session](05-worktree-and-session.md).

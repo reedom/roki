@@ -227,8 +227,5 @@ Inline `prompt = "..."` is a one-line workflow body delivered via stdin as above
   - `roki-mvp Req 2`: Configuration, Assignee Admission, and Multi-Repo Allowlist.
   - `roki-mvp Req 6`: Workspace-Level WORKFLOW Policy Loader.
   - `roki-observability Req 1`, `Req 7`, `Req 15`: Server config gating.
-- **Design**:
-  - `Configuration Schema` / `Workflow Loader` sections of `.kiro/specs/roki-mvp/design.md` (pending rewrite).
-  - The Configuration sections of each spec's `design.md`.
 - **Related reference**: [config.md](../reference/config.md), [cli.md](../reference/cli.md).
 - **Related FR**: [07-recovery](07-recovery.md) (admission filter and diff cache consume `[admission]`), [01-engine-model](01-engine-model.md) (the rule / cleanup / on_failure lists this file populates).

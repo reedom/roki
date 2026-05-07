@@ -104,6 +104,4 @@ Operators (TUI, external scripts, observability components) can request an out-o
 - **Requirements**:
   - `roki-mvp Req 3`: Linear Tracker Integration.
   - `roki-mvp Req 13.3`: TrackerRefresh trait (refresh nudge consumer).
-- **Design**:
-  - `Tracker Adapter` section of `.kiro/specs/roki-mvp/design.md` (pending rewrite).
 - **Related FR**: [02-configuration](02-configuration.md), [07-recovery](07-recovery.md), [10-http-api](10-http-api.md), [01-engine-model](01-engine-model.md).

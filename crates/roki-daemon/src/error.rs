@@ -7,8 +7,7 @@
 //!
 //! Each variant carries the offending cause (file path, key path, bind
 //! address, GraphQL endpoint, ticket id, or correlation id) so the
-//! `tracing::error!` line and exit-code path can identify it. See
-//! `.kiro/specs/roki-skeleton/design.md` "Error Categories and Responses".
+//! `tracing::error!` line and exit-code path can identify it.
 
 use std::path::PathBuf;
 

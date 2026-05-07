@@ -7,7 +7,7 @@ Each entry: error message → root cause → fix.
 **Cause.** A doc cites `<target>` in its `implements` / `depends_on` / `related` list, but no doc declares it (neither as a primary `id:` nor in any `provides:` list).
 
 **Likely fixes:**
-- The producer forgot to list the ID in `provides:`. If `<target>` is `req:<spec>:N`, edit `.kiro/specs/<spec>/requirements.md` and add the ID to `provides:`.
+- The producer forgot to list the ID in `provides:`. Edit the producer doc and add the ID to its `provides:` list.
 - The citation is a typo — fix it in the offending file.
 - The producer was renamed and not all citations were updated — search-and-replace.
 - The producer was deleted — remove the citation, or recreate the producer.
@@ -99,10 +99,6 @@ Run `cargo run -q -p roki-doctools -- index` after the edit. The hook does not r
 
 The validator does not parse prose. Trust front matter as the source of truth and update the prose section to match.
 
-### "I added `req:<spec>:N` to a fr's `implements:` but validate fails."
-
-You forgot to add `req:<spec>:N` to `.kiro/specs/<spec>/requirements.md`'s `provides:` list. The producer must publish the ID before any consumer can cite it.
-
 ### "`touched <path>` returns no docs of record."
 
 No doc claims that path in `modules:`. If the file is public surface (a CLI flag, a config key, an extension point, etc.), pick the relevant fr or reference doc and add the path to its `modules:`.
@@ -118,5 +114,5 @@ When facing an unfamiliar error:
 1. Read the error message — it names the offending file and ID.
 2. `cargo run -q -p roki-doctools -- show <id>` to inspect the doc's frontmatter and immediate edges.
 3. `cargo run -q -p roki-doctools -- list | grep <fragment>` to confirm a candidate ID exists.
-4. Re-read `.kiro/steering/refs.md` and `docs/kinds.md` to confirm the schema rule that's being violated.
+4. Re-read `docs/reference/frontmatter.md` and `docs/kinds.md` to confirm the schema rule that's being violated.
 5. If the rule is unclear, check the validator source at `crates/roki-doctools/src/main.rs` (functions `cmd_validate`, `build_edges`, `module_covers`).

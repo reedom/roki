@@ -1,6 +1,6 @@
 # `refs:` Frontmatter Cheatsheet
 
-Authoritative source: `.kiro/steering/refs.md` (schema) and `docs/kinds.md` (kind manifest). This file is a quick lookup; consult the originals when behavior is ambiguous.
+Authoritative source: `docs/reference/frontmatter.md` (schema) and `docs/kinds.md` (kind manifest). This file is a quick lookup; consult the originals when behavior is ambiguous.
 
 ## Block shape
 

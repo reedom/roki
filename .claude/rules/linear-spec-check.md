@@ -2,7 +2,6 @@
 paths:
   - crates/**/linear/**
   - docs/fr/**/*.md
-  - .kiro/specs/**/*.md
 ---
 
 # Verify Linear API claims against the official spec

@@ -30,9 +30,6 @@ What this feature **does not** do, and the boundary against neighboring features
 
 ## Traceability
 
-- **Roadmap**: relevant section of `.kiro/steering/roadmap.md`
 - **Requirements**:
   - `<spec> Req N.M`: ...
-- **Design**:
-  - relevant section of `.kiro/specs/<spec>/design.md`
 - **Related FR**: NN-xxx.md (if any)

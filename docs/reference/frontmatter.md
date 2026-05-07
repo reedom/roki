@@ -9,7 +9,7 @@ refs:
 
 The YAML `refs:` block carried by every doc in the cross-reference graph.
 
-Semantics and authoring guidance: [`.kiro/steering/refs.md`](../../.kiro/steering/refs.md). Valid kinds and on-disk locations: [`docs/kinds.md`](../kinds.md).
+Valid kinds and on-disk locations: [`docs/kinds.md`](../kinds.md).
 
 ## Block shape
 
@@ -76,13 +76,6 @@ Per-kind conventions in [`docs/kinds.md`](../kinds.md) (`id_pattern` is informat
 
 | Kind | Example IDs |
 |---|---|
-| `roadmap` | `roadmap` |
-| `brief` | `brief:roki-mvp` |
-| `requirements` | `requirements:roki-mvp` |
-| `req` | `req:roki-mvp:1`, `req:roki-mvp:1.6` |
-| `design` | `design:roki-mvp`, `design:roki-mvp:bootstrap` |
-| `tasks` | `tasks:roki-mvp` |
-| `research` | `research:roki-mvp` |
 | `fr` | `fr:12-daemon-lifecycle` |
 | `reference` | `ref:cli`, `ref:config`, `ref:frontmatter` |
 | `example` | `example:roki.minimal` |
@@ -111,7 +104,6 @@ A source path MAY appear in multiple docs' `modules:` lists; `roki-doctools touc
 
 ## See also
 
-- [`.kiro/steering/refs.md`](../../.kiro/steering/refs.md) — full schema, authoring workflow, design rationale.
 - [`docs/kinds.md`](../kinds.md) — kind manifest (paths, ID patterns, index outputs).
 - [17-doc-cross-references](../fr/17-doc-cross-references.md) — feature narrative.
 - [`crate:roki-doctools`](../../crates/roki-doctools/README.md) — CLI reference.

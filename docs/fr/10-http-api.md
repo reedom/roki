@@ -152,6 +152,4 @@ Linear refresh nudge.
   - `roki-observability Req 1` – `Req 7`: server gating / endpoints / loopback / schema stability / sanitization.
   - `roki-observability Req 12` – `Req 15`: shared types / projection / logging / configuration.
   - `roki-mvp Req 13.3`: tracker-refresh contract (refresh nudge consumer).
-- **Design**:
-  - `.kiro/specs/roki-observability/design.md` (pending rewrite to reflect the simplified endpoint set).
 - **Related FR**: [02-configuration](02-configuration.md), [03-linear-admission](03-linear-admission.md), [07-recovery](07-recovery.md), [08-observability-logs](08-observability-logs.md), [06-failure-handling](06-failure-handling.md), [11-roki-tui](11-roki-tui.md), [01-engine-model](01-engine-model.md), [09-log-access-cli](09-log-access-cli.md).

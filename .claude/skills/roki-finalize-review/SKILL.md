@@ -1,6 +1,6 @@
 ---
 name: roki-finalize-review
-description: Daemon-purpose-built artifact synthesizer for the `finalize_review` phase. Synthesizes the structured `review.md` artifact at the canonical path `<workspace_root>/<repo>/<issue>/.kiro/specs/<issue>/review.md` from the verdicts already accumulated this session and the artefacts in the worktree. Criterion ID source is mode-dependent: SPEC_DRIVEN uses the numeric requirement IDs in `<repo>/.kiro/specs/<target>/requirements.md`; NEEDS_CLASSIFY (direct mode) uses the numbered EARS sentences in the Linear ticket body's `## Acceptance Criteria`. Invoked by the roki daemon's orchestrator session as a single-phase subprocess; emits a structured exit envelope the orchestrator branches on after independently re-validating the artifact.
+description: Daemon-purpose-built artifact synthesizer for the `finalize_review` phase. Synthesizes the structured `review.md` artifact at the canonical path `<workspace_root>/<repo>/<issue>/<spec-dir>/<issue>/review.md` from the verdicts already accumulated this session and the artefacts in the worktree. Criterion ID source is mode-dependent: SPEC_DRIVEN uses the numeric requirement IDs in `<repo>/<spec-dir>/<target>/requirements.md`; NEEDS_CLASSIFY (direct mode) uses the numbered EARS sentences in the Linear ticket body's `## Acceptance Criteria`. Invoked by the roki daemon's orchestrator session as a single-phase subprocess; emits a structured exit envelope the orchestrator branches on after independently re-validating the artifact.
 disable-model-invocation: true
 allowed-tools: Read, Bash, Grep, Glob
 argument-hint: <criteria-source>
@@ -17,7 +17,7 @@ This skill is the daemon-side counterpart of the orchestrator's structural artif
 ## Core Mission
 
 - **Success Criteria**:
-  - `review.md` exists at `<workspace_root>/<repo>/<issue>/.kiro/specs/<issue>/review.md` with the schema in [ref:artifacts](../../docs/reference/artifacts.md)
+  - `review.md` exists at `<workspace_root>/<repo>/<issue>/<spec-dir>/<issue>/review.md` with the schema in [ref:artifacts](../../docs/reference/artifacts.md)
   - Every numbered criterion from the active criteria source has exactly one entry in the per-criterion array
   - Every `pass` entry has at least one workspace-relative `code_references` path that resolves to an existing file
   - Overall `status` is `pass` if and only if every per-criterion entry is `pass`
@@ -30,7 +30,7 @@ This skill is the daemon-side counterpart of the orchestrator's structural artif
 
 Read `additional_context` passed by the orchestrator and identify the active mode:
 
-- **SPEC_DRIVEN**: read `<repo>/.kiro/specs/<target>/requirements.md` and extract the numbered requirement IDs (the canonical numeric IDs the kiro spec pipeline uses). These IDs index every per-criterion entry.
+- **SPEC_DRIVEN**: read `<repo>/<spec-dir>/<target>/requirements.md` and extract the numbered requirement IDs. These IDs index every per-criterion entry.
 - **NEEDS_CLASSIFY (direct mode)**: read the Linear ticket body's `## Acceptance Criteria` block (passed verbatim via `additional_context`) and extract its numbered EARS sentences. Each numbered sentence becomes a criterion ID.
 
 If neither input is parseable (no `requirements.md`, no `## Acceptance Criteria` block, malformed numbering), exit non-clean with a diagnostic naming what was missing. Do not write a partial `review.md`.

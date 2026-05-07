@@ -2,7 +2,7 @@
 
 Kind definitions consumed by `roki-doctools`. The CLI loads `${ROKI_DOC_ROOT}/kinds.md` at startup (default `ROKI_DOC_ROOT=docs`); the YAML block below is the source of truth.
 
-Schema semantics (`implements` / `depends_on` / `related` / `provides` / `modules`): [`.kiro/steering/refs.md`](../.kiro/steering/refs.md).
+Schema semantics (`implements` / `depends_on` / `related` / `provides` / `modules`): [`docs/reference/frontmatter.md`](reference/frontmatter.md).
 
 ## Adding a new kind
 
@@ -29,37 +29,6 @@ Schema semantics (`implements` / `depends_on` / `related` / `provides` / `module
 #                    file carries frontmatter (kind=index, generated=true,
 #                    id=index:<name>).
 kinds:
-  - name: roadmap
-    path_globs: [".kiro/steering/roadmap.md"]
-    singleton: true
-    id_pattern: "roadmap"
-
-  - name: brief
-    path_globs: [".kiro/specs/*/brief.md"]
-    id_pattern: "brief:{spec}"
-
-  - name: requirements
-    path_globs: [".kiro/specs/*/requirements.md"]
-    id_pattern: "requirements:{spec}"
-
-  - name: req
-    declared_via: provides
-    id_pattern: "req:{spec}:{n}"
-
-  - name: design
-    path_globs:
-      - ".kiro/specs/*/design.md"
-      - ".kiro/specs/*/design-*.md"
-    id_pattern: "design:{spec}[:slug]"
-
-  - name: tasks
-    path_globs: [".kiro/specs/*/tasks.md"]
-    id_pattern: "tasks:{spec}"
-
-  - name: research
-    path_globs: [".kiro/specs/*/research.md"]
-    id_pattern: "research:{spec}"
-
   - name: fr
     path_globs: ["docs/fr/[0-9]*.md"]
     id_pattern: "fr:{slug}"

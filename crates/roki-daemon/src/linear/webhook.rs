@@ -1,9 +1,6 @@
 //! Linear webhook receiver.
 //!
 //! Single-route HTTP receiver bound by `runtime` after configuration loads.
-//! See `.kiro/specs/roki-skeleton/design.md` `linear::webhook` block, the
-//! API Contract, the Event Contract, and the State Management section for
-//! the cross-task contract documented here.
 //!
 //! The handler is path-agnostic — Linear's webhook URL is configured by the
 //! operator, so any POST path is accepted. Body parse extracts the four

@@ -13,29 +13,13 @@ Recipes for the most common authoring tasks. Each workflow assumes the post-edit
      id: fr:NN-slug
      kind: fr
      title: "Human-readable title"
-     spec: <spec-name>
-     implements:
-       - req:<spec>:N        # at least one
    ---
    ```
 4. Add `depends_on:`, `related:`, `modules:` as needed.
 5. Save the file. The hook runs `validate`; fix any errors it surfaces.
 6. Run `cargo run -q -p roki-doctools -- index` to regenerate `docs/fr/index.md` so the new doc appears in the per-kind table.
 
-## 2. Add a new requirement (`req:<spec>:N`)
-
-1. Edit `.kiro/specs/<spec>/requirements.md` to add the new `### Requirement N: ...` section.
-2. **Add the new ID to the file's `provides:` list in frontmatter.** This is the single most common mistake — without it, every citation downstream is a dangling reference.
-   ```yaml
-   provides:
-     - req:<spec>:1
-     # ... existing IDs
-     - req:<spec>:N         # the new one
-   ```
-3. Update the relevant fr or reference docs to add the new ID to their `implements:` list.
-4. Hook validates on save. If it complains, the most likely cause is forgetting step 2.
-
-## 3. Rename or remove an ID
+## 2. Rename or remove an ID
 
 1. Inventory citations: `cargo run -q -p roki-doctools -- impact <old-id>`. The output lists every doc that depends on it.
 2. Rename in the producer first:
@@ -46,14 +30,14 @@ Recipes for the most common authoring tasks. Each workflow assumes the post-edit
 
 For a deletion, follow the same flow but remove the citation entirely instead of replacing it.
 
-## 4. Rename a source file referenced in `modules:`
+## 3. Rename a source file referenced in `modules:`
 
 1. Find the docs of record for the old path: `cargo run -q -p roki-doctools -- touched <old/path>`.
 2. Rename the file in source control.
 3. Update each doc's `modules:` to the new path.
 4. The hook validates — `validate` will report `module path ... does not exist` for any miss.
 
-## 5. Add a new kind
+## 4. Add a new kind
 
 1. Edit the YAML block in `docs/kinds.md`:
    ```yaml
@@ -67,7 +51,7 @@ For a deletion, follow the same flow but remove the citation entirely instead of
 3. Add `refs:` blocks with `kind: <new-kind>` to existing files that match the new glob, OR tighten the glob if some files should remain outside the graph. Validation will fail with `matches kind ... glob but has no refs: block` until every matching file is covered or excluded.
 4. If `index.output` was set, run `cargo run -q -p roki-doctools -- index` to materialize the file.
 
-## 6. Bulk frontmatter edit
+## 5. Bulk frontmatter edit
 
 When editing many docs at once (e.g., backfilling `provides:` across multiple specs):
 
@@ -77,7 +61,7 @@ When editing many docs at once (e.g., backfilling `provides:` across multiple sp
 4. Run `cargo run -q -p roki-doctools -- index map` to refresh `map.md`, `ai/graph.json`, and `ai/modules.md`.
 5. Commit all the modified files together.
 
-## 7. Investigate "what does this code touch in docs?"
+## 6. Investigate "what does this code touch in docs?"
 
 ```sh
 cargo run -q -p roki-doctools -- touched crates/roki-daemon/src/runtime.rs
@@ -87,35 +71,35 @@ Output names every doc whose `modules:` covers the file (docs of record) plus th
 
 For multiple files at once: `touched <file1> <file2> ...`. The closure section is computed against all files together.
 
-## 8. Investigate "what depends on this concept?"
+## 7. Investigate "what depends on this concept?"
 
 ```sh
-cargo run -q -p roki-doctools -- impact req:roki-mvp:11
+cargo run -q -p roki-doctools -- impact ref:cli
 cargo run -q -p roki-doctools -- impact ref:cli --include-related
-cargo run -q -p roki-doctools -- impact design:roki-mvp:bootstrap --depth 1
+cargo run -q -p roki-doctools -- impact crate:roki-doctools --depth 1
 ```
 
 `--include-related` folds in soft `related:` edges (default is hard edges only). `--depth N` bounds traversal at N hops, useful for very wide closures.
 
-## 9. Investigate "what does this doc presuppose?"
+## 8. Investigate "what does this doc presuppose?"
 
 ```sh
 cargo run -q -p roki-doctools -- deps fr:13-observability-logs
-cargo run -q -p roki-doctools -- deps tasks:roki-mvp --include-related
+cargo run -q -p roki-doctools -- deps fr:01-daemon-lifecycle --include-related
 ```
 
 Reverse traversal — every doc the given IDs eventually depend on. Use to onboard onto a doc by reading its hard upstream dependencies first.
 
-## 10. Quickly inspect a doc
+## 9. Quickly inspect a doc
 
 ```sh
 cargo run -q -p roki-doctools -- show fr:01-daemon-lifecycle
-cargo run -q -p roki-doctools -- show req:roki-mvp:1.6
+cargo run -q -p roki-doctools -- show ref:cli
 ```
 
 Prints frontmatter plus immediate forward-reverse and `related:`-reverse edges. Cheaper than opening the file when only the metadata is needed.
 
-## 11. Generate / refresh derived files
+## 10. Generate / refresh derived files
 
 | Want to refresh | Command |
 |---|---|

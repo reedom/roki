@@ -12,9 +12,3 @@
 - Look up a flag / config key / log event → [reference/](reference/).
 - Run it → `cp` a `*.minimal.*` file from [examples/](examples/).
 - Every key → `*.annotated.*` files in [examples/](examples/).
-- Implement a spec → follow the Traceability section of the FR page to `.kiro/specs/<spec>/`.
-
-## Upstream
-
-- Roadmap: `.kiro/steering/roadmap.md`.
-- Specs: `.kiro/specs/<spec>/` (requirements.md, design.md, tasks.md).
