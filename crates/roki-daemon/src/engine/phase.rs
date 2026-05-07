@@ -72,7 +72,7 @@ async fn execute_at(
             PhaseBody::InlinePrompt { prompt } => {
                 (default_cli.to_string(), Some(prompt.clone()))
             }
-            PhaseBody::Path { path, cli_override } => {
+            PhaseBody::Path { path, cli_override, .. } => {
                 // Read the workflow body from disk. The path was resolved at
                 // config-load time against the workflow file's parent so the
                 // executor reads the same file regardless of the daemon's
@@ -565,6 +565,8 @@ mod tests {
         let body = PhaseBody::Path {
             path: body_path.clone(),
             cli_override: Some("cat".to_string()),
+            shape: crate::engine::outcome::PhaseShape::Session,
+            stall_seconds: None,
         };
         let cwd = tmp.path().to_path_buf();
 
@@ -597,6 +599,8 @@ mod tests {
         let body = PhaseBody::Path {
             path: missing.clone(),
             cli_override: Some("cat".to_string()),
+            shape: crate::engine::outcome::PhaseShape::Session,
+            stall_seconds: None,
         };
         let cwd = tmp.path().to_path_buf();
 

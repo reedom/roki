@@ -29,6 +29,24 @@ impl PhaseKind {
     }
 }
 
+/// Subprocess wire shape per phase.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PhaseShape {
+    /// Long-lived AI subprocess reused across all pre/post turns of the cycle.
+    Session,
+    /// One-shot subprocess per phase invocation.
+    Command,
+}
+
+impl PhaseShape {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            PhaseShape::Session => "session",
+            PhaseShape::Command => "command",
+        }
+    }
+}
+
 /// Operator-authored body for one phase.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PhaseBody {
@@ -40,14 +58,36 @@ pub enum PhaseBody {
     /// has no frontmatter, so always the default).
     InlinePrompt { prompt: String },
     /// `path = "workflow/<file>.md"`. Resolved at config-load time against
-    /// the workflow file's parent directory so the executor reads the same
-    /// file regardless of the daemon's working directory. The frontmatter
-    /// optionally overrides `cli`; the body (post-frontmatter) is rendered
-    /// as the stdin body.
+    /// the workflow file's parent directory.
     Path {
         path: PathBuf,
         cli_override: Option<String>,
+        /// Resolved from the .md frontmatter `session:` field.
+        /// Defaults to `Session` when the field is absent.
+        shape: PhaseShape,
+        /// Resolved from the .md frontmatter `stall_seconds:` field.
+        /// `None` means "fall back to the shape default in `[default.ai.*].stall_seconds`".
+        stall_seconds: Option<u32>,
     },
+}
+
+impl PhaseBody {
+    /// Wire shape this phase body resolves to.
+    pub fn shape(&self) -> PhaseShape {
+        match self {
+            PhaseBody::InlineCmd { .. } => PhaseShape::Command,
+            PhaseBody::InlinePrompt { .. } => PhaseShape::Session,
+            PhaseBody::Path { shape, .. } => *shape,
+        }
+    }
+
+    /// Per-file `stall_seconds` override, or `None` for shape-default.
+    pub fn stall_seconds_override(&self) -> Option<u32> {
+        match self {
+            PhaseBody::InlineCmd { .. } | PhaseBody::InlinePrompt { .. } => None,
+            PhaseBody::Path { stall_seconds, .. } => *stall_seconds,
+        }
+    }
 }
 
 /// Pre-phase legal directive set: `run` or `end`.

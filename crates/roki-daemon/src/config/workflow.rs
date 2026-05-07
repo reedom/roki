@@ -470,6 +470,8 @@ fn parse_phase_body(
         Ok(crate::engine::outcome::PhaseBody::Path {
             path: resolved,
             cli_override,
+            shape: crate::engine::outcome::PhaseShape::Session,
+            stall_seconds: None,
         })
     }
 }
@@ -923,9 +925,16 @@ cli = "claude"
 
         let expected = dir.path().join("phases/run.md");
         match &cfg.rules[0].run {
-            crate::engine::outcome::PhaseBody::Path { path, cli_override } => {
+            crate::engine::outcome::PhaseBody::Path {
+                path,
+                cli_override,
+                shape,
+                stall_seconds,
+            } => {
                 assert_eq!(path, &expected, "relative path must be joined to workflow_dir");
                 assert_eq!(cli_override.as_deref(), Some("claude"));
+                assert_eq!(*shape, crate::engine::outcome::PhaseShape::Session);
+                assert!(stall_seconds.is_none());
             }
             other => panic!("expected Path body, got {other:?}"),
         }
@@ -956,9 +965,16 @@ path = "/abs/phases/run.md"
         let cfg = WorkflowConfig::load(&toml_path).expect("loads ok");
 
         match &cfg.rules[0].run {
-            crate::engine::outcome::PhaseBody::Path { path, cli_override } => {
+            crate::engine::outcome::PhaseBody::Path {
+                path,
+                cli_override,
+                shape,
+                stall_seconds,
+            } => {
                 assert_eq!(path, &PathBuf::from("/abs/phases/run.md"));
                 assert!(cli_override.is_none());
+                assert_eq!(*shape, crate::engine::outcome::PhaseShape::Session);
+                assert!(stall_seconds.is_none());
             }
             other => panic!("expected Path body, got {other:?}"),
         }
