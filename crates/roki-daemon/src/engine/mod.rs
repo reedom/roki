@@ -13,6 +13,7 @@ pub mod cycle;
 pub mod directive;
 pub mod outcome;
 pub mod phase;
+pub mod stall;
 pub mod stream;
 pub mod template;
 
