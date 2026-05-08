@@ -31,6 +31,7 @@ pub struct RepoView {
     pub ghq: String,
     /// Mirrors `ticket.id`; kept here so `cwd::resolve` can borrow `repo`
     /// without touching `ticket`.
+    #[serde(skip)]
     pub ticket_id: String,
 }
 

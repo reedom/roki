@@ -30,6 +30,8 @@ async fn run_phase_stall_terminates_within_grace() {
     let work = TempDir::new().expect("workspace tempdir");
     let session_root = work.path().join("sessions");
     std::fs::create_dir_all(&session_root).unwrap();
+    let wt_root = work.path().join("wts");
+    std::fs::create_dir_all(&wt_root).unwrap();
 
     // Inline shell that ignores SIGTERM and sleeps. The watchdog must escalate
     // to SIGKILL after the 5 s grace period. `sleep` reads from /dev/null and
@@ -96,6 +98,7 @@ session_root = "{session_root}"
         .arg(&roki_path)
         .env("ROKI_LINEAR_GRAPHQL_URL", linear.uri())
         .env("ROKI_GHQ_BASE_OVERRIDE", work.path())
+        .env("ROKI_WT_ROOT_OVERRIDE", &wt_root)
         .kill_on_drop(true)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
