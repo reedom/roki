@@ -8,6 +8,7 @@
 //! - `phase` — PhaseExecutor trait + the production CommandPhaseExecutor.
 //! - `cycle` — run_cycle: iteration loop, transitions, iter cap.
 
+pub mod cleanup;
 pub mod context;
 pub mod cycle;
 pub mod directive;
