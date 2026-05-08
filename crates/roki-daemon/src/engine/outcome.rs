@@ -223,7 +223,7 @@ impl FailureKind {
 
 /// Full failure record routed to `[[on_failure]]` and exposed as
 /// `{{ failure.* }}` per fr:01 §107.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FailureMeta {
     /// UUID of the cycle that failed (NOT the handler cycle).
     pub failed_cycle_id: uuid::Uuid,

@@ -181,10 +181,11 @@ pub(crate) async fn run_inner(config_path: &Path) -> Result<(), SkeletonError> {
                 source: std::io::Error::other(join_err),
             })),
         },
-        crate::engine::CycleOutcome::Failed { kind, iter } => {
+        crate::engine::CycleOutcome::Failed { meta } => {
             tracing::error!(
-                failure_kind = %kind.as_str(),
-                iter,
+                failure_kind = %meta.kind.as_str(),
+                phase = %meta.phase.as_str(),
+                iter = meta.iter,
                 "cycle failed"
             );
             match listener_result {
@@ -203,7 +204,10 @@ pub(crate) async fn run_inner(config_path: &Path) -> Result<(), SkeletonError> {
                 }
             }
             Err(SkeletonError::PhaseInfra(
-                crate::error::PhaseInfraError::CycleFailed { kind, iter },
+                crate::error::PhaseInfraError::CycleFailed {
+                    kind: meta.kind,
+                    iter: meta.iter,
+                },
             ))
         }
     }

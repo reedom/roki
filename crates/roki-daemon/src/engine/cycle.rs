@@ -15,7 +15,8 @@ use crate::error::PhaseInfraError;
 
 use super::context::PhaseContext;
 use super::outcome::{
-    FailureKind, PhaseBody, PhaseKind, PhaseOutcome, PhaseShape, PostDirective, PreDirective,
+    FailureKind, FailureMeta, PhaseBody, PhaseKind, PhaseOutcome, PhaseShape, PostDirective,
+    PreDirective,
 };
 use super::phase::PhaseExecutor;
 use super::session::{SessionShutdownReason, SessionSupervisor};
@@ -23,7 +24,17 @@ use super::session::{SessionShutdownReason, SessionSupervisor};
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CycleOutcome {
     Completed { iters: u32 },
-    Failed { kind: FailureKind, iter: u32 },
+    Failed { meta: FailureMeta },
+}
+
+/// Return the tail (up to `max` bytes) of `s`, prefixed with `...` when
+/// truncated. Used to build operator-facing `error_text` from on-disk stderr.
+fn truncate_tail(s: &str, max: usize) -> String {
+    if s.len() <= max {
+        return s.to_string();
+    }
+    let start = s.len().saturating_sub(max);
+    format!("...{}", &s[start..])
 }
 
 /// Drive one cycle to completion or failure.
@@ -98,7 +109,20 @@ pub async fn run_cycle(
                     };
                     match outcome {
                         PhaseOutcome::Failure { kind } => {
-                            break 'cycle Ok(CycleOutcome::Failed { kind, iter });
+                            let stderr_text = std::fs::read_to_string(
+                                iter_dir.join("pre.stderr"),
+                            )
+                            .unwrap_or_default();
+                            break 'cycle Ok(CycleOutcome::Failed {
+                                meta: FailureMeta {
+                                    failed_cycle_id: cycle_id,
+                                    kind,
+                                    phase: PhaseKind::Pre,
+                                    iter,
+                                    exit_code: None,
+                                    error_text: truncate_tail(&stderr_text, 4096),
+                                },
+                            });
                         }
                         PhaseOutcome::PreDirective {
                             directive: PreDirective::End,
@@ -140,7 +164,20 @@ pub async fn run_cycle(
                 };
             match run_outcome {
                 PhaseOutcome::Failure { kind } => {
-                    break 'cycle Ok(CycleOutcome::Failed { kind, iter });
+                    let stderr_text = std::fs::read_to_string(
+                        iter_dir.join("run.stderr"),
+                    )
+                    .unwrap_or_default();
+                    break 'cycle Ok(CycleOutcome::Failed {
+                        meta: FailureMeta {
+                            failed_cycle_id: cycle_id,
+                            kind,
+                            phase: PhaseKind::Run,
+                            iter,
+                            exit_code: None,
+                            error_text: truncate_tail(&stderr_text, 4096),
+                        },
+                    });
                 }
                 PhaseOutcome::RunDone {
                     exit_code,
@@ -189,7 +226,20 @@ pub async fn run_cycle(
                 };
                 match outcome {
                     PhaseOutcome::Failure { kind } => {
-                        break 'cycle Ok(CycleOutcome::Failed { kind, iter });
+                        let stderr_text = std::fs::read_to_string(
+                            iter_dir.join("post.stderr"),
+                        )
+                        .unwrap_or_default();
+                        break 'cycle Ok(CycleOutcome::Failed {
+                            meta: FailureMeta {
+                                failed_cycle_id: cycle_id,
+                                kind,
+                                phase: PhaseKind::Post,
+                                iter,
+                                exit_code: None,
+                                error_text: truncate_tail(&stderr_text, 4096),
+                            },
+                        });
                     }
                     PhaseOutcome::PostDirective { directive, payload } => {
                         ctx.set_post(payload);
@@ -221,8 +271,16 @@ pub async fn run_cycle(
                 PostDirective::Pre => {
                     if iter == max_iter {
                         break 'cycle Ok(CycleOutcome::Failed {
-                            kind: FailureKind::IterExhausted,
-                            iter,
+                            meta: FailureMeta {
+                                failed_cycle_id: cycle_id,
+                                kind: FailureKind::IterExhausted,
+                                phase: PhaseKind::Post,
+                                iter,
+                                exit_code: None,
+                                error_text: format!(
+                                    "iter {iter} exceeded max_iterations {max_iter}"
+                                ),
+                            },
                         });
                     }
                     skip_pre = false;
@@ -230,8 +288,16 @@ pub async fn run_cycle(
                 PostDirective::Run => {
                     if iter == max_iter {
                         break 'cycle Ok(CycleOutcome::Failed {
-                            kind: FailureKind::IterExhausted,
-                            iter,
+                            meta: FailureMeta {
+                                failed_cycle_id: cycle_id,
+                                kind: FailureKind::IterExhausted,
+                                phase: PhaseKind::Post,
+                                iter,
+                                exit_code: None,
+                                error_text: format!(
+                                    "iter {iter} exceeded max_iterations {max_iter}"
+                                ),
+                            },
                         });
                     }
                     skip_pre = true;
@@ -242,8 +308,16 @@ pub async fn run_cycle(
         // Unreachable: every transition either continues, returns Completed,
         // or returns IterExhausted. Defensive return for type completeness.
         Ok(CycleOutcome::Failed {
-            kind: FailureKind::IterExhausted,
-            iter: max_iter,
+            meta: FailureMeta {
+                failed_cycle_id: cycle_id,
+                kind: FailureKind::IterExhausted,
+                phase: PhaseKind::Post,
+                iter: max_iter,
+                exit_code: None,
+                error_text: format!(
+                    "iter {max_iter} exceeded max_iterations {max_iter}"
+                ),
+            },
         })
     };
 
@@ -252,10 +326,11 @@ pub async fn run_cycle(
     if let Some(sup) = supervisor.as_ref() {
         let reason = match &cycle_outcome {
             Ok(CycleOutcome::Completed { .. }) => SessionShutdownReason::Completed,
-            Ok(CycleOutcome::Failed {
-                kind: FailureKind::IterExhausted,
-                ..
-            }) => SessionShutdownReason::IterExhausted,
+            Ok(CycleOutcome::Failed { meta })
+                if meta.kind == FailureKind::IterExhausted =>
+            {
+                SessionShutdownReason::IterExhausted
+            }
             _ => SessionShutdownReason::Failed,
         };
         sup.shutdown(reason).await;
@@ -567,7 +642,13 @@ mod tests {
         let r = rule(None, Some(PhaseBody::InlineCmd { cmd: "true".into() }));
         let outcome =
             run_cycle(&exec, &admitted(), &r, tmp.path(), &cfg(2)).await.unwrap();
-        assert_eq!(outcome, CycleOutcome::Failed { kind: FailureKind::IterExhausted, iter: 2 });
+        match outcome {
+            CycleOutcome::Failed { meta } => {
+                assert_eq!(meta.kind, FailureKind::IterExhausted);
+                assert_eq!(meta.iter, 2);
+            }
+            other => panic!("expected Failed, got {other:?}"),
+        }
     }
 
     #[tokio::test]
@@ -674,7 +755,14 @@ mod tests {
         let r = rule(Some(PhaseBody::InlineCmd { cmd: "true".into() }), None);
         let outcome =
             run_cycle(&exec, &admitted(), &r, tmp.path(), &cfg(10)).await.unwrap();
-        assert_eq!(outcome, CycleOutcome::Failed { kind: FailureKind::Unparseable, iter: 1 });
+        match outcome {
+            CycleOutcome::Failed { meta } => {
+                assert_eq!(meta.kind, FailureKind::Unparseable);
+                assert_eq!(meta.iter, 1);
+                assert_eq!(meta.phase, PhaseKind::Pre);
+            }
+            other => panic!("expected Failed, got {other:?}"),
+        }
     }
 
     // Note on session-dispatch test: a fully-realised unit test that drives
@@ -684,4 +772,25 @@ mod tests {
     // The end-to-end coverage for session dispatch is provided by the
     // Task 19 e2e smoke test, which spawns the daemon binary in a child
     // process where the env override is set safely via `Command::env`.
+
+    #[test]
+    fn cycle_outcome_failed_carries_meta() {
+        let id = uuid::Uuid::nil();
+        let meta = crate::engine::outcome::FailureMeta {
+            failed_cycle_id: id,
+            kind: crate::engine::outcome::FailureKind::IterExhausted,
+            phase: crate::engine::outcome::PhaseKind::Post,
+            iter: 5,
+            exit_code: None,
+            error_text: "iter 5 exceeded cap".into(),
+        };
+        let outcome = crate::engine::CycleOutcome::Failed { meta };
+        match outcome {
+            crate::engine::CycleOutcome::Failed { meta } => {
+                assert_eq!(meta.iter, 5);
+                assert_eq!(meta.kind.as_str(), "iter_exhausted");
+            }
+            _ => panic!("expected Failed"),
+        }
+    }
 }
