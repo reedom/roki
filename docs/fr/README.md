@@ -27,7 +27,7 @@ Splitting them lets each side focus on its purpose.
 docs/fr/
 ├── README.md             (this file)
 ├── _template.md          (skeleton for one file)
-├── index.md              (generated; regenerate with `roki-doctools index`)
+├── index.md              (generated; regenerate with `kusara index`)
 └── NN-<feature>.md ...   (one file per feature, flat layout)
 ```
 

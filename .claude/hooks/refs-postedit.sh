@@ -2,14 +2,14 @@
 # PostToolUse hook for the cross-reference graph.
 #
 # Claude Code sends the hook payload as JSON over stdin. We extract
-# `tool_input.file_path` (and `tool_name`), dispatch to roki-doctools,
+# `tool_input.file_path` (and `tool_name`), dispatch to kusara,
 # detect "judgment-needed" triggers from .claude/rules/refs.md, and
 # surface the result back to Claude via
 # `hookSpecificOutput.additionalContext`.
 #
 # Mechanical checks:
-#   *.md edits                                  -> roki-doctools validate
-#   source / spec / steering / kinds.md edits   -> roki-doctools touched <file>
+#   *.md edits                                  -> kusara validate
+#   source / spec / steering / kinds.md edits   -> kusara touched <file>
 #
 # Judgment excerpts (appended when the corresponding trigger matches):
 #   1. New .md under managed paths
@@ -62,13 +62,19 @@ file="${abs_path#"$PWD/"}"
 [[ -z "$file" ]] && exit 0
 
 # --- pick binary ---
-bin=""
-if [[ -x "target/release/roki-doctools" ]]; then
-  bin="./target/release/roki-doctools"
-elif command -v roki-doctools >/dev/null 2>&1; then
-  bin="$(command -v roki-doctools)"
+if command -v kusara >/dev/null 2>&1; then
+  bin="$(command -v kusara)"
 else
-  bin="cargo run --release -q -p roki-doctools --"
+  # kusara not installed; surface a hint and exit cleanly.
+  if command -v jq >/dev/null 2>&1; then
+    printf '%s' 'kusara binary not found on $PATH. Run /kusara:setup to install.' | jq -Rs '{
+      hookSpecificOutput: {
+        hookEventName: "PostToolUse",
+        additionalContext: .
+      }
+    }'
+  fi
+  exit 0
 fi
 
 # --- mechanical check ---
@@ -155,7 +161,7 @@ if [[ "$file" == "docs/kinds.md" ]]; then
 | Tightening a `path_globs` | safe |
 | Loosening / adding new globs | every newly-matched file must have `refs:` (validator enforces) |
 | Renaming a kind | invalidates every `kind: <old-name>` in existing front matter; audit + rewrite |
-| Adding `index.output` | run `roki-doctools index` once to materialize the file |
+| Adding `index.output` | run `kusara index` once to materialize the file |
 '
 fi
 
@@ -249,7 +255,7 @@ fi
 # Footer pointing at the authoritative rule + skill.
 final="${final}
 ---
-Authoritative rule: \`.claude/rules/refs.md\`. Tool reference: invoke the \`roki-doctools\` skill (\`.claude/skills/roki-doctools/SKILL.md\`)."
+Authoritative rule: \`.claude/rules/refs.md\`. Tool reference: invoke the \`kusara:refs-schema\` and \`kusara:kinds-manifest\` skills."
 
 if command -v jq >/dev/null 2>&1; then
   printf '%s' "$final" | jq -Rs '{

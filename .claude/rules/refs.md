@@ -7,7 +7,7 @@ paths: **/*.md
 
 The post-edit hook (`.claude/hooks/refs-postedit.sh`) auto-runs `validate` after every `.md` edit and `touched <file>` after every source edit under `crates/`. When an edit matches one of the four triggers below (new `.md`, `requirements.md` edit, source change, `kinds.md` edit), the hook also injects the matching excerpt of this rule into context.
 
-For the full reference of `roki-doctools` itself (subcommands, frontmatter schema, workflows, troubleshooting), invoke the `roki-doctools` skill — see `.claude/skills/roki-doctools/SKILL.md`.
+For the schema and CLI behavior of `kusara` itself, invoke the `kusara:refs-schema` and `kusara:kinds-manifest` skills.
 
 **This rule covers only what the hook cannot decide.** Do not re-run `validate` or `touched` manually unless investigating a specific failure.
 
@@ -49,7 +49,7 @@ Every reference to the old ID elsewhere in the graph becomes dangling. Update th
 
 ## Trigger: editing the body of a graph-linked `.md`
 
-The hook surfaces the doc's immediate `implements` / `depends_on` / `related` / `modules` plus reverse direct impact via `roki-doctools show`. For `requirements.md`, the hook additionally lists each `provides:` ID's direct consumers via `impact --depth 1`.
+The hook surfaces the doc's immediate `implements` / `depends_on` / `related` / `modules` plus reverse direct impact via `kusara show`. For `requirements.md`, the hook additionally lists each `provides:` ID's direct consumers via `impact --depth 1`.
 
 Treat the surfaced list as a **content-drift checklist**: if this edit changed observable behavior (not a typo or prose-only tweak), each linked doc may need a matching wording update so the two stay coherent. Skim the listed docs and update any whose body would otherwise drift from this file's new content. The validator cannot detect prose drift — only the human / agent reading the diff can.
 
@@ -62,12 +62,12 @@ Skip sweep when the edit is a typo, formatting, or pure clarification with no be
 | Tightening a `path_globs` | safe |
 | Loosening or adding new globs | every newly-matched file must have `refs:` (validator enforces) |
 | Renaming a kind | invalidates every `kind: <old-name>` in existing front matter; audit + rewrite |
-| Adding `index.output` | run `roki-doctools index` once to materialize the file |
+| Adding `index.output` | run `kusara index` once to materialize the file |
 
 ## What the hook handles (do NOT re-run unless debugging)
 
-- `roki-doctools validate` after every `.md` edit
-- `roki-doctools touched <file>` after every source / spec / steering / `kinds.md` edit
+- `kusara validate` after every `.md` edit
+- `kusara touched <file>` after every source / spec / steering / `kinds.md` edit
 - All graph-integrity errors (dangling refs, dup IDs, unknown kinds, missing-frontmatter under a declared glob)
 
 ## Schema pointers

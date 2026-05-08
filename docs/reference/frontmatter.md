@@ -44,14 +44,14 @@ Standard Markdown front matter, top of file between `---` lines.
 |---|---|---|---|
 | `id` | string | yes | Globally unique identifier. Format: `<kind>` / `<kind>:<scope>` / `<kind>:<scope>:<sub>`. |
 | `kind` | string | yes | Must match a `name` in [`docs/kinds.md`](../kinds.md). Unknown kinds fail validation. |
-| `title` | string | no | Free-text label printed by `roki-doctools show` / `index` / `map`. |
+| `title` | string | no | Free-text label printed by `kusara show` / `index` / `map`. |
 | `spec` | string | no | Parent spec name (`roki-mvp`, `roki-spec-gate`, …). Use for kinds scoped to a spec. |
 | `provides` | string list | no | Additional IDs declared inside this file's body (e.g. `requirements.md` lists every `req:<spec>:N`). |
 | `implements` | string list | no | Hard upstream — IDs this doc fulfills. Walked by `impact` / `deps`. |
 | `depends_on` | string list | no | Hard upstream — IDs this doc would be incorrect or incomplete without. Walked by `impact` / `deps`. |
 | `related` | string list | no | Soft see-also links. Excluded from `impact` / `deps` by default; include with `--include-related`. |
 | `modules` | string list | no | Repo-relative source paths or directory prefixes that this doc is the design of record for. See **Module patterns** below. |
-| `generated` | bool | no | `true` for files written by `roki-doctools index` / `index map`. Excluded from `map.md` and per-kind `index.md` listings. Default: `false`. |
+| `generated` | bool | no | `true` for files written by `kusara index` / `index map`. Excluded from `map.md` and per-kind `index.md` listings. Default: `false`. |
 | `indexes_kind` | string | no | For `kind: index` files only — the kind name being indexed (round-tripped from generation). |
 
 All list fields default to empty.
@@ -79,7 +79,7 @@ Per-kind conventions in [`docs/kinds.md`](../kinds.md) (`id_pattern` is informat
 | `fr` | `fr:12-daemon-lifecycle` |
 | `reference` | `ref:cli`, `ref:config`, `ref:frontmatter` |
 | `example` | `example:roki.minimal` |
-| `crate` | `crate:roki-daemon`, `crate:roki-doctools` |
+| `crate` | `crate:roki-daemon` |
 | `index` | `index:fr`, `index:reference`, `index:map`, `index:modules` (generated) |
 
 ## Module patterns
@@ -90,11 +90,11 @@ Per-kind conventions in [`docs/kinds.md`](../kinds.md) (`id_pattern` is informat
 | `crates/roki-daemon/src/orchestrator/` | any file under `crates/roki-daemon/src/orchestrator/` (trailing slash required) |
 | `crates/roki-daemon/src/orchestrator` | exact match for a file with that name (no trailing slash) |
 
-A source path MAY appear in multiple docs' `modules:` lists; `roki-doctools touched <file>` surfaces all of them.
+A source path MAY appear in multiple docs' `modules:` lists; `kusara touched <file>` surfaces all of them.
 
 ## When validation fails
 
-`roki-doctools validate` exits non-zero on any of:
+`kusara validate` exits non-zero on any of:
 
 - Unknown `kind:` (not declared in `docs/kinds.md`).
 - Duplicate `id` across two docs, or duplicate `provides` entry.
@@ -106,4 +106,4 @@ A source path MAY appear in multiple docs' `modules:` lists; `roki-doctools touc
 
 - [`docs/kinds.md`](../kinds.md) — kind manifest (paths, ID patterns, index outputs).
 - [17-doc-cross-references](../fr/17-doc-cross-references.md) — feature narrative.
-- [`crate:roki-doctools`](../../crates/roki-doctools/README.md) — CLI reference.
+- [`kusara`](https://crates.io/crates/kusara) — CLI reference.

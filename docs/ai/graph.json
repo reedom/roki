@@ -2,40 +2,11 @@
   "schema_version": 1,
   "docs": [
     {
-      "id": "crate:roki-daemon",
-      "kind": "crate",
-      "path": "crates/roki-daemon/README.md",
-      "title": "roki-daemon",
-      "spec": "roki-mvp",
-      "provides": [],
-      "implements": [],
-      "depends_on": [],
-      "related": [],
-      "modules": [
-        "crates/roki-daemon/"
-      ]
-    },
-    {
-      "id": "crate:roki-doctools",
-      "kind": "crate",
-      "path": "crates/roki-doctools/README.md",
-      "title": "roki-doctools",
-      "provides": [],
-      "implements": [],
-      "depends_on": [],
-      "related": [
-        "ref:cli"
-      ],
-      "modules": [
-        "crates/roki-doctools/"
-      ]
-    },
-    {
       "id": "fr:01-engine-model",
       "kind": "fr",
       "path": "docs/fr/01-engine-model.md",
       "title": "Rule and Cycle Engine",
-      "spec": "roki-mvp",
+      "spec": "roki-engine-iteration-loop",
       "provides": [],
       "implements": [],
       "depends_on": [],
@@ -56,7 +27,7 @@
       "kind": "fr",
       "path": "docs/fr/02-configuration.md",
       "title": "Configuration",
-      "spec": "roki-mvp",
+      "spec": "roki-skeleton",
       "provides": [],
       "implements": [],
       "depends_on": [
@@ -69,7 +40,7 @@
       ],
       "modules": [
         "crates/roki-daemon/src/config/",
-        "crates/roki-daemon/src/workflow/"
+        "crates/roki-daemon/src/config/workflow.rs"
       ]
     },
     {
@@ -77,7 +48,7 @@
       "kind": "fr",
       "path": "docs/fr/03-linear-admission.md",
       "title": "Linear Admission",
-      "spec": "roki-mvp",
+      "spec": "roki-skeleton",
       "provides": [],
       "implements": [],
       "depends_on": [],
@@ -94,7 +65,7 @@
       "kind": "fr",
       "path": "docs/fr/04-phase-execution.md",
       "title": "Phase Subprocess Execution",
-      "spec": "roki-mvp",
+      "spec": "roki-skeleton",
       "provides": [],
       "implements": [],
       "depends_on": [],
@@ -114,7 +85,7 @@
       "kind": "fr",
       "path": "docs/fr/05-worktree-and-session.md",
       "title": "Worktree and Session Lifecycle",
-      "spec": "roki-mvp",
+      "spec": "roki-skeleton",
       "provides": [],
       "implements": [],
       "depends_on": [],
@@ -132,7 +103,7 @@
       "kind": "fr",
       "path": "docs/fr/06-failure-handling.md",
       "title": "Failure Handling",
-      "spec": "roki-mvp",
+      "spec": "roki-skeleton",
       "provides": [],
       "implements": [],
       "depends_on": [],
@@ -151,7 +122,7 @@
       "kind": "fr",
       "path": "docs/fr/07-recovery.md",
       "title": "Diff Cache and Recovery",
-      "spec": "roki-mvp",
+      "spec": "roki-skeleton",
       "provides": [],
       "implements": [],
       "depends_on": [],
@@ -170,7 +141,7 @@
       "kind": "fr",
       "path": "docs/fr/08-observability-logs.md",
       "title": "Observability Logs",
-      "spec": "roki-mvp",
+      "spec": "roki-skeleton",
       "provides": [],
       "implements": [],
       "depends_on": [],
@@ -190,7 +161,7 @@
       "kind": "fr",
       "path": "docs/fr/09-log-access-cli.md",
       "title": "Log Access CLIs",
-      "spec": "roki-mvp",
+      "spec": "roki-cli-log",
       "provides": [],
       "implements": [],
       "depends_on": [],
@@ -207,7 +178,7 @@
       "kind": "fr",
       "path": "docs/fr/10-http-api.md",
       "title": "HTTP API",
-      "spec": "roki-observability",
+      "spec": "roki-http-server",
       "provides": [],
       "implements": [],
       "depends_on": [],
@@ -228,7 +199,7 @@
       "kind": "fr",
       "path": "docs/fr/11-roki-tui.md",
       "title": "roki-tui",
-      "spec": "roki-observability",
+      "spec": "roki-tui-foundation",
       "provides": [],
       "implements": [],
       "depends_on": [],
@@ -245,15 +216,14 @@
       "kind": "fr",
       "path": "docs/fr/12-daemon-lifecycle.md",
       "title": "Daemon Lifecycle",
-      "spec": "roki-mvp",
+      "spec": "roki-cli-daemon",
       "provides": [],
       "implements": [],
-      "depends_on": [
-        "fr:02-configuration",
-        "fr:08-observability-logs"
-      ],
+      "depends_on": [],
       "related": [
         "ref:cli",
+        "fr:02-configuration",
+        "fr:08-observability-logs",
         "fr:07-recovery",
         "fr:04-phase-execution",
         "fr:01-engine-model"
@@ -269,6 +239,7 @@
       "path": "crates/index.md",
       "title": "crate Index",
       "generated": true,
+      "indexes_kind": "crate",
       "provides": [],
       "implements": [],
       "depends_on": [],
@@ -281,6 +252,7 @@
       "path": "docs/fr/index.md",
       "title": "fr Index",
       "generated": true,
+      "indexes_kind": "fr",
       "provides": [],
       "implements": [],
       "depends_on": [],
@@ -317,6 +289,7 @@
       "path": "docs/reference/index.md",
       "title": "reference Index",
       "generated": true,
+      "indexes_kind": "reference",
       "provides": [],
       "implements": [],
       "depends_on": [],
@@ -331,7 +304,12 @@
       "provides": [],
       "implements": [],
       "depends_on": [],
-      "related": [],
+      "related": [
+        "fr:09-log-access-cli",
+        "fr:08-observability-logs",
+        "fr:04-phase-execution",
+        "fr:10-http-api"
+      ],
       "modules": []
     },
     {
@@ -345,7 +323,7 @@
       "related": [
         "ref:config",
         "fr:12-daemon-lifecycle",
-        "fr:04-phase-execution",
+        "fr:09-log-access-cli",
         "fr:08-observability-logs"
       ],
       "modules": []
@@ -360,20 +338,11 @@
       "depends_on": [],
       "related": [
         "ref:cli",
-        "fr:02-configuration"
-      ],
-      "modules": []
-    },
-    {
-      "id": "ref:extension-surface",
-      "kind": "reference",
-      "path": "docs/reference/extension-surface.md",
-      "title": "Extension Surface",
-      "provides": [],
-      "implements": [],
-      "depends_on": [],
-      "related": [
-        "ref:config"
+        "fr:02-configuration",
+        "fr:01-engine-model",
+        "fr:03-linear-admission",
+        "fr:08-observability-logs",
+        "fr:10-http-api"
       ],
       "modules": []
     },
@@ -397,29 +366,28 @@
       "implements": [],
       "depends_on": [],
       "related": [
-        "fr:08-observability-logs"
+        "fr:08-observability-logs",
+        "fr:01-engine-model",
+        "fr:03-linear-admission",
+        "fr:06-failure-handling",
+        "fr:10-http-api",
+        "fr:12-daemon-lifecycle"
       ],
       "modules": []
     }
   ],
   "modules": {
-    "crates/roki-daemon/": [
-      "crate:roki-daemon"
-    ],
     "crates/roki-daemon/src/config/": [
       "fr:02-configuration"
     ],
     "crates/roki-daemon/src/config/mod.rs": [
       "fr:12-daemon-lifecycle"
     ],
-    "crates/roki-daemon/src/runtime.rs": [
-      "fr:12-daemon-lifecycle"
-    ],
-    "crates/roki-daemon/src/workflow/": [
+    "crates/roki-daemon/src/config/workflow.rs": [
       "fr:02-configuration"
     ],
-    "crates/roki-doctools/": [
-      "crate:roki-doctools"
+    "crates/roki-daemon/src/runtime.rs": [
+      "fr:12-daemon-lifecycle"
     ]
   }
 }

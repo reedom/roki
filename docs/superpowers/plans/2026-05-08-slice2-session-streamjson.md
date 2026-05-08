@@ -6,7 +6,7 @@
 
 **Architecture:** A new `SessionSupervisor` struct (one per cycle) owns the long-lived child plus a tokio reader task. `engine::cycle::run_cycle` dispatches per phase: command-shape goes through the existing `CommandPhaseExecutor`, session-shape goes through the supervisor's `run_turn`. Both shapes share a new `Watchdog` (idle-stdout-byte detector) and a new `stream` line-splitter that recognises the claude/codex `result` event for the run phase. Per-file `session` and `stall_seconds` overrides come from `workflow/*.md` frontmatter, parsed once at config load.
 
-**Tech Stack:** Rust 2024 (workspace edition), `tokio` async runtime, `nix` (`signal` feature) for SIGTERM, `serde_yaml_ng` for `workflow/*.md` frontmatter (matches the existing `roki-doctools` workspace dep; avoids the deprecated `serde_yaml`), plus the slice-1 deps (`liquid`, `shell-words`, `async-trait`, `serde_json`, `tempfile`, `wiremock`, `reqwest`).
+**Tech Stack:** Rust 2024 (workspace edition), `tokio` async runtime, `nix` (`signal` feature) for SIGTERM, `serde_yaml_ng` for `workflow/*.md` frontmatter (avoids the deprecated `serde_yaml`), plus the slice-1 deps (`liquid`, `shell-words`, `async-trait`, `serde_json`, `tempfile`, `wiremock`, `reqwest`).
 
 **Spec:** `docs/superpowers/specs/2026-05-08-slice2-session-streamjson-design.md` (commits `b5b...` and the drift-fix follow-up on branch `slice2-session-streamjson`).
 
@@ -3677,7 +3677,7 @@ Expected: clean.
 
 - [ ] **Run doctools validate**
 
-Run: `cargo run -q -p roki-doctools -- validate`
+Run: `kusara validate`
 Expected: `OK (N docs)` with no failures. The slice-2 design and plan files live under `docs/superpowers/` — outside the graph by design.
 
 - [ ] **Open the slice-2 PR**
