@@ -6,6 +6,7 @@ mod cli;
 mod config;
 mod engine;
 pub mod error;
+pub mod events;
 mod linear;
 mod rule;
 mod runtime;
