@@ -109,6 +109,39 @@ pub enum WorkflowError {
 
     #[error("workflow .md frontmatter parse error at {path}: {reason}")]
     WorkflowMdFrontmatter { path: PathBuf, reason: String },
+
+    #[error("[[on_failure]][{index}] missing run; in {path}")]
+    OnFailureMissingRun {
+        path: std::path::PathBuf,
+        index: usize,
+    },
+    #[error("[[on_failure]][{index}] missing when.kind; in {path}")]
+    OnFailureMissingKind {
+        path: std::path::PathBuf,
+        index: usize,
+    },
+    #[error("[[on_failure]][{index}] sets multiple of when.kind / when.kind.in / when.kind.not; in {path}")]
+    OnFailureKindMatcherConflict {
+        path: std::path::PathBuf,
+        index: usize,
+    },
+    #[error("[[on_failure]][{index}] when.kind = {value:?} not in legal set; in {path}")]
+    OnFailureUnknownKind {
+        path: std::path::PathBuf,
+        index: usize,
+        value: String,
+    },
+    #[error("[[on_failure]][{index}] when.phase = {value:?} not in {{pre, run, post}}; in {path}")]
+    OnFailureUnknownPhase {
+        path: std::path::PathBuf,
+        index: usize,
+        value: String,
+    },
+    #[error("[[on_failure]][{index}] when.kind.in is empty; in {path}")]
+    OnFailureEmptyKindIn {
+        path: std::path::PathBuf,
+        index: usize,
+    },
 }
 
 /// Errors raised by the Linear GraphQL client during `viewer { id }` resolve.

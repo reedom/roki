@@ -93,6 +93,7 @@ mod tests {
             }),
             rules: Vec::new(),
             cleanups: Vec::new(),
+            on_failures: Vec::new(),
         }
     }
 

@@ -37,6 +37,7 @@ pub struct WorkflowConfig {
     pub repo: Option<AdmissionRepo>,
     pub rules: Vec<Rule>,
     pub cleanups: Vec<Cleanup>,
+    pub on_failures: Vec<crate::engine::on_failure::OnFailure>,
 }
 
 /// `[admission]` section.
@@ -126,12 +127,14 @@ impl WorkflowConfig {
         let workflow_dir = path.parent().map(Path::to_path_buf).unwrap_or_else(|| PathBuf::from("."));
         let rules = parse_rules(path, &workflow_dir, &root)?;
         let cleanups = parse_cleanups(path, &workflow_dir, &root)?;
+        let on_failures = parse_on_failures(path, &workflow_dir, &root)?;
 
         Ok(WorkflowConfig {
             admission,
             repo,
             rules,
             cleanups,
+            on_failures,
         })
     }
 }
@@ -626,6 +629,168 @@ fn parse_cleanups(
         });
     }
     Ok(out)
+}
+
+fn parse_on_failures(
+    path: &Path,
+    workflow_dir: &Path,
+    root: &Value,
+) -> Result<Vec<crate::engine::on_failure::OnFailure>, WorkflowError> {
+    use crate::engine::on_failure::{KindMatcher, OnFailure};
+    use crate::engine::outcome::PhaseShape;
+
+    let Some(arr) = root.get("on_failure").and_then(Value::as_array) else {
+        return Ok(Vec::new());
+    };
+
+    let mut out = Vec::with_capacity(arr.len());
+    for (idx, entry) in arr.iter().enumerate() {
+        let table = entry.as_table().ok_or_else(|| WorkflowError::MissingField {
+            path: path.to_path_buf(),
+            key: format!("on_failure[{idx}]"),
+        })?;
+
+        let when = table.get("when").and_then(Value::as_table);
+        // when.kind can be a string OR a table. If string: KindMatcher::Eq.
+        // If table: look for `in` (array) or `not` (string).
+        let kind_value = when.and_then(|w| w.get("kind"));
+        let (kind_eq_str, kind_in_arr, kind_not_str) = match kind_value {
+            Some(Value::String(s)) => (Some(s.clone()), None, None),
+            Some(Value::Table(t)) => {
+                let in_arr = t.get("in").and_then(Value::as_array);
+                let not_str = t.get("not").and_then(Value::as_str).map(String::from);
+                (None, in_arr, not_str)
+            }
+            None => (None, None, None),
+            _ => {
+                return Err(WorkflowError::OnFailureMissingKind {
+                    path: path.to_path_buf(),
+                    index: idx,
+                });
+            }
+        };
+
+        let forms_set = [kind_eq_str.is_some(), kind_in_arr.is_some(), kind_not_str.is_some()]
+            .iter()
+            .filter(|b| **b)
+            .count();
+        if forms_set == 0 {
+            return Err(WorkflowError::OnFailureMissingKind {
+                path: path.to_path_buf(),
+                index: idx,
+            });
+        }
+        if forms_set > 1 {
+            return Err(WorkflowError::OnFailureKindMatcherConflict {
+                path: path.to_path_buf(),
+                index: idx,
+            });
+        }
+
+        let when_kind = if let Some(s) = kind_eq_str {
+            KindMatcher::Eq(parse_failure_kind(&s, path, idx)?)
+        } else if let Some(arr) = kind_in_arr {
+            if arr.is_empty() {
+                return Err(WorkflowError::OnFailureEmptyKindIn {
+                    path: path.to_path_buf(),
+                    index: idx,
+                });
+            }
+            let mut ks = Vec::with_capacity(arr.len());
+            for v in arr {
+                let s = v.as_str().ok_or_else(|| WorkflowError::OnFailureUnknownKind {
+                    path: path.to_path_buf(),
+                    index: idx,
+                    value: format!("{v:?}"),
+                })?;
+                ks.push(parse_failure_kind(s, path, idx)?);
+            }
+            KindMatcher::In(ks)
+        } else {
+            KindMatcher::Not(parse_failure_kind(&kind_not_str.unwrap(), path, idx)?)
+        };
+
+        let when_phase = when
+            .and_then(|w| w.get("phase"))
+            .and_then(Value::as_str)
+            .map(|s| parse_phase_kind(s, path, idx))
+            .transpose()?;
+
+        let pre = match table.get("pre") {
+            Some(v) => Some(parse_phase_body(path, workflow_dir, "on_failure.pre", v)?),
+            None => None,
+        };
+        let run_body = match table.get("run") {
+            Some(v) => Some(parse_phase_body(path, workflow_dir, "on_failure.run", v)?),
+            None => None,
+        }
+        .ok_or_else(|| WorkflowError::OnFailureMissingRun {
+            path: path.to_path_buf(),
+            index: idx,
+        })?;
+        let post = match table.get("post") {
+            Some(v) => Some(parse_phase_body(path, workflow_dir, "on_failure.post", v)?),
+            None => None,
+        };
+
+        if run_body.shape() == PhaseShape::Session {
+            return Err(WorkflowError::SessionRunUnsupported {
+                path: path.to_path_buf(),
+            });
+        }
+
+        out.push(OnFailure {
+            when_kind,
+            when_phase,
+            pre,
+            run: run_body,
+            post,
+        });
+    }
+    Ok(out)
+}
+
+fn parse_failure_kind(
+    s: &str,
+    path: &Path,
+    idx: usize,
+) -> Result<crate::engine::outcome::FailureKind, WorkflowError> {
+    use crate::engine::outcome::FailureKind::*;
+    let kind = match s {
+        "unparseable" => Unparseable,
+        "schema_drift" => SchemaDrift,
+        "process_crash" => ProcessCrash,
+        "template_error" => TemplateError,
+        "iter_exhausted" => IterExhausted,
+        "stall" => Stall,
+        "fs_poison" => FsPoison,
+        _ => {
+            return Err(WorkflowError::OnFailureUnknownKind {
+                path: path.to_path_buf(),
+                index: idx,
+                value: s.to_string(),
+            });
+        }
+    };
+    Ok(kind)
+}
+
+fn parse_phase_kind(
+    s: &str,
+    path: &Path,
+    idx: usize,
+) -> Result<crate::engine::outcome::PhaseKind, WorkflowError> {
+    use crate::engine::outcome::PhaseKind::*;
+    match s {
+        "pre" => Ok(Pre),
+        "run" => Ok(Run),
+        "post" => Ok(Post),
+        _ => Err(WorkflowError::OnFailureUnknownPhase {
+            path: path.to_path_buf(),
+            index: idx,
+            value: s.to_string(),
+        }),
+    }
 }
 
 /// Resolve a `path = "..."` value against the workflow file's parent.
@@ -1456,5 +1621,143 @@ when.status = "Done"
         std::fs::write(&path, toml).unwrap();
         std::mem::forget(dir);
         path
+    }
+
+    #[test]
+    fn workflow_parses_on_failure_eq() {
+        let toml = r#"
+[admission]
+assignee = "me"
+[[admission.repos]]
+ghq = "github.com/foo/bar"
+[[rule]]
+when.status = "InProgress"
+when.labels.has_all = []
+run.cmd = "true"
+[[on_failure]]
+when.kind = "stall"
+run.cmd = "echo handled"
+"#;
+        let path = write_tmp(toml);
+        let cfg = WorkflowConfig::load(&path).unwrap();
+        assert_eq!(cfg.on_failures.len(), 1);
+        match &cfg.on_failures[0].when_kind {
+            crate::engine::on_failure::KindMatcher::Eq(k) => {
+                assert_eq!(k.as_str(), "stall");
+            }
+            _ => panic!("expected Eq"),
+        }
+    }
+
+    #[test]
+    fn workflow_parses_on_failure_in() {
+        let toml = r#"
+[admission]
+assignee = "me"
+[[admission.repos]]
+ghq = "github.com/foo/bar"
+[[rule]]
+when.status = "InProgress"
+when.labels.has_all = []
+run.cmd = "true"
+[[on_failure]]
+when.kind.in = ["unparseable", "schema_drift"]
+when.phase = "post"
+run.cmd = "true"
+"#;
+        let path = write_tmp(toml);
+        let cfg = WorkflowConfig::load(&path).unwrap();
+        match &cfg.on_failures[0].when_kind {
+            crate::engine::on_failure::KindMatcher::In(ks) => {
+                assert_eq!(ks.len(), 2);
+            }
+            _ => panic!("expected In"),
+        }
+        assert_eq!(cfg.on_failures[0].when_phase, Some(crate::engine::outcome::PhaseKind::Post));
+    }
+
+    #[test]
+    fn workflow_rejects_on_failure_kind_conflict() {
+        // Test for mutually-exclusive `when.kind` (string), `when.kind.in` (array),
+        // `when.kind.not` (string). TOML cannot express both `kind = "stall"` AND
+        // `kind.in = [...]` at the same level (would be a parse error). The
+        // realistic conflict is `kind.in = [...]` AND `kind.not = "..."`.
+        let toml = r#"
+[admission]
+assignee = "me"
+[[admission.repos]]
+ghq = "github.com/foo/bar"
+[[rule]]
+when.status = "InProgress"
+when.labels.has_all = []
+run.cmd = "true"
+[[on_failure]]
+when.kind.in = ["stall"]
+when.kind.not = "unparseable"
+run.cmd = "true"
+"#;
+        let path = write_tmp(toml);
+        let err = WorkflowConfig::load(&path).unwrap_err();
+        assert!(matches!(err, WorkflowError::OnFailureKindMatcherConflict { .. }));
+    }
+
+    #[test]
+    fn workflow_rejects_on_failure_unknown_kind() {
+        let toml = r#"
+[admission]
+assignee = "me"
+[[admission.repos]]
+ghq = "github.com/foo/bar"
+[[rule]]
+when.status = "InProgress"
+when.labels.has_all = []
+run.cmd = "true"
+[[on_failure]]
+when.kind = "bogus"
+run.cmd = "true"
+"#;
+        let path = write_tmp(toml);
+        let err = WorkflowConfig::load(&path).unwrap_err();
+        assert!(matches!(err, WorkflowError::OnFailureUnknownKind { .. }));
+    }
+
+    #[test]
+    fn workflow_rejects_on_failure_missing_run() {
+        let toml = r#"
+[admission]
+assignee = "me"
+[[admission.repos]]
+ghq = "github.com/foo/bar"
+[[rule]]
+when.status = "InProgress"
+when.labels.has_all = []
+run.cmd = "true"
+[[on_failure]]
+when.kind = "stall"
+post.prompt = "noop"
+"#;
+        let path = write_tmp(toml);
+        let err = WorkflowConfig::load(&path).unwrap_err();
+        assert!(matches!(err, WorkflowError::OnFailureMissingRun { .. }));
+    }
+
+    #[test]
+    fn workflow_rejects_on_failure_empty_kind_in() {
+        let toml = r#"
+[admission]
+assignee = "me"
+[[admission.repos]]
+ghq = "github.com/foo/bar"
+[[rule]]
+when.status = "InProgress"
+when.labels.has_all = []
+run.cmd = "true"
+[[on_failure]]
+when.kind.in = []
+run.cmd = "true"
+"#;
+        let path = write_tmp(toml);
+        let err = WorkflowConfig::load(&path).unwrap_err();
+        assert!(matches!(err, WorkflowError::OnFailureEmptyKindIn { .. }));
     }
 }
