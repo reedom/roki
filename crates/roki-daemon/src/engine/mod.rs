@@ -20,6 +20,7 @@ pub mod session;
 pub mod stall;
 pub mod stream;
 pub mod template;
+pub mod worktree;
 
 pub use cycle::{CycleOutcome, run_cycle};
 pub use phase::CommandPhaseExecutor;
