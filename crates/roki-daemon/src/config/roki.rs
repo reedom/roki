@@ -460,6 +460,7 @@ mod tests {
         let dir = tempfile::TempDir::new().unwrap();
         let cfg = RokiConfig::test_default(dir.path());
         assert!(cfg.engine.max_iterations >= 1);
+        assert_eq!(cfg.engine.shutdown_window_seconds, 30);
         assert_eq!(cfg.paths.session_root, dir.path());
         assert_eq!(cfg.linear_webhook.bind, "127.0.0.1");
     }
