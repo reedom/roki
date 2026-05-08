@@ -96,9 +96,14 @@ impl<R: CycleRunner + 'static> Dispatcher<R> {
         let me_ref = self.me.clone().unwrap_or_else(|| MeId(String::new()));
         let admitted = match admission::accept(&ticket, &self.workflow, &me_ref) {
             Ok(a) => a,
-            Err(_) => {
-                self.emit_skip(&ticket_id, WebhookSkipReason::AssigneeMismatch)
-                    .await;
+            Err(err) => {
+                let reason = match err {
+                    crate::error::AdmissionError::AssigneeMismatch { .. } => {
+                        WebhookSkipReason::AssigneeMismatch
+                    }
+                    crate::error::AdmissionError::NoRepos => WebhookSkipReason::RepoUnresolvable,
+                };
+                self.emit_skip(&ticket_id, reason).await;
                 return DispatchAction::AdmissionRejected;
             }
         };
@@ -286,8 +291,46 @@ mod tests {
         assert_eq!(action, DispatchAction::Skipped(WebhookSkipReason::NoDiff));
     }
 
+    fn workflow_no_repos() -> Arc<WorkflowConfig> {
+        Arc::new(WorkflowConfig {
+            admission: AdmissionSection {
+                assignee: "u1".into(),
+            },
+            repo: None,
+            rules: vec![Rule {
+                when_status: "InProgress".into(),
+                when_labels_has_all: vec![],
+                pre: None,
+                run: PhaseBody::InlineCmd { cmd: "true".into() },
+                post: None,
+            }],
+            cleanups: vec![],
+            on_failures: vec![],
+        })
+    }
+
+    fn dispatcher_no_repos(
+        runner: Arc<CountingRunner>,
+        work: &std::path::Path,
+    ) -> Dispatcher<CountingRunner> {
+        let cfg = Arc::new(RokiConfig::test_default(work));
+        let events = Arc::new(Mutex::new(
+            EventWriter::open(work, "_daemon").expect("open events"),
+        ));
+        Dispatcher::new(
+            Arc::new(DiffCache::new()),
+            workflow_no_repos(),
+            cfg,
+            Some(MeId("u1".into())),
+            DispatchMode::Default,
+            ShutdownToken::new(),
+            runner,
+            events,
+        )
+    }
+
     #[tokio::test]
-    async fn admission_rejection_skips_dispatch() {
+    async fn admission_rejection_assignee_mismatch_emits_correct_reason() {
         let work = TempDir::new().unwrap();
         let count = Arc::new(StdMutex::new(0u32));
         let d = dispatcher_with(Arc::new(CountingRunner(count.clone())), work.path());
@@ -302,5 +345,27 @@ mod tests {
         let action = d.on_webhook(bad).await;
         assert_eq!(action, DispatchAction::AdmissionRejected);
         assert!(d.tickets().lock().await.is_empty());
+
+        let events_path = work.path().join("_daemon.events.jsonl");
+        let body = std::fs::read_to_string(&events_path).unwrap();
+        let line = body.lines().last().unwrap();
+        let v: serde_json::Value = serde_json::from_str(line).unwrap();
+        assert_eq!(v["reason"], "assignee_mismatch");
+    }
+
+    #[tokio::test]
+    async fn admission_rejection_no_repos_emits_repo_unresolvable() {
+        let work = TempDir::new().unwrap();
+        let count = Arc::new(StdMutex::new(0u32));
+        let d = dispatcher_no_repos(Arc::new(CountingRunner(count.clone())), work.path());
+        let action = d.on_webhook(ticket("t1", "InProgress")).await;
+        assert_eq!(action, DispatchAction::AdmissionRejected);
+        assert!(d.tickets().lock().await.is_empty());
+
+        let events_path = work.path().join("_daemon.events.jsonl");
+        let body = std::fs::read_to_string(&events_path).unwrap();
+        let line = body.lines().last().unwrap();
+        let v: serde_json::Value = serde_json::from_str(line).unwrap();
+        assert_eq!(v["reason"], "repo_unresolvable");
     }
 }
