@@ -49,6 +49,28 @@ fn fs_poison_outcome(
     }
 }
 
+/// Convert a `WorktreeError` raised before run-phase launch into a
+/// `CycleOutcome::Failed` with `FailureKind::FsPoison`. The `phase` is
+/// always `Run` at the call site (the only worktree-ensure point in the
+/// cycle is between PreDirective::Run and run spawn).
+fn worktree_fs_poison_outcome(
+    err: crate::engine::worktree::WorktreeError,
+    cycle_id: uuid::Uuid,
+    iter: u32,
+) -> CycleOutcome {
+    let exit_code = err.exit_code();
+    CycleOutcome::Failed {
+        meta: FailureMeta {
+            failed_cycle_id: cycle_id,
+            kind: FailureKind::FsPoison,
+            phase: PhaseKind::Run,
+            iter,
+            exit_code,
+            error_text: format!("worktree ensure failed: {err}"),
+        },
+    }
+}
+
 /// Return the tail (up to `max` bytes) of `s`, prefixed with `...` when
 /// truncated. Used to build operator-facing `error_text` from on-disk stderr.
 fn truncate_tail(s: &str, max: usize) -> String {
@@ -168,6 +190,14 @@ pub async fn run_cycle(
                             payload,
                         } => {
                             ctx.set_pre(payload);
+                            // Lazy worktree materialization (fr:05). Errors here are
+                            // pre-launch fs failures; route through FsPoison and let the
+                            // runtime's [[on_failure]] dispatcher pick them up.
+                            if let Err(err) =
+                                crate::engine::worktree::ensure(&ctx.repo.ghq, &ticket_id).await
+                            {
+                                break 'cycle Ok(worktree_fs_poison_outcome(err, cycle_id, iter));
+                            }
                         }
                         other => {
                             let got_variant = other.variant_name();
@@ -614,6 +644,8 @@ mod tests {
     #[tokio::test]
     async fn full_iter_pre_run_post_end() {
         let tmp = tempfile::tempdir().unwrap();
+        let wt_root = tmp.path().join("wts");
+        std::fs::create_dir_all(&wt_root).unwrap();
         let exec = FakeExec::new(vec![
             (
                 1,
@@ -644,14 +676,17 @@ mod tests {
             Some(PhaseBody::InlineCmd { cmd: "true".into() }),
             Some(PhaseBody::InlineCmd { cmd: "true".into() }),
         );
-        let outcome = run_cycle(
-            &exec,
-            &admitted(),
-            &r,
-            tmp.path(),
-            &cfg(10),
-            CycleKind::Rule,
-            None,
+        let outcome = temp_env::async_with_vars(
+            [("ROKI_WT_ROOT_OVERRIDE", Some(wt_root.to_str().unwrap()))],
+            run_cycle(
+                &exec,
+                &admitted(),
+                &r,
+                tmp.path(),
+                &cfg(10),
+                CycleKind::Rule,
+                None,
+            ),
         )
         .await
         .unwrap();
@@ -661,6 +696,8 @@ mod tests {
     #[tokio::test]
     async fn post_run_skips_pre_in_next_iteration() {
         let tmp = tempfile::tempdir().unwrap();
+        let wt_root = tmp.path().join("wts");
+        std::fs::create_dir_all(&wt_root).unwrap();
         let exec = FakeExec::new(vec![
             (
                 1,
@@ -707,14 +744,17 @@ mod tests {
             Some(PhaseBody::InlineCmd { cmd: "true".into() }),
             Some(PhaseBody::InlineCmd { cmd: "true".into() }),
         );
-        let outcome = run_cycle(
-            &exec,
-            &admitted(),
-            &r,
-            tmp.path(),
-            &cfg(10),
-            CycleKind::Rule,
-            None,
+        let outcome = temp_env::async_with_vars(
+            [("ROKI_WT_ROOT_OVERRIDE", Some(wt_root.to_str().unwrap()))],
+            run_cycle(
+                &exec,
+                &admitted(),
+                &r,
+                tmp.path(),
+                &cfg(10),
+                CycleKind::Rule,
+                None,
+            ),
         )
         .await
         .unwrap();
@@ -893,6 +933,8 @@ mod tests {
         // PostDirective::Pre must clear skip_pre so iter 2 re-runs the pre
         // phase. Symmetrical to the post-Run test above.
         let tmp = tempfile::tempdir().unwrap();
+        let wt_root = tmp.path().join("wts");
+        std::fs::create_dir_all(&wt_root).unwrap();
         let exec = FakeExec::new(vec![
             (
                 1,
@@ -947,14 +989,17 @@ mod tests {
             Some(PhaseBody::InlineCmd { cmd: "true".into() }),
             Some(PhaseBody::InlineCmd { cmd: "true".into() }),
         );
-        let outcome = run_cycle(
-            &exec,
-            &admitted(),
-            &r,
-            tmp.path(),
-            &cfg(10),
-            CycleKind::Rule,
-            None,
+        let outcome = temp_env::async_with_vars(
+            [("ROKI_WT_ROOT_OVERRIDE", Some(wt_root.to_str().unwrap()))],
+            run_cycle(
+                &exec,
+                &admitted(),
+                &r,
+                tmp.path(),
+                &cfg(10),
+                CycleKind::Rule,
+                None,
+            ),
         )
         .await
         .unwrap();
