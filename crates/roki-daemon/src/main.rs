@@ -4,6 +4,7 @@ mod admission;
 mod capture;
 mod cli;
 mod config;
+mod daemon;
 mod engine;
 pub mod error;
 pub mod events;

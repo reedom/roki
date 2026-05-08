@@ -309,7 +309,10 @@ mod tests {
                 cli: "echo".to_string(),
                 stall_seconds: 300,
             },
-            engine: EngineSection { max_iterations },
+            engine: EngineSection {
+                max_iterations,
+                shutdown_window_seconds: 30,
+            },
             paths: PathsSection {
                 workflow: PathBuf::from("/tmp/w"),
                 session_root: PathBuf::from("/tmp/s"),

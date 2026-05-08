@@ -7,58 +7,56 @@
 // loaders.
 #![allow(dead_code)]
 
-//! Runtime orchestrator for the walking-skeleton daemon.
+//! Persistent-daemon runtime orchestrator (slice 5).
 //!
-//! Wires loaded config → bound webhook listener → admission / rule pipeline
-//! → single cycle execution → graceful shutdown. Per design `runtime` block,
-//! the runtime owns the `Option<MeId>` plus the `Sender` / `Receiver` /
-//! `cycle_started` triple — no mutex, no swap, no placeholder window.
+//! Boots config + workflow + listener + dispatcher + per-ticket task
+//! registry, traps SIGINT/SIGTERM via `tokio::signal::unix`, and drains
+//! in-flight ticket tasks within `cfg.engine.shutdown_window_seconds`.
 //!
 //! Failure classes:
 //!
 //! - **Startup-bound** (`RokiConfig`, `WorkflowConfig`, `me` resolve, listener
 //!   bind) — abort before the listener accepts traffic; `ExitCode::FAILURE`.
-//! - **Cycle-bound** (capture, runner) — short-circuit out of the loop;
-//!   `ExitCode::FAILURE`.
-//! - **No-cycle outcomes** (admission rejection, rule no-match) — info-log
-//!   and `continue`; the listener stays open for the next POST.
+//! - **Shutdown-window-exceeded** — at least one ticket task did not drain
+//!   within the configured window; emit `Event::ShutdownWindowExceeded`
+//!   and return `Err(SkeletonError::ShutdownWindowExceeded)` so the binary
+//!   exits with `ExitCode::FAILURE`.
 
 use std::net::{IpAddr, SocketAddr};
 use std::path::Path;
 use std::process::ExitCode;
 use std::str::FromStr;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Duration;
 
-use tokio::sync::{mpsc, oneshot};
+use tokio::signal::unix::{SignalKind, signal};
+use tokio::sync::{Mutex, mpsc};
+use tokio::time::Instant;
 
 pub use crate::engine::dispatch::DispatchMode;
 
-use crate::admission;
 use crate::config::roki::RokiConfig;
 use crate::config::workflow::WorkflowConfig;
+use crate::daemon::cache::DiffCache;
+use crate::daemon::dispatcher::Dispatcher;
+use crate::daemon::real_runner::RealCycleRunner;
+use crate::daemon::shutdown::ShutdownToken;
+use crate::daemon::ticket_task::DispatchMsg;
 use crate::error::{SkeletonError, WebhookError};
-use crate::linear::client::{LinearClient, MeId};
-use crate::linear::ticket::NormalizedTicket;
+use crate::events::{Event, EventWriter, ShutdownSignal, now_rfc3339};
+use crate::linear::client::LinearClient;
 use crate::linear::webhook::{self, WebhookState};
 
-/// Carries the resolved dispatch target through to the cycle call site.
-enum DispatchedEntry {
-    Rule(crate::config::workflow::Rule),
-    Cleanup(crate::config::workflow::Cleanup),
-    Shorthand,
-}
-
-/// Run the skeleton pipeline.
+/// Run the persistent daemon.
 ///
-/// Returns `ExitCode::SUCCESS` on a clean cycle (regardless of the
-/// subprocess exit code, per Req 8.2) and `ExitCode::FAILURE` on any
-/// internal error in the startup-bound or cycle-bound classes.
+/// Returns `ExitCode::SUCCESS` on a clean drain (every in-flight ticket
+/// task exited within `shutdown_window_seconds`), and `ExitCode::FAILURE`
+/// on any startup-bound error or on a shutdown-window timeout.
 pub async fn run(config_path: &Path, mode: DispatchMode) -> ExitCode {
     match run_inner(config_path, mode).await {
         Ok(()) => ExitCode::SUCCESS,
         Err(err) => {
-            tracing::error!(error = %err, "skeleton runtime exited with internal error");
+            tracing::error!(error = %err, "daemon runtime exited with internal error");
             ExitCode::FAILURE
         }
     }
@@ -82,14 +80,30 @@ pub(crate) async fn run_inner(config_path: &Path, mode: DispatchMode) -> Result<
         None
     };
 
-    // 4. Channel + atomic. Channel capacity 1; atomic is the cycle-started
-    //    signal the webhook handler reads with `Acquire` and the runtime
-    //    sets exactly once with `Release` per design State Management.
-    let (tx, mut rx) = mpsc::channel::<NormalizedTicket>(1);
-    let cycle_started = Arc::new(AtomicBool::new(false));
+    let cfg = Arc::new(cfg);
+    let workflow = Arc::new(workflow);
 
-    // 5. Bind webhook listener. Bind failure is startup-bound (Req 3.1) and
-    //    aborts before any POST is accepted.
+    // 4. Open the daemon-scoped event log.
+    let daemon_events_writer =
+        EventWriter::open(&cfg.paths.session_root, "_daemon").map_err(|e| {
+            SkeletonError::Capture(crate::error::CaptureError::OpenFile {
+                path: crate::events::events_path(&cfg.paths.session_root, "_daemon"),
+                source: e,
+            })
+        })?;
+    let daemon_events = Arc::new(Mutex::new(daemon_events_writer));
+
+    // 5. Emit DaemonStarted.
+    {
+        let mut w = daemon_events.lock().await;
+        let _ = w.emit(&Event::DaemonStarted {
+            ts: now_rfc3339(),
+            config_path: config_path.display().to_string(),
+            schema_version: 1,
+        });
+    }
+
+    // 6. Bind listener (capacity 64).
     let bind_ip = IpAddr::from_str(&cfg.linear_webhook.bind).map_err(|err| {
         SkeletonError::Webhook(WebhookError::BindFailed {
             addr: cfg.linear_webhook.bind.clone(),
@@ -98,391 +112,202 @@ pub(crate) async fn run_inner(config_path: &Path, mode: DispatchMode) -> Result<
     })?;
     let addr = SocketAddr::from((bind_ip, cfg.linear_webhook.port));
 
+    let (tx, rx) = mpsc::channel(64);
     let state = WebhookState {
         sender: Arc::new(tx),
-        cycle_started: cycle_started.clone(),
     };
 
-    let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
+    let shutdown = ShutdownToken::new();
+
+    let listener_shutdown = shutdown.clone();
     let listener_handle = tokio::spawn(webhook::bind_and_serve(addr, state, async move {
-        let _ = shutdown_rx.await;
+        listener_shutdown.wait().await;
     }));
 
-    // 6. Pipeline loop. Each iteration drains one POST; admission rejection
-    //    and dispatch no-match re-arm the loop. The first match locks the
-    //    cycle and breaks out into the cycle-bound stage below.
-    let (admitted, _cycle_kind, dispatched) = loop {
-        let Some(ticket) = rx.recv().await else {
-            // Sender side dropped without ever delivering a ticket. The
-            // listener task either failed to bind or exited prematurely;
-            // surface the failure as a bind error so the operator sees the
-            // listener address in the log line.
-            let _ = shutdown_tx.send(());
-            return match listener_handle.await {
-                Ok(Ok(())) => Err(SkeletonError::Webhook(WebhookError::BindFailed {
-                    addr: addr.to_string(),
-                    source: std::io::Error::other("webhook channel closed before cycle"),
-                })),
-                Ok(Err(err)) => Err(SkeletonError::Webhook(err)),
-                Err(join_err) => Err(SkeletonError::Webhook(WebhookError::BindFailed {
-                    addr: addr.to_string(),
-                    source: std::io::Error::other(join_err),
-                })),
-            };
-        };
-
-        // `admission::accept` requires `&MeId`. When admission compares
-        // against a literal id, the field is unused; pass an empty value.
-        let me_ref = me.clone().unwrap_or_else(|| MeId(String::new()));
-        match admission::accept(&ticket, &workflow, &me_ref) {
-            Ok(admitted) => {
-                use crate::engine::dispatch::{DispatchTarget, evaluate};
-                match evaluate(&admitted, &workflow, mode) {
-                    DispatchTarget::Cycle {
-                        kind,
-                        rule: Some(r),
-                        ..
-                    } => {
-                        break (admitted, kind, DispatchedEntry::Rule(r.clone()));
-                    }
-                    DispatchTarget::Cycle {
-                        kind,
-                        cleanup: Some(c),
-                        ..
-                    } => {
-                        break (admitted, kind, DispatchedEntry::Cleanup(c.clone()));
-                    }
-                    DispatchTarget::CleanupShorthand => {
-                        break (
-                            admitted,
-                            crate::engine::outcome::CycleKind::Cleanup,
-                            DispatchedEntry::Shorthand,
-                        );
-                    }
-                    DispatchTarget::NoMatch => {
-                        tracing::info!(
-                            ticket_id = %admitted.ticket.id,
-                            "no dispatch match; awaiting next webhook"
-                        );
-                        continue;
-                    }
-                    DispatchTarget::Cycle {
-                        rule: None,
-                        cleanup: None,
-                        ..
-                    } => unreachable!(
-                        "dispatch::evaluate returned Cycle with neither rule nor cleanup"
-                    ),
-                }
-            }
-            Err(err) => {
-                tracing::info!(
-                    ticket_id = %ticket.id,
-                    reason = %err,
-                    "admission rejected; awaiting next webhook"
-                );
-                continue;
-            }
-        }
-    };
-
-    // 7. Lock the cycle, drop the receiver, dispatch into the engine.
-    cycle_started.store(true, Ordering::Release);
-    drop(rx);
-
-    let mut events = crate::events::EventWriter::open(&cfg.paths.session_root, &admitted.ticket.id)
-        .map_err(|e| {
-            SkeletonError::Capture(crate::error::CaptureError::OpenFile {
-                path: crate::events::events_path(&cfg.paths.session_root, &admitted.ticket.id),
-                source: e,
-            })
-        })?;
-
-    let executor = crate::engine::CommandPhaseExecutor {
+    // 7. Build executor.
+    let executor = Arc::new(crate::engine::CommandPhaseExecutor {
         default_cli: cfg.default_ai_command.cli.clone(),
         stall: crate::engine::phase::StallWindow::CommandDefault(
             cfg.default_ai_command.stall_seconds,
         ),
-    };
+    });
 
-    enum CycleOutcomeOrShortcircuit {
-        Cycle {
-            kind: crate::engine::outcome::CycleKind,
-            outcome: crate::engine::CycleOutcome,
-        },
-        Shorthand,
-    }
-
-    let cycle_outcome_result: CycleOutcomeOrShortcircuit = match dispatched {
-        DispatchedEntry::Rule(rule) => {
-            let outcome = crate::engine::run_cycle(
-                &executor,
-                &admitted,
-                &rule,
-                &cfg.paths.session_root,
-                &cfg,
-                crate::engine::outcome::CycleKind::Rule,
-                None,
-            )
-            .await?;
-            CycleOutcomeOrShortcircuit::Cycle {
-                kind: crate::engine::outcome::CycleKind::Rule,
-                outcome,
-            }
-        }
-        DispatchedEntry::Cleanup(cleanup) => {
-            let rule_view = cleanup_to_rule(&cleanup);
-            let outcome = crate::engine::run_cycle(
-                &executor,
-                &admitted,
-                &rule_view,
-                &cfg.paths.session_root,
-                &cfg,
-                crate::engine::outcome::CycleKind::Cleanup,
-                None,
-            )
-            .await?;
-            CycleOutcomeOrShortcircuit::Cycle {
-                kind: crate::engine::outcome::CycleKind::Cleanup,
-                outcome,
-            }
-        }
-        DispatchedEntry::Shorthand => {
-            crate::engine::cleanup::delete_immediate(
-                &admitted.ticket.id,
-                &admitted.ghq,
-                &cfg.paths.session_root,
-                &mut events,
-            )
-            .await
-            .map_err(|e| {
-                SkeletonError::Capture(crate::error::CaptureError::Write {
-                    path: events.path().to_path_buf(),
-                    source: std::io::Error::other(e),
-                })
-            })?;
-            CycleOutcomeOrShortcircuit::Shorthand
-        }
-    };
-
-    // 8. Handle the cycle outcome. The failure handler must run before the
-    //    listener is shut down because it may spawn a Failure cycle.
-    let final_result: Result<(), SkeletonError> = match cycle_outcome_result {
-        CycleOutcomeOrShortcircuit::Shorthand => {
-            // delete_immediate already emitted both events. Exit 0.
-            Ok(())
-        }
-        CycleOutcomeOrShortcircuit::Cycle { kind, outcome } => match outcome {
-            crate::engine::CycleOutcome::Completed { iters, cycle_id } => {
-                let _ = events.emit(&crate::events::Event::CycleCompleted {
-                    ts: crate::events::now_rfc3339(),
-                    cycle_id: cycle_id.to_string(),
-                    cycle_kind: kind.as_str().to_string(),
-                    iters,
-                    outcome: None,
-                });
-                if kind == crate::engine::outcome::CycleKind::Cleanup {
-                    crate::engine::cleanup::post_cycle_delete(
-                        &admitted.ticket.id,
-                        &admitted.ghq,
-                        &cfg.paths.session_root,
-                        cycle_id,
-                        &mut events,
-                    )
-                    .await
-                    .map_err(|e| {
-                        SkeletonError::Capture(crate::error::CaptureError::Write {
-                            path: events.path().to_path_buf(),
-                            source: std::io::Error::other(e),
-                        })
-                    })?;
-                }
-                Ok(())
-            }
-            crate::engine::CycleOutcome::Failed { meta } => {
-                tracing::error!(
-                    failure_kind = %meta.kind.as_str(),
-                    phase = %meta.phase.as_str(),
-                    iter = meta.iter,
-                    "cycle failed"
-                );
-                let decision = handle_failed_cycle(
-                    &meta,
-                    kind,
-                    &workflow,
-                    &executor,
-                    &admitted,
-                    &cfg,
-                    &mut events,
-                )
-                .await;
-                match decision {
-                    FailureDecision::HandlerSucceeded => Ok(()),
-                    FailureDecision::Unhandled => Err(SkeletonError::PhaseInfra(
-                        crate::error::PhaseInfraError::CycleFailed {
-                            kind: meta.kind,
-                            iter: meta.iter,
-                        },
-                    )),
-                }
-            }
-        },
-    };
-
-    // 9. Graceful shutdown — runs exactly once on every exit path.
-    let _ = shutdown_tx.send(());
-    let listener_result = listener_handle.await;
-
-    // Merge listener errors into the final result.
-    match final_result {
-        Ok(()) => match listener_result {
-            Ok(Ok(())) => Ok(()),
-            Ok(Err(err)) => Err(SkeletonError::Webhook(err)),
-            Err(join_err) => Err(SkeletonError::Webhook(WebhookError::BindFailed {
-                addr: addr.to_string(),
-                source: std::io::Error::other(join_err),
-            })),
-        },
-        Err(cycle_err) => {
-            match listener_result {
-                Ok(Ok(())) => {}
-                Ok(Err(err)) => {
-                    tracing::error!(error = %err, "webhook listener errored after cycle failure");
-                }
-                Err(join_err) => {
-                    tracing::error!(
-                        error = %join_err,
-                        "webhook listener task panicked after cycle failure"
-                    );
-                }
-            }
-            Err(cycle_err)
-        }
-    }
-}
-
-enum FailureDecision {
-    HandlerSucceeded,
-    Unhandled,
-}
-
-async fn handle_failed_cycle(
-    meta: &crate::engine::outcome::FailureMeta,
-    failed_cycle_kind: crate::engine::outcome::CycleKind,
-    workflow: &crate::config::workflow::WorkflowConfig,
-    executor: &crate::engine::CommandPhaseExecutor,
-    admitted: &crate::admission::AdmittedTicket,
-    cfg: &crate::config::roki::RokiConfig,
-    events: &mut crate::events::EventWriter,
-) -> FailureDecision {
-    use crate::engine::outcome::CycleKind;
-    use crate::events::{Event, FailureMarker, FailureMetaSer, now_rfc3339};
-
-    // Recursion bound: a failure cycle that itself fails must not recurse.
-    if failed_cycle_kind == CycleKind::Failure {
-        let _ = events.emit(&Event::FailureUnhandled {
-            ts: now_rfc3339(),
-            cycle_id: meta.failed_cycle_id.to_string(),
-            cycle_kind: "failure".into(),
-            failure: FailureMetaSer::from_meta(meta),
-            marker: FailureMarker::RecursionBound,
-        });
-        return FailureDecision::Unhandled;
-    }
-
-    // First-match against [[on_failure]].
-    let Some(handler) = crate::engine::on_failure::route(&workflow.on_failures, meta) else {
-        let _ = events.emit(&Event::FailureUnhandled {
-            ts: now_rfc3339(),
-            cycle_id: meta.failed_cycle_id.to_string(),
-            cycle_kind: failed_cycle_kind.as_str().to_string(),
-            failure: FailureMetaSer::from_meta(meta),
-            marker: FailureMarker::None,
-        });
-        return FailureDecision::Unhandled;
-    };
-
-    // Convert OnFailure -> Rule shape for run_cycle.
-    let handler_rule = on_failure_to_rule(handler);
-    let handler_outcome = match crate::engine::run_cycle(
+    // 8. Build runner.
+    let runner = Arc::new(RealCycleRunner {
+        workflow: workflow.clone(),
+        cfg: cfg.clone(),
         executor,
-        admitted,
-        &handler_rule,
-        &cfg.paths.session_root,
-        cfg,
-        CycleKind::Failure,
-        Some(meta.clone()),
-    )
-    .await
+    });
+
+    // 9. Build cache + dispatcher.
+    let cache = Arc::new(DiffCache::new());
+    let dispatcher = Arc::new(Dispatcher::new(
+        cache.clone(),
+        workflow.clone(),
+        cfg.clone(),
+        me.clone(),
+        mode,
+        shutdown.clone(),
+        runner,
+        daemon_events.clone(),
+    ));
+
+    // 10. DaemonReady.
     {
-        Ok(o) => o,
-        Err(infra) => {
-            tracing::error!(?infra, "handler cycle infra error");
-            let _ = events.emit(&Event::FailureUnhandled {
+        let mut w = daemon_events.lock().await;
+        let _ = w.emit(&Event::DaemonReady {
+            ts: now_rfc3339(),
+            webhook_bind_addr: addr.to_string(),
+        });
+    }
+
+    // 11. Spawn dispatcher drain.
+    let dispatcher_drain = dispatcher.clone();
+    let drain_handle = tokio::spawn(async move {
+        dispatcher_drain.drain(rx).await;
+    });
+
+    // 12. Spawn signal trap.
+    let signal_shutdown = shutdown.clone();
+    let signal_cache = cache.clone();
+    let signal_events = daemon_events.clone();
+    let signal_handle = tokio::spawn(async move {
+        let mut sigint = match signal(SignalKind::interrupt()) {
+            Ok(s) => s,
+            Err(err) => {
+                tracing::error!(error = %err, "failed to install SIGINT handler");
+                return;
+            }
+        };
+        let mut sigterm = match signal(SignalKind::terminate()) {
+            Ok(s) => s,
+            Err(err) => {
+                tracing::error!(error = %err, "failed to install SIGTERM handler");
+                return;
+            }
+        };
+
+        let signal_kind = tokio::select! {
+            _ = sigint.recv() => ShutdownSignal::Sigint,
+            _ = sigterm.recv() => ShutdownSignal::Sigterm,
+        };
+
+        let in_flight = signal_cache.in_flight_count().await;
+        {
+            let mut w = signal_events.lock().await;
+            let _ = w.emit(&Event::DaemonShutdownBegan {
                 ts: now_rfc3339(),
-                cycle_id: meta.failed_cycle_id.to_string(),
-                cycle_kind: "failure".into(),
-                failure: FailureMetaSer::from_meta(meta),
-                marker: FailureMarker::RecursionBound,
+                signal: signal_kind,
+                in_flight,
             });
-            return FailureDecision::Unhandled;
         }
+        signal_shutdown.fire();
+    });
+
+    // 13. Block on shutdown.
+    shutdown.wait().await;
+
+    // 14. Wait for the listener and dispatcher drain to wind down. The
+    //     listener observes the shared `ShutdownToken` via the future
+    //     handed to `bind_and_serve`. The dispatcher's drain loop exits
+    //     once the listener drops the sender (no more ticket forwards).
+    let listener_result = listener_handle.await;
+    let _ = drain_handle.await;
+    // The signal task is best-effort (it returns after firing or on
+    // handler-install failure); abort the join in case it's still running
+    // because we already saw the shutdown fire.
+    signal_handle.abort();
+    let _ = signal_handle.await;
+
+    // 15. Drain ticket tasks within the configured window.
+    let window = Duration::from_secs(u64::from(cfg.engine.shutdown_window_seconds));
+    let deadline = Instant::now() + window;
+
+    let tickets_arc = dispatcher.tickets();
+    // Drain the registry into a local Vec so we can release the lock for
+    // each individual ticket-task await.
+    let entries: Vec<(String, crate::daemon::dispatcher::TicketHandle)> = {
+        let mut map = tickets_arc.lock().await;
+        map.drain().collect()
     };
 
-    match handler_outcome {
-        crate::engine::CycleOutcome::Completed { iters, cycle_id } => {
-            let _ = events.emit(&Event::CycleCompleted {
-                ts: now_rfc3339(),
-                cycle_id: cycle_id.to_string(),
-                cycle_kind: "failure".into(),
-                iters,
-                outcome: None,
-            });
-            FailureDecision::HandlerSucceeded
-        }
-        crate::engine::CycleOutcome::Failed { meta: handler_meta } => {
-            let _ = events.emit(&Event::FailureUnhandled {
-                ts: now_rfc3339(),
-                cycle_id: handler_meta.failed_cycle_id.to_string(),
-                cycle_kind: "failure".into(),
-                failure: FailureMetaSer::from_meta(&handler_meta),
-                marker: FailureMarker::RecursionBound,
-            });
-            FailureDecision::Unhandled
-        }
-    }
-}
+    let mut drained: usize = 0;
+    let mut aborted_ticket_ids: Vec<String> = Vec::new();
 
-fn on_failure_to_rule(h: &crate::engine::on_failure::OnFailure) -> crate::config::workflow::Rule {
-    crate::config::workflow::Rule {
-        when_status: String::new(),
-        when_labels_has_all: vec![],
-        pre: h.pre.clone(),
-        run: h.run.clone(),
-        post: h.post.clone(),
-    }
-}
+    for (ticket_id, handle) in entries {
+        let crate::daemon::dispatcher::TicketHandle { inbox, join } = handle;
 
-/// Convert a `Cleanup` entry into a `Rule` view for `run_cycle`.
-/// Only called for non-shorthand cleanup entries; `run` is present by
-/// parser invariant (`WorkflowError::CleanupMissingRun` guards the load).
-fn cleanup_to_rule(c: &crate::config::workflow::Cleanup) -> crate::config::workflow::Rule {
-    crate::config::workflow::Rule {
-        when_status: c.when_status.clone().unwrap_or_default(),
-        when_labels_has_all: c.when_labels_has_all.clone(),
-        pre: c.pre.clone(),
-        run: c.run.clone().expect("non-shorthand cleanup has run"),
-        post: c.post.clone(),
+        // Best-effort shutdown signal to the per-ticket task. If the
+        // inbox is full or closed, dropping the sender below still wakes
+        // the loop.
+        let _ = inbox.send(DispatchMsg::Shutdown).await;
+        drop(inbox);
+
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        match tokio::time::timeout(remaining, join).await {
+            Ok(Ok(())) => {
+                drained += 1;
+            }
+            Ok(Err(join_err)) => {
+                // Task panicked; treat as aborted so the operator sees
+                // it on the shutdown line.
+                tracing::error!(
+                    ticket_id = %ticket_id,
+                    error = %join_err,
+                    "ticket task join error during shutdown"
+                );
+                aborted_ticket_ids.push(ticket_id);
+            }
+            Err(_) => {
+                aborted_ticket_ids.push(ticket_id);
+            }
+        }
     }
+
+    let aborted = aborted_ticket_ids.len();
+
+    {
+        let mut w = daemon_events.lock().await;
+        let _ = w.emit(&Event::DaemonShutdownCompleted {
+            ts: now_rfc3339(),
+            drained,
+            aborted,
+        });
+    }
+
+    // Surface listener errors as a tracing line; they do not change the
+    // shutdown-window verdict.
+    match listener_result {
+        Ok(Ok(())) => {}
+        Ok(Err(err)) => {
+            tracing::error!(error = %err, "webhook listener errored during shutdown");
+        }
+        Err(join_err) => {
+            tracing::error!(
+                error = %join_err,
+                "webhook listener task panicked during shutdown"
+            );
+        }
+    }
+
+    if aborted > 0 {
+        let mut w = daemon_events.lock().await;
+        let _ = w.emit(&Event::ShutdownWindowExceeded {
+            ts: now_rfc3339(),
+            aborted,
+            aborted_ticket_ids,
+        });
+        return Err(SkeletonError::ShutdownWindowExceeded);
+    }
+
+    Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     //! Startup-bound failure tests. The cycle-bound and happy-path coverage
-    //! lives in the end-to-end smoke test (task 6.1) per design Testing
-    //! Strategy: the orchestrator's full pipeline is exercised via the
-    //! binary-as-subprocess path so the wire-level webhook → cycle →
-    //! shutdown behavior is acceptance-tested rather than mocked.
+    //! lives in the end-to-end smoke test (slice 1-4 e2e), with slice 5
+    //! daemon-shutdown coverage added in Tasks 9-15.
 
     use super::*;
     use crate::error::{RokiConfigError, SkeletonError};

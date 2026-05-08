@@ -61,6 +61,32 @@ pub fn evaluate<'a>(
     DispatchTarget::NoMatch
 }
 
+/// Like `evaluate`, but takes a cache snapshot instead of a freshly admitted
+/// ticket. Used by the per-ticket task to re-dispatch after a cycle ends
+/// when `pending_recheck` was set. Admission has already passed for this
+/// entry; we synthesize an `AdmittedTicket` from the snapshot fields so the
+/// existing rule-matching helpers (`first_match`, `first_cleanup_match`) can
+/// be reused unchanged.
+pub fn evaluate_from_cache<'a>(
+    ticket_id: &str,
+    snap: &crate::daemon::cache::CacheEntry,
+    workflow: &'a crate::config::workflow::WorkflowConfig,
+    mode: DispatchMode,
+) -> DispatchTarget<'a> {
+    let synthetic = AdmittedTicket {
+        ticket: crate::linear::ticket::NormalizedTicket::new(
+            ticket_id.to_string(),
+            Some(snap.assignee.clone()),
+            snap.status.clone(),
+            snap.labels.iter().cloned().collect(),
+            String::new(),
+            String::new(),
+        ),
+        ghq: snap.repo.clone(),
+    };
+    evaluate(&synthetic, workflow, mode)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -172,6 +198,52 @@ mod tests {
         );
         let a = crate::rule::admitted_with("InProgress", vec![]);
         match evaluate(&a, &wf, DispatchMode::CleanupOnly) {
+            DispatchTarget::NoMatch => {}
+            other => panic!("expected NoMatch, got {other:?}"),
+        }
+    }
+
+    use crate::daemon::cache::CacheEntry;
+    use std::collections::BTreeSet;
+    use time::OffsetDateTime;
+
+    fn snapshot_for(status: &str, labels: &[&str]) -> CacheEntry {
+        CacheEntry {
+            repo: "github.com/example/repo".into(),
+            workflow_path: None,
+            status: status.into(),
+            labels: labels
+                .iter()
+                .map(|s| s.to_string())
+                .collect::<BTreeSet<_>>(),
+            assignee: "u1".into(),
+            cycle_id: None,
+            pending_recheck: false,
+            last_event_at: OffsetDateTime::now_utc(),
+        }
+    }
+
+    #[test]
+    fn evaluate_from_cache_dispatches_cleanup_first() {
+        let wf = workflow_with(vec![rule_for("Done")], vec![cleanup_for(Some("Done"))]);
+        let snap = snapshot_for("Done", &[]);
+        match evaluate_from_cache("t1", &snap, &wf, DispatchMode::Default) {
+            DispatchTarget::Cycle {
+                kind: CycleKind::Cleanup,
+                ..
+            } => {}
+            other => panic!("expected Cleanup cycle, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn evaluate_from_cache_no_match_when_status_misses() {
+        let wf = workflow_with(
+            vec![rule_for("InProgress")],
+            vec![cleanup_for(Some("Done"))],
+        );
+        let snap = snapshot_for("Triage", &[]);
+        match evaluate_from_cache("t1", &snap, &wf, DispatchMode::Default) {
             DispatchTarget::NoMatch => {}
             other => panic!("expected NoMatch, got {other:?}"),
         }

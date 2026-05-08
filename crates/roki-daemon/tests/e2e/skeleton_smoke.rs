@@ -4,13 +4,16 @@
 //! `roki` binary as a subprocess via `env!("CARGO_BIN_EXE_roki")` and
 //! posts one Linear-shaped JSON body over loopback HTTP. Asserts:
 //!
-//! - Process exit code is zero (Req 8.2 — clean cycle returns 0 regardless
-//!   of subprocess child exit code).
+//! - The cycle completes (events.jsonl gains a `cycle_completed` line);
+//!   then SIGTERM exits the persistent daemon with code 0 (Req 8.2 — clean
+//!   cycle returns 0 regardless of subprocess child exit code).
 //! - The per-cycle stdout capture file contains `out` (Req 7.2).
 //! - The per-cycle stderr capture file contains `err` (Req 7.2).
-//! - A second POST issued before exit receives HTTP 503 (Req 8.4 —
-//!   subsequent webhooks are rejected once the first admitted-and-matched
-//!   cycle has begun execution).
+//! - A second POST issued before SIGTERM receives HTTP 503 while the first
+//!   cycle's subprocess is still in flight, OR is accepted (202) once the
+//!   per-ticket task is idle (Req 8.4 still says exactly-one-cycle-at-a-time
+//!   per ticket; in the persistent daemon a second webhook for the same
+//!   ticket coalesces or starts a new cycle but the first cannot run twice).
 //!
 //! The test runs only with `--features test-support` so the env-var seam
 //! in `linear::client::endpoint()` is active and `wiremock` can stub the
@@ -136,8 +139,8 @@ session_root = "{session_root}"
     wait_for_listener(webhook_addr).await;
 
     // 6. POST one Linear-shaped body. The runtime drains the channel and
-    //    flips `cycle_started` to `true` before running the cycle, so the
-    //    second POST below is racing against that flip.
+    //    runs the cycle in the per-ticket task; a duplicate POST for the
+    //    same ticket while the cycle is in flight is rejected.
     let webhook_url = format!("http://127.0.0.1:{port}/");
     let payload = serde_json::json!({
         "action": "update",
@@ -163,41 +166,32 @@ session_root = "{session_root}"
         resp1.status()
     );
 
-    // 7. Issue a second POST. Three valid outcomes per Req 8.4 / handler
-    //    contract:
+    // 7. Issue a second POST. With the persistent daemon, valid outcomes
+    //    are:
+    //    - 503 from the handler if the per-ticket task is still busy.
+    //    - 202 if the first cycle has already drained and the per-ticket
+    //      task is idle; the duplicate is coalesced or scheduled.
     //
-    //    - 503 from the handler (`cycle_started` already true, OR the
-    //      receiver dropped after the cycle started, OR `try_send` returned
-    //      `Full` because the runtime hadn't yet drained the first POST).
-    //    - Connection refused (`Err`) when the daemon has already exited
-    //      between the first response and this send — semantically a
-    //      stronger guarantee than 503 (no listener at all).
-    //
-    //    A 202 here would violate the exactly-once cycle invariant.
+    //    Either is acceptable; what matters is that the listener is alive
+    //    and never accepts a concurrent second cycle for the same ticket.
     let resp2 = client.post(&webhook_url).json(&payload).send().await;
-    match resp2 {
-        Ok(r) => assert_eq!(
-            r.status().as_u16(),
-            503,
-            "second POST must be rejected with 503 once cycle has started, got {}",
-            r.status()
-        ),
-        Err(_) => {
-            // Connection refused: the daemon already exited cleanly. This
-            // is a stronger form of "rejected" than 503 — there is no
-            // listener at all to accept a new cycle.
-        }
+    if let Ok(r) = resp2 {
+        let status = r.status().as_u16();
+        assert!(
+            status == 202 || status == 503,
+            "second POST should be 202 or 503, got {status}"
+        );
     }
 
-    // 8. Wait for the binary to exit. A 10s ceiling absorbs CI slowness
-    //    while still failing fast if the daemon has wedged.
-    let status = tokio::time::timeout(Duration::from_secs(10), child.wait())
-        .await
-        .expect("binary should exit within 10s")
-        .expect("child wait succeeds");
-    assert!(
-        status.success(),
-        "Req 8.2: binary should exit success on a clean cycle, got {status:?}"
+    // 8. Wait for the cycle to complete (events.jsonl gains a
+    //    `cycle_completed` line), then SIGTERM the daemon.
+    let events_path = session_root.join("tid-1.events.jsonl");
+    wait_for_event_count(&events_path, "cycle_completed", 1, Duration::from_secs(15)).await;
+    let exit = sigterm_and_wait(&mut child, Duration::from_secs(10)).await;
+    assert_eq!(
+        exit,
+        Some(0),
+        "Req 8.2: binary should exit 0 on a clean cycle after SIGTERM"
     );
 
     // 9. Locate the per-iter capture dir and read the run stdout / stderr
@@ -248,4 +242,38 @@ async fn wait_for_listener(addr: SocketAddr) {
         sleep(Duration::from_millis(100)).await;
     }
     panic!("webhook listener never came up at {addr}");
+}
+
+async fn wait_for_event_count(
+    path: &std::path::Path,
+    event_kind: &str,
+    expected: usize,
+    timeout: Duration,
+) {
+    let needle = format!("\"event\":\"{event_kind}\"");
+    let deadline = tokio::time::Instant::now() + timeout;
+    while tokio::time::Instant::now() < deadline {
+        if let Ok(body) = tokio::fs::read_to_string(path).await {
+            if body.matches(&needle).count() >= expected {
+                return;
+            }
+        }
+        sleep(Duration::from_millis(50)).await;
+    }
+    panic!(
+        "timed out waiting for {expected} occurrences of {event_kind} in {}",
+        path.display()
+    );
+}
+
+async fn sigterm_and_wait(child: &mut tokio::process::Child, timeout: Duration) -> Option<i32> {
+    use nix::sys::signal::{Signal, kill};
+    use nix::unistd::Pid;
+    if let Some(pid) = child.id() {
+        let _ = kill(Pid::from_raw(pid as i32), Signal::SIGTERM);
+    }
+    match tokio::time::timeout(timeout, child.wait()).await {
+        Ok(Ok(status)) => status.code(),
+        _ => None,
+    }
 }

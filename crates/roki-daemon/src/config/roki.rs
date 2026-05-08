@@ -96,14 +96,20 @@ pub struct DefaultAiSessionSection {
 ///
 /// `max_iterations` is enforced at load time: absent → default 10,
 /// present but zero → `TypeMismatch` error.
+/// `shutdown_window_seconds` is enforced at load time: absent → default 30,
+/// present but outside 1..=600 → `TypeMismatch` error.
 #[derive(Clone, Debug)]
 pub struct EngineSection {
     pub max_iterations: u32,
+    pub shutdown_window_seconds: u32,
 }
 
 impl Default for EngineSection {
     fn default() -> Self {
-        Self { max_iterations: 10 }
+        Self {
+            max_iterations: 10,
+            shutdown_window_seconds: 30,
+        }
     }
 }
 
@@ -174,6 +180,40 @@ impl RokiConfig {
 
         raw_cfg.validate(path)
     }
+
+    /// Build the smallest legal `RokiConfig` for unit tests.
+    ///
+    /// Mirrors the canonical TOML shape used by slice 1-4 e2e fixtures:
+    /// every required section populated with placeholder values rooted at
+    /// `session_root`. The returned config is suitable for tests that
+    /// thread a config through code paths but do not actually consume any
+    /// of its fields beyond construction.
+    ///
+    /// `#[cfg(test)]` so production code cannot reach the helper.
+    #[cfg(test)]
+    pub fn test_default(session_root: &Path) -> Self {
+        Self {
+            linear: LinearSection {
+                token: "x".to_string(),
+            },
+            linear_webhook: LinearWebhookSection {
+                bind: "127.0.0.1".to_string(),
+                port: 0,
+                secret: None,
+            },
+            default_ai_command: DefaultAiCommandSection {
+                cli: "echo".to_string(),
+                stall_seconds: 300,
+            },
+            engine: EngineSection::default(),
+            paths: PathsSection {
+                workflow: session_root.join("WORKFLOW.toml"),
+                session_root: session_root.to_path_buf(),
+            },
+            log: LogSection::default(),
+            default_ai_session: None,
+        }
+    }
 }
 
 // ---------- Permissive raw shape for staged validation ----------
@@ -235,6 +275,7 @@ struct RawDefaultAiSession {
 #[serde(default)]
 struct RawEngine {
     max_iterations: Option<u32>,
+    shutdown_window_seconds: Option<u32>,
 }
 
 #[derive(Default, Deserialize)]
@@ -356,7 +397,21 @@ fn parse_engine(path: &Path, raw: RawEngine) -> Result<EngineSection, RokiConfig
         }
         Some(n) => n,
     };
-    Ok(EngineSection { max_iterations })
+    let shutdown_window_seconds = match raw.shutdown_window_seconds {
+        None => 30,
+        Some(n) if (1..=600).contains(&n) => n,
+        Some(_) => {
+            return Err(RokiConfigError::TypeMismatch {
+                path: path.to_path_buf(),
+                key: "engine.shutdown_window_seconds".to_string(),
+                expected: "u32 in 1..=600",
+            });
+        }
+    };
+    Ok(EngineSection {
+        max_iterations,
+        shutdown_window_seconds,
+    })
 }
 
 fn required_field<T>(
@@ -398,6 +453,16 @@ mod tests {
         let mut f = std::fs::File::create(&path).expect("create toml");
         f.write_all(body.as_bytes()).expect("write toml");
         path
+    }
+
+    #[test]
+    fn test_default_yields_legal_engine_section() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let cfg = RokiConfig::test_default(dir.path());
+        assert!(cfg.engine.max_iterations >= 1);
+        assert_eq!(cfg.engine.shutdown_window_seconds, 30);
+        assert_eq!(cfg.paths.session_root, dir.path());
+        assert_eq!(cfg.linear_webhook.bind, "127.0.0.1");
     }
 
     const HAPPY_PATH_TOML: &str = r#"
@@ -739,5 +804,96 @@ session_root = "/tmp/sess"
         let err = RokiConfig::load(&path).expect_err("rejects zero");
         let msg = format!("{err}");
         assert!(msg.contains("max_iterations"), "msg: {msg}");
+    }
+
+    #[test]
+    fn shutdown_window_seconds_defaults_to_30() {
+        let dir = tempfile::tempdir().unwrap();
+        let toml_body = r#"
+[linear]
+token = "x"
+
+[linear.webhook]
+bind = "127.0.0.1"
+port = 8000
+
+[default.ai.command]
+cli = "echo"
+
+[engine]
+
+[paths]
+workflow = "/tmp/w.toml"
+session_root = "/tmp/sess"
+
+[log]
+"#;
+        let path = dir.path().join("roki.toml");
+        std::fs::write(&path, toml_body).unwrap();
+
+        let cfg = RokiConfig::load(&path).expect("load");
+        assert_eq!(cfg.engine.shutdown_window_seconds, 30);
+    }
+
+    #[test]
+    fn shutdown_window_seconds_below_min_is_rejected() {
+        let dir = tempfile::tempdir().unwrap();
+        let toml_body = r#"
+[linear]
+token = "x"
+
+[linear.webhook]
+bind = "127.0.0.1"
+port = 8000
+
+[default.ai.command]
+cli = "echo"
+
+[engine]
+shutdown_window_seconds = 0
+
+[paths]
+workflow = "/tmp/w.toml"
+session_root = "/tmp/sess"
+
+[log]
+"#;
+        let path = dir.path().join("roki.toml");
+        std::fs::write(&path, toml_body).unwrap();
+
+        let err = RokiConfig::load(&path).expect_err("rejects 0");
+        let msg = format!("{err}");
+        assert!(msg.contains("shutdown_window_seconds"), "msg: {msg}");
+    }
+
+    #[test]
+    fn shutdown_window_seconds_above_max_is_rejected() {
+        let dir = tempfile::tempdir().unwrap();
+        let toml_body = r#"
+[linear]
+token = "x"
+
+[linear.webhook]
+bind = "127.0.0.1"
+port = 8000
+
+[default.ai.command]
+cli = "echo"
+
+[engine]
+shutdown_window_seconds = 601
+
+[paths]
+workflow = "/tmp/w.toml"
+session_root = "/tmp/sess"
+
+[log]
+"#;
+        let path = dir.path().join("roki.toml");
+        std::fs::write(&path, toml_body).unwrap();
+
+        let err = RokiConfig::load(&path).expect_err("rejects 601");
+        let msg = format!("{err}");
+        assert!(msg.contains("shutdown_window_seconds"), "msg: {msg}");
     }
 }

@@ -132,10 +132,10 @@ session_root = "{session_root}"
     assert_eq!(resp.status().as_u16(), 202);
 
     // Give the listener time to process the webhook and log no-match,
-    // then kill the daemon (it would otherwise wait forever).
+    // then SIGTERM the daemon (it would otherwise wait forever).
     sleep(Duration::from_millis(500)).await;
-    let _ = child.kill().await;
-    let _ = tokio::time::timeout(Duration::from_secs(5), child.wait()).await;
+    let exit = sigterm_and_wait(&mut child, Duration::from_secs(10)).await;
+    assert_eq!(exit, Some(0), "binary should exit 0 after SIGTERM");
 
     // No cycle ran: events file must not exist.
     let events_path = session_root.join(format!("{ticket_id}.events.jsonl"));
@@ -160,4 +160,16 @@ async fn wait_for_listener(addr: SocketAddr) {
         sleep(Duration::from_millis(100)).await;
     }
     panic!("webhook listener never came up at {addr}");
+}
+
+async fn sigterm_and_wait(child: &mut tokio::process::Child, timeout: Duration) -> Option<i32> {
+    use nix::sys::signal::{Signal, kill};
+    use nix::unistd::Pid;
+    if let Some(pid) = child.id() {
+        let _ = kill(Pid::from_raw(pid as i32), Signal::SIGTERM);
+    }
+    match tokio::time::timeout(timeout, child.wait()).await {
+        Ok(Ok(status)) => status.code(),
+        _ => None,
+    }
 }

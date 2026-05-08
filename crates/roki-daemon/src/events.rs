@@ -25,6 +25,22 @@ pub enum WorktreeDeleteReason {
     CleanupShorthand,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WebhookSkipReason {
+    NoDiff,
+    SignatureInvalid,
+    AssigneeMismatch,
+    RepoUnresolvable,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ShutdownSignal {
+    Sigint,
+    Sigterm,
+}
+
 #[derive(Debug, Serialize)]
 pub struct FailureMetaSer {
     pub kind: String,
@@ -69,6 +85,35 @@ pub enum Event {
         ticket_id: String,
         cycle_id: Option<String>,
         reason: WorktreeDeleteReason,
+    },
+    DaemonStarted {
+        ts: String,
+        config_path: String,
+        schema_version: u32,
+    },
+    DaemonReady {
+        ts: String,
+        webhook_bind_addr: String,
+    },
+    DaemonShutdownBegan {
+        ts: String,
+        signal: ShutdownSignal,
+        in_flight: usize,
+    },
+    DaemonShutdownCompleted {
+        ts: String,
+        drained: usize,
+        aborted: usize,
+    },
+    ShutdownWindowExceeded {
+        ts: String,
+        aborted: usize,
+        aborted_ticket_ids: Vec<String>,
+    },
+    WebhookSkipped {
+        ts: String,
+        ticket_id: String,
+        reason: WebhookSkipReason,
     },
 }
 
@@ -183,6 +228,47 @@ mod tests {
     fn ticket_id_with_special_chars_sanitized() {
         let p = events_path(Path::new("/r"), "team/abc#1");
         assert_eq!(p, Path::new("/r/team_abc_1.events.jsonl"));
+    }
+
+    use serde_json::Value;
+
+    #[test]
+    fn daemon_started_serializes_with_event_tag() {
+        let ev = Event::DaemonStarted {
+            ts: "2026-05-08T00:00:00Z".into(),
+            config_path: "/tmp/roki.toml".into(),
+            schema_version: 1,
+        };
+        let v: Value = serde_json::to_value(&ev).unwrap();
+        assert_eq!(v["event"], "daemon_started");
+        assert_eq!(v["config_path"], "/tmp/roki.toml");
+        assert_eq!(v["schema_version"], 1);
+    }
+
+    #[test]
+    fn webhook_skipped_no_diff_serializes() {
+        let ev = Event::WebhookSkipped {
+            ts: "2026-05-08T00:00:00Z".into(),
+            ticket_id: "ENG-1".into(),
+            reason: WebhookSkipReason::NoDiff,
+        };
+        let v: Value = serde_json::to_value(&ev).unwrap();
+        assert_eq!(v["event"], "webhook_skipped");
+        assert_eq!(v["reason"], "no_diff");
+        assert_eq!(v["ticket_id"], "ENG-1");
+    }
+
+    #[test]
+    fn shutdown_window_exceeded_carries_aborted_ids() {
+        let ev = Event::ShutdownWindowExceeded {
+            ts: "2026-05-08T00:00:00Z".into(),
+            aborted: 2,
+            aborted_ticket_ids: vec!["ENG-1".into(), "ENG-2".into()],
+        };
+        let v: Value = serde_json::to_value(&ev).unwrap();
+        assert_eq!(v["event"], "shutdown_window_exceeded");
+        assert_eq!(v["aborted"], 2);
+        assert_eq!(v["aborted_ticket_ids"][1], "ENG-2");
     }
 
     #[test]

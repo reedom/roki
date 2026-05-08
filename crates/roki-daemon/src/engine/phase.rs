@@ -488,7 +488,10 @@ mod tests {
                 cli: "echo".to_string(),
                 stall_seconds: 300,
             },
-            engine: EngineSection { max_iterations: 10 },
+            engine: EngineSection {
+                max_iterations: 10,
+                shutdown_window_seconds: 30,
+            },
             paths: PathsSection {
                 workflow: PathBuf::from("/tmp"),
                 session_root: PathBuf::from("/tmp"),

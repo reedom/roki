@@ -107,16 +107,16 @@ session_root = "{session_root}"
         "precondition: no worktree"
     );
 
+    let events_path = session_root.join(format!("{ticket_id}.events.jsonl"));
+
     let mut child = spawn_one();
     let webhook_addr: SocketAddr = ([127, 0, 0, 1], port).into();
     wait_for_listener(webhook_addr).await;
     post_webhook(port, ticket_id).await;
 
-    let status = tokio::time::timeout(Duration::from_secs(15), child.wait())
-        .await
-        .unwrap()
-        .unwrap();
-    assert!(status.success(), "cycle 1 must exit 0");
+    wait_for_event_count(&events_path, "cycle_completed", 1, Duration::from_secs(15)).await;
+    let exit = sigterm_and_wait(&mut child, Duration::from_secs(10)).await;
+    assert_eq!(exit, Some(0), "cycle 1 must exit 0 after SIGTERM");
     assert!(
         wt_root.join(ticket_id).is_dir(),
         "worktree must be created in cycle 1"
@@ -126,11 +126,11 @@ session_root = "{session_root}"
     let mut child = spawn_one();
     wait_for_listener(webhook_addr).await;
     post_webhook(port, ticket_id).await;
-    let status = tokio::time::timeout(Duration::from_secs(15), child.wait())
-        .await
-        .unwrap()
-        .unwrap();
-    assert!(status.success(), "cycle 2 must exit 0");
+    // Each spawn writes to the same per-ticket events file, so wait for the
+    // cumulative count to reach 2.
+    wait_for_event_count(&events_path, "cycle_completed", 2, Duration::from_secs(15)).await;
+    let exit = sigterm_and_wait(&mut child, Duration::from_secs(10)).await;
+    assert_eq!(exit, Some(0), "cycle 2 must exit 0 after SIGTERM");
     assert!(
         wt_root.join(ticket_id).is_dir(),
         "worktree must still exist after cycle 2"
@@ -143,11 +143,9 @@ session_root = "{session_root}"
     let mut child = spawn_one();
     wait_for_listener(webhook_addr).await;
     post_webhook(port, ticket_id).await;
-    let status = tokio::time::timeout(Duration::from_secs(15), child.wait())
-        .await
-        .unwrap()
-        .unwrap();
-    assert!(status.success(), "cycle 3 must exit 0");
+    wait_for_event_count(&events_path, "cycle_completed", 3, Duration::from_secs(15)).await;
+    let exit = sigterm_and_wait(&mut child, Duration::from_secs(10)).await;
+    assert_eq!(exit, Some(0), "cycle 3 must exit 0 after SIGTERM");
     assert!(
         wt_root.join(ticket_id).is_dir(),
         "worktree must be recreated by cycle 3"
@@ -183,4 +181,38 @@ async fn wait_for_listener(addr: SocketAddr) {
         sleep(Duration::from_millis(100)).await;
     }
     panic!("webhook listener never came up at {addr}");
+}
+
+async fn wait_for_event_count(
+    path: &std::path::Path,
+    event_kind: &str,
+    expected: usize,
+    timeout: Duration,
+) {
+    let needle = format!("\"event\":\"{event_kind}\"");
+    let deadline = tokio::time::Instant::now() + timeout;
+    while tokio::time::Instant::now() < deadline {
+        if let Ok(body) = tokio::fs::read_to_string(path).await {
+            if body.matches(&needle).count() >= expected {
+                return;
+            }
+        }
+        sleep(Duration::from_millis(50)).await;
+    }
+    panic!(
+        "timed out waiting for {expected} occurrences of {event_kind} in {}",
+        path.display()
+    );
+}
+
+async fn sigterm_and_wait(child: &mut tokio::process::Child, timeout: Duration) -> Option<i32> {
+    use nix::sys::signal::{Signal, kill};
+    use nix::unistd::Pid;
+    if let Some(pid) = child.id() {
+        let _ = kill(Pid::from_raw(pid as i32), Signal::SIGTERM);
+    }
+    match tokio::time::timeout(timeout, child.wait()).await {
+        Ok(Ok(status)) => status.code(),
+        _ => None,
+    }
 }

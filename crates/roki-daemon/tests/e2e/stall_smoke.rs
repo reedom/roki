@@ -1,6 +1,8 @@
 //! End-to-end smoke: a run phase that ignores SIGTERM and emits no stdout
-//! triggers stall detection; the daemon must exit non-zero within the
-//! stall window + grace period.
+//! triggers stall detection. The cycle fails (no [[on_failure]] handler is
+//! configured) → the per-ticket task emits failure_unhandled. The persistent
+//! daemon stays alive afterwards; the test SIGTERMs it within the
+//! stall window + grace period and asserts exit 0.
 
 use std::net::{SocketAddr, TcpListener};
 use std::time::{Duration, Instant};
@@ -129,14 +131,19 @@ session_root = "{session_root}"
         .unwrap();
     assert_eq!(resp.status().as_u16(), 202);
 
-    let status = tokio::time::timeout(Duration::from_secs(15), child.wait())
-        .await
-        .expect("binary should exit within 15s")
-        .expect("child wait succeeds");
-    assert!(!status.success(), "binary should exit failure on stall");
+    let events_path = session_root.join("ENG-STALL.events.jsonl");
+    wait_for_event_count(
+        &events_path,
+        "failure_unhandled",
+        1,
+        Duration::from_secs(15),
+    )
+    .await;
+    let exit = sigterm_and_wait(&mut child, Duration::from_secs(10)).await;
+    assert_eq!(exit, Some(0), "binary should exit 0 after SIGTERM");
     assert!(
-        started.elapsed() < Duration::from_secs(15),
-        "stall + grace must finish well under 15 s, took {:?}",
+        started.elapsed() < Duration::from_secs(25),
+        "stall + grace + SIGTERM drain must finish well under 25 s, took {:?}",
         started.elapsed()
     );
 
@@ -176,4 +183,38 @@ async fn wait_for_listener(addr: SocketAddr) {
         sleep(Duration::from_millis(100)).await;
     }
     panic!("webhook listener never came up at {addr}");
+}
+
+async fn wait_for_event_count(
+    path: &std::path::Path,
+    event_kind: &str,
+    expected: usize,
+    timeout: Duration,
+) {
+    let needle = format!("\"event\":\"{event_kind}\"");
+    let deadline = tokio::time::Instant::now() + timeout;
+    while tokio::time::Instant::now() < deadline {
+        if let Ok(body) = tokio::fs::read_to_string(path).await {
+            if body.matches(&needle).count() >= expected {
+                return;
+            }
+        }
+        sleep(Duration::from_millis(50)).await;
+    }
+    panic!(
+        "timed out waiting for {expected} occurrences of {event_kind} in {}",
+        path.display()
+    );
+}
+
+async fn sigterm_and_wait(child: &mut tokio::process::Child, timeout: Duration) -> Option<i32> {
+    use nix::sys::signal::{Signal, kill};
+    use nix::unistd::Pid;
+    if let Some(pid) = child.id() {
+        let _ = kill(Pid::from_raw(pid as i32), Signal::SIGTERM);
+    }
+    match tokio::time::timeout(timeout, child.wait()).await {
+        Ok(Ok(status)) => status.code(),
+        _ => None,
+    }
 }

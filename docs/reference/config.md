@@ -40,6 +40,7 @@ Per workspace, specified with `--config <path>` ([cli.md](cli.md)). Not hot-relo
 | `[default.ai.command].cli` | yes | string (cli line) | — | Refuses startup if missing | [fr:04 §Subprocess shapes](../fr/04-phase-execution.md) |
 | `[default.ai.command].stall_seconds` | no | int | `300` | min `1` | [fr:04 §Stall detection](../fr/04-phase-execution.md) |
 | `[engine].max_iterations` | no | int | `10` | min `1` | [fr:01 §Iteration cap](../fr/01-engine-model.md) |
+| `[engine].shutdown_window_seconds` | no | int | `30` | min `1`, max `600` | [fr:12 §Normal shutdown](../fr/12-daemon-lifecycle.md) |
 | `[paths].workflow` | yes | path | — | Refuses startup if file missing / unreadable | [fr:02](../fr/02-configuration.md) |
 | `[paths].session_root` | yes | path | — | Refuses startup if parent directory missing or not writable | [fr:05](../fr/05-worktree-and-session.md) |
 | `[log].destination` | no | enum (`stdout` / `file` / `both`) | `stdout` | — | [fr:08 §Tier 1](../fr/08-observability-logs.md) |

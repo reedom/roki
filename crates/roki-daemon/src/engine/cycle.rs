@@ -554,6 +554,7 @@ mod tests {
             },
             engine: EngineSection {
                 max_iterations: max_iter,
+                shutdown_window_seconds: 30,
             },
             paths: PathsSection {
                 workflow: PathBuf::from("/tmp/w"),
