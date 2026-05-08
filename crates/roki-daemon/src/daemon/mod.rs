@@ -5,6 +5,6 @@
 //! unchanged.
 
 pub mod cache;
+pub mod dispatcher;
 pub mod shutdown;
 pub mod ticket_task;
-// `dispatcher` is added in a subsequent task.
