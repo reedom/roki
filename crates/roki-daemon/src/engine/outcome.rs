@@ -163,6 +163,25 @@ impl PhaseOutcome {
     }
 }
 
+/// Which list a cycle was dispatched from. Surfaced as
+/// `cycle.kind` / `ROKI_CYCLE_KIND` per fr:01 §Cycle kinds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CycleKind {
+    Rule,
+    Cleanup,
+    Failure,
+}
+
+impl CycleKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            CycleKind::Rule => "rule",
+            CycleKind::Cleanup => "cleanup",
+            CycleKind::Failure => "failure",
+        }
+    }
+}
+
 /// Directive-level failure kinds. Distinct from `PhaseInfraError`, which
 /// represents infrastructure-level failures that escape the cycle as a
 /// `Result::Err`.
@@ -227,5 +246,12 @@ mod tests {
     #[test]
     fn failure_kind_stall_str_round_trip() {
         assert_eq!(FailureKind::Stall.as_str(), "stall");
+    }
+
+    #[test]
+    fn cycle_kind_str_round_trip() {
+        assert_eq!(CycleKind::Rule.as_str(), "rule");
+        assert_eq!(CycleKind::Cleanup.as_str(), "cleanup");
+        assert_eq!(CycleKind::Failure.as_str(), "failure");
     }
 }
