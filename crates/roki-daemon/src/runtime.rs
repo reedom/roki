@@ -32,6 +32,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use tokio::sync::{mpsc, oneshot};
 
+pub use crate::engine::dispatch::DispatchMode;
+
 use crate::admission;
 use crate::config::roki::RokiConfig;
 use crate::config::workflow::WorkflowConfig;
@@ -52,8 +54,8 @@ enum DispatchedEntry {
 /// Returns `ExitCode::SUCCESS` on a clean cycle (regardless of the
 /// subprocess exit code, per Req 8.2) and `ExitCode::FAILURE` on any
 /// internal error in the startup-bound or cycle-bound classes.
-pub async fn run(config_path: &Path) -> ExitCode {
-    match run_inner(config_path).await {
+pub async fn run(config_path: &Path, mode: DispatchMode) -> ExitCode {
+    match run_inner(config_path, mode).await {
         Ok(()) => ExitCode::SUCCESS,
         Err(err) => {
             tracing::error!(error = %err, "skeleton runtime exited with internal error");
@@ -64,7 +66,7 @@ pub async fn run(config_path: &Path) -> ExitCode {
 
 /// Internal pipeline. Separated from [`run`] so unit tests can match on the
 /// typed [`SkeletonError`] surface without parsing an `ExitCode`.
-pub(crate) async fn run_inner(config_path: &Path) -> Result<(), SkeletonError> {
+pub(crate) async fn run_inner(config_path: &Path, mode: DispatchMode) -> Result<(), SkeletonError> {
     // 1. Load roki.toml.
     let cfg = RokiConfig::load(config_path)?;
 
@@ -134,8 +136,8 @@ pub(crate) async fn run_inner(config_path: &Path) -> Result<(), SkeletonError> {
         let me_ref = me.clone().unwrap_or_else(|| MeId(String::new()));
         match admission::accept(&ticket, &workflow, &me_ref) {
             Ok(admitted) => {
-                use crate::engine::dispatch::{evaluate, DispatchMode, DispatchTarget};
-                match evaluate(&admitted, &workflow, DispatchMode::Default) {
+                use crate::engine::dispatch::{evaluate, DispatchTarget};
+                match evaluate(&admitted, &workflow, mode) {
                     DispatchTarget::Cycle { kind, rule: Some(r), .. } => {
                         break (admitted, kind, DispatchedEntry::Rule(r.clone()));
                     }
@@ -479,7 +481,7 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let nonexistent = tmp.path().join("does-not-exist.toml");
 
-        match run_inner(&nonexistent).await {
+        match run_inner(&nonexistent, DispatchMode::Default).await {
             Err(SkeletonError::Config(RokiConfigError::MissingFile { path })) => {
                 assert_eq!(path, nonexistent);
             }

@@ -55,6 +55,10 @@ path = "tests/e2e/failure_unhandled_smoke.rs"
 name = "fs_poison_smoke"
 path = "tests/e2e/fs_poison_smoke.rs"
 
+[[test]]
+name = "cleanup_subcommand_smoke"
+path = "tests/e2e/cleanup_subcommand_smoke.rs"
+
 [features]
 # Test-only seam: gates the `ROKI_LINEAR_GRAPHQL_URL` env-var override inside
 # `linear::client` so the release binary always targets the hardcoded endpoint.

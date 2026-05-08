@@ -18,20 +18,29 @@ refs:
 
 # FR 12: Daemon Lifecycle
 
-> The lifecycle of the single-binary daemon launched by `roki run`.
+> The lifecycle of the single-binary daemon launched by `roki run` or `roki cleanup`.
 > See [`docs/reference/cli.md`](../reference/cli.md) for the full CLI flag list.
 
 ## Purpose
 
-An operator runs roki by launching the single `roki` binary with `roki run` and stops it with SIGINT. No dependency on scripts, systemd, or supervisor. Startup failures must surface the cause in structured logs.
+An operator runs roki by launching the single `roki` binary with `roki run` (or `roki cleanup` for cleanup-only dispatch) and stops it with SIGINT. No dependency on scripts, systemd, or supervisor. Startup failures must surface the cause in structured logs.
+
+## Dispatch modes
+
+| Subcommand | Dispatch mode | Effect |
+|---|---|---|
+| `roki run` | Default | Evaluates `[[cleanup]]` first-match, then `[[rule]]` first-match. |
+| `roki cleanup` | CleanupOnly | Evaluates `[[cleanup]]` first-match only; `[[rule]]` is ignored. |
+
+Both subcommands run the same single-shot pipeline and binary lifecycle.
 
 ## User-visible Behavior
 
-- **Normal startup**: `roki run --config ./roki.toml` loads `roki.toml`, loads `WORKFLOW.toml` (and any per-repo TOMLs referenced through `[[admission.repos]] workflow`), validates both, brings up the Linear adapter, the diff cache, the cycle engine, and the Linear webhook receiver bound to `[linear.webhook]`, optionally brings up the observability HTTP API bound to `[api]` (only when `[api].port` is set; see [10-http-api §Server gating and bind](10-http-api.md)), runs the cold-start enumeration ([07-recovery §Cold start](07-recovery.md)), then logs that it is ready.
+- **Normal startup**: `roki run --config ./roki.toml` (or `roki cleanup --config ./roki.toml`) loads `roki.toml`, loads `WORKFLOW.toml` (and any per-repo TOMLs referenced through `[[admission.repos]] workflow`), validates both, brings up the Linear adapter, the diff cache, the cycle engine, and the Linear webhook receiver bound to `[linear.webhook]`, optionally brings up the observability HTTP API bound to `[api]` (only when `[api].port` is set; see [10-http-api §Server gating and bind](10-http-api.md)), runs the cold-start enumeration ([07-recovery §Cold start](07-recovery.md)), then logs that it is ready.
 - **Configuration error**: configuration file not found, schema validation failure for `roki.toml`, or schema validation failure for the initial `WORKFLOW.toml` load → non-zero exit, with the offending field name in the structured log.
 - **Missing dependency CLI**: if `wt` / `ghq` are not on `PATH` → refuse to start, with the missing binary name and a remediation hint in the structured log. The cli lines configured in `roki.toml [default.ai.session]` and `[default.ai.command]` are **not** validated at startup (the daemon does not parse them); their first failure surfaces as a `process_crash` failure on the first phase that uses them.
 - **Normal shutdown**: on SIGINT / SIGTERM, stop accepting new work, signal every active cycle (each in-flight pre / run / post subprocess) to terminate within the configured shutdown window, then exit cleanly. In-flight worktrees and session tempdirs are not deleted at shutdown — the next cold start reconciles them.
-- **Help**: `roki --help` and the `--help` of each subcommand (`roki run`, `roki log`, `roki events`, `roki repo`) list every CLI flag and the configuration key each one corresponds to.
+- **Help**: `roki --help` and the `--help` of each subcommand (`roki run`, `roki cleanup`, `roki log`, `roki events`, `roki repo`) list every CLI flag and the configuration key each one corresponds to.
 
 ### Cycle integration
 

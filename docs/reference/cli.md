@@ -18,12 +18,22 @@ The single `roki` binary exposes one daemon subcommand and three observability s
 
 | Subcommand | Purpose | FR |
 |---|---|---|
-| `roki run` | Launch the daemon process | [fr:12-daemon-lifecycle](../fr/12-daemon-lifecycle.md) |
+| `roki run` | Launch the daemon — default dispatch (cleanup-first then rule) | [fr:12-daemon-lifecycle](../fr/12-daemon-lifecycle.md) |
+| `roki cleanup` | Launch the daemon — cleanup-only dispatch; `[[rule]]` is ignored | [fr:12-daemon-lifecycle](../fr/12-daemon-lifecycle.md) |
 | `roki log` | Read per-ticket subprocess captures | [fr:09-log-access-cli](../fr/09-log-access-cli.md) |
 | `roki events` | Read the structured event stream | [fr:09-log-access-cli](../fr/09-log-access-cli.md) |
 | `roki repo` | Resolve per-ticket repo path | [fr:09-log-access-cli](../fr/09-log-access-cli.md) |
 
 ## `roki run`
+
+| Flag | Argument | Overrides | Purpose |
+|---|---|---|---|
+| `--config <path>` | path | (none) | Path to `roki.toml`. Documented default applies when omitted. |
+| `--log-level <level>` | one of `error` / `warn` / `info` / `debug` / `trace` | `[log].level` | Structured log level. |
+
+## `roki cleanup`
+
+Identical flags to `roki run`. Dispatch mode is `CleanupOnly`: `[[cleanup]]` entries are evaluated first-match; `[[rule]]` is ignored.
 
 | Flag | Argument | Overrides | Purpose |
 |---|---|---|---|
