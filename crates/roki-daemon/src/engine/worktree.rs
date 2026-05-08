@@ -157,8 +157,35 @@ async fn wt_list_find(ticket_id: &str) -> Result<Option<PathBuf>, WorktreeError>
     Ok(None)
 }
 
-pub async fn remove(_ghq: &str, _ticket_id: &str) -> Result<bool, WorktreeError> {
-    unimplemented!("Task 5 implements remove")
+pub async fn remove(ghq: &str, ticket_id: &str) -> Result<bool, WorktreeError> {
+    let Some(path) = exists(ghq, ticket_id).await? else {
+        return Ok(false);
+    };
+    if std::env::var_os("ROKI_WT_ROOT_OVERRIDE").is_some() {
+        std::fs::remove_dir_all(&path)?;
+        return Ok(true);
+    }
+    wt_remove(ticket_id).await.map(|_| true)
+}
+
+async fn wt_remove(ticket_id: &str) -> Result<(), WorktreeError> {
+    let bin = wt_bin();
+    let out = Command::new(&bin)
+        .arg("remove")
+        .arg(ticket_id)
+        .output()
+        .await
+        .map_err(|e| match e.kind() {
+            std::io::ErrorKind::NotFound => WorktreeError::WtNotFound,
+            _ => WorktreeError::Io(e),
+        })?;
+    if !out.status.success() {
+        return Err(WorktreeError::RemoveFailed {
+            stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
+            exit_code: out.status.code(),
+        });
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -252,5 +279,33 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(again, root.join("OPS-4"));
+    }
+
+    #[tokio::test]
+    async fn remove_when_present() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        std::fs::create_dir_all(root.join("OPS-5")).unwrap();
+        let removed = temp_env::async_with_vars(
+            [("ROKI_WT_ROOT_OVERRIDE", Some(root.to_str().unwrap()))],
+            async { remove("github.com/acme/widget", "OPS-5").await },
+        )
+        .await
+        .unwrap();
+        assert!(removed);
+        assert!(!root.join("OPS-5").exists());
+    }
+
+    #[tokio::test]
+    async fn remove_when_absent_is_idempotent() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let removed = temp_env::async_with_vars(
+            [("ROKI_WT_ROOT_OVERRIDE", Some(root.to_str().unwrap()))],
+            async { remove("github.com/acme/widget", "OPS-6").await },
+        )
+        .await
+        .unwrap();
+        assert!(!removed);
     }
 }
