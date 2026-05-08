@@ -121,8 +121,9 @@ run.cmd = "claude -p 'post final summary' --output-format stream-json --max-turn
 post.prompt = "Output {directive: 'end'}"
 
 [[cleanup]]
-when.labels.has_none = ["roki:ready"]
-# All phases omitted → daemon performs immediate worktree + session_tempdir delete with no cycle.
+# Shorthand: all phases omitted AND no when.* keys → unconditional immediate
+# worktree + session_tempdir delete with no cycle. Place last in the list so
+# earlier guarded cleanups win first-match.
 
 [[on_failure]]
 when.kind.in = ["unparseable", "schema_drift"]
@@ -149,6 +150,8 @@ Each entry inside the lists uses `when.<field>` keys; all `when.*` keys within a
 | String regex | `when.title.regex = "..."` | (admission.repos only) Linear ticket title matches the regex |
 | String prefix | `when.title.starts_with = "..."` | (admission.repos only) |
 | String contains | `when.title.contains = "..."` / `when.body.contains = "..."` | (admission.repos only) |
+
+Equality (`when.<field>`), set membership (`when.<field>.in`), and negation (`when.<field>.not`) are mutually exclusive on the same field within a single entry; declaring more than one is a config-load error. To express a multi-value match, use a single `.in` array; to express the complement, use a single `.not`.
 
 Recognized fields:
 

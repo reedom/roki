@@ -185,7 +185,7 @@ A failure cycle that itself fails does **not** chain into another failure cycle.
 
 Cleanup priority is enforced before rule evaluation: the daemon walks `[[cleanup]]` first-match before `[[rule]]`. A matched cleanup entry runs as a normal cycle (subject to all phase-loop semantics), then the daemon deletes the ticket's worktree + session_tempdir and evicts it from the cache.
 
-A cleanup entry with all three phases omitted is shorthand for "delete immediately, no cycle starts". The daemon performs the cleanup synchronously and emits a single structured `cycle_completed` event with `cycle.kind = cleanup` and zero iterations.
+A cleanup entry with all three phases omitted is shorthand for "delete immediately, no cycle starts". The daemon performs the cleanup synchronously and emits a single structured `cycle_completed` event with `cycle.kind = cleanup` and zero iterations. Shorthand entries are unconditional teardown and must not declare any `when.*` keys; declaring `when.*` on a shorthand entry is a config-load error. Operators that want a guarded teardown author a non-shorthand cleanup entry whose phases are no-op cli lines.
 
 ### Cold start
 

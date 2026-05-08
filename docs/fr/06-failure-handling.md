@@ -60,7 +60,7 @@ run.cmd = "claude -p '/post-mortem {{ failure.failed_cycle_id }}' --output-forma
 post.prompt = "Output {directive: 'end'}"
 ```
 
-`when.kind` and `when.phase` use the same matcher vocabulary as `[[rule]]` ([02-configuration §Condition vocabulary](02-configuration.md)). `when.kind.not = "..."` and `when.kind.in = [...]` are also allowed.
+`when.kind` and `when.phase` use the same matcher vocabulary as `[[rule]]` ([02-configuration §Condition vocabulary](02-configuration.md)). `when.kind.not = "..."` and `when.kind.in = [...]` are also allowed. The three `when.kind` forms — equality (`when.kind = "..."`), set membership (`when.kind.in = [...]`), and negation (`when.kind.not = "..."`) — are mutually exclusive per entry; declaring more than one is a config-load error.
 
 ### Escalation queue
 
