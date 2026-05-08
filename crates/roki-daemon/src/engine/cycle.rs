@@ -66,7 +66,7 @@ fn worktree_fs_poison_outcome(
             phase: PhaseKind::Run,
             iter,
             exit_code,
-            error_text: format!("worktree ensure failed: {err}"),
+            error_text: truncate_tail(&format!("worktree ensure failed: {err}"), 4096),
         },
     }
 }
