@@ -65,8 +65,44 @@ impl WorktreeError {
     }
 }
 
-pub async fn ensure(_ghq: &str, _ticket_id: &str) -> Result<PathBuf, WorktreeError> {
-    unimplemented!("Task 4 implements ensure")
+pub async fn ensure(ghq: &str, ticket_id: &str) -> Result<PathBuf, WorktreeError> {
+    if let Some(existing) = exists(ghq, ticket_id).await? {
+        return Ok(existing);
+    }
+    if let Some(root) = std::env::var_os("ROKI_WT_ROOT_OVERRIDE") {
+        let path = PathBuf::from(root).join(ticket_id);
+        std::fs::create_dir_all(&path)?;
+        return Ok(path);
+    }
+    wt_switch_create(ticket_id).await
+}
+
+async fn wt_switch_create(ticket_id: &str) -> Result<PathBuf, WorktreeError> {
+    use tokio::process::Command;
+    let bin = wt_bin();
+    let out = Command::new(&bin)
+        .arg("switch-create")
+        .arg(ticket_id)
+        .output()
+        .await
+        .map_err(|e| match e.kind() {
+            std::io::ErrorKind::NotFound => WorktreeError::WtNotFound,
+            _ => WorktreeError::Io(e),
+        })?;
+    if !out.status.success() {
+        return Err(WorktreeError::SwitchCreateFailed {
+            stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
+            exit_code: out.status.code(),
+        });
+    }
+    // wt switch-create may not print the resolved path; resolve via wt list.
+    match wt_list_find(ticket_id).await? {
+        Some(p) => Ok(p),
+        None => Err(WorktreeError::SwitchCreateFailed {
+            stderr: "wt switch-create succeeded but worktree not found by wt list".to_string(),
+            exit_code: out.status.code(),
+        }),
+    }
 }
 
 pub async fn exists(_ghq: &str, ticket_id: &str) -> Result<Option<PathBuf>, WorktreeError> {
@@ -181,5 +217,38 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(result, None);
+    }
+
+    #[tokio::test]
+    async fn ensure_creates_when_absent() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let result = temp_env::async_with_vars(
+            [("ROKI_WT_ROOT_OVERRIDE", Some(root.to_str().unwrap()))],
+            async { ensure("github.com/acme/widget", "OPS-3").await },
+        )
+        .await
+        .unwrap();
+        assert_eq!(result, root.join("OPS-3"));
+        assert!(root.join("OPS-3").is_dir());
+    }
+
+    #[tokio::test]
+    async fn ensure_is_idempotent() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let _ = temp_env::async_with_vars(
+            [("ROKI_WT_ROOT_OVERRIDE", Some(root.to_str().unwrap()))],
+            async { ensure("github.com/acme/widget", "OPS-4").await.unwrap() },
+        )
+        .await;
+        // Second call must succeed without error and return the same path.
+        let again = temp_env::async_with_vars(
+            [("ROKI_WT_ROOT_OVERRIDE", Some(root.to_str().unwrap()))],
+            async { ensure("github.com/acme/widget", "OPS-4").await },
+        )
+        .await
+        .unwrap();
+        assert_eq!(again, root.join("OPS-4"));
     }
 }
