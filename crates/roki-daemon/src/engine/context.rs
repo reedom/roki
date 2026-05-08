@@ -29,6 +29,8 @@ pub struct TicketView {
 #[derive(Debug, Clone, Serialize)]
 pub struct RepoView {
     pub ghq: String,
+    /// Mirrors `ticket.id`; kept here so `cwd::resolve` can borrow `repo`
+    /// without touching `ticket`.
     pub ticket_id: String,
 }
 
@@ -270,22 +272,22 @@ pub fn to_liquid_object(ctx: &PhaseContext) -> liquid::Object {
 mod tests {
     use super::*;
 
-    fn ticket() -> NormalizedTicket {
-        NormalizedTicket::new(
-            "ENG-1".to_string(),
-            Some("u1".to_string()),
-            "in_progress".to_string(),
-            vec!["bug".to_string()],
-            "Title".to_string(),
-            "Body".to_string(),
-        )
+    fn admitted_with_id(id: &str) -> AdmittedTicket {
+        AdmittedTicket {
+            ticket: NormalizedTicket::new(
+                id.to_string(),
+                Some("u1".to_string()),
+                "in_progress".to_string(),
+                vec!["bug".to_string()],
+                "Title".to_string(),
+                "Body".to_string(),
+            ),
+            ghq: "github.com/acme/widget".to_string(),
+        }
     }
 
     fn admitted() -> AdmittedTicket {
-        AdmittedTicket {
-            ticket: ticket(),
-            ghq: "github.com/acme/widget".to_string(),
-        }
+        admitted_with_id("ENG-1")
     }
 
     fn cfg(max_iterations: u32) -> RokiConfig {
@@ -551,24 +553,14 @@ mod tests {
 
     #[test]
     fn repo_view_carries_ticket_id() {
-        let admitted = crate::admission::AdmittedTicket {
-            ticket: crate::linear::ticket::NormalizedTicket::new(
-                "OPS-100".to_string(),
-                Some("u1".to_string()),
-                "in_progress".to_string(),
-                vec![],
-                "Title".to_string(),
-                "Body".to_string(),
-            ),
-            ghq: "github.com/acme/widget".to_string(),
-        };
-        let cycle_id = uuid::Uuid::new_v4();
+        let admitted = admitted_with_id("OPS-100");
         let ctx = PhaseContext::new(
             &admitted,
-            cycle_id,
+            uuid::Uuid::nil(),
             &cfg(5),
             crate::engine::outcome::CycleKind::Rule,
         );
         assert_eq!(ctx.repo.ticket_id, "OPS-100");
+        assert_eq!(ctx.ticket.id, "OPS-100");
     }
 }
