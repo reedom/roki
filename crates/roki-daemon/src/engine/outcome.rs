@@ -201,6 +201,10 @@ pub enum FailureKind {
     /// Stdout silent for `stall_seconds`; supervisor SIGTERMed (and SIGKILLed
     /// after grace if necessary). Applies to both shapes.
     Stall,
+    /// Filesystem error creating or recovering session_tempdir before phase
+    /// launch. Worktree-side fs errors land here too once worktree creation
+    /// lands; for slice 3 only session_tempdir is in scope.
+    FsPoison,
 }
 
 impl FailureKind {
@@ -212,6 +216,7 @@ impl FailureKind {
             FailureKind::TemplateError => "template_error",
             FailureKind::IterExhausted => "iter_exhausted",
             FailureKind::Stall => "stall",
+            FailureKind::FsPoison => "fs_poison",
         }
     }
 }
@@ -253,5 +258,10 @@ mod tests {
         assert_eq!(CycleKind::Rule.as_str(), "rule");
         assert_eq!(CycleKind::Cleanup.as_str(), "cleanup");
         assert_eq!(CycleKind::Failure.as_str(), "failure");
+    }
+
+    #[test]
+    fn failure_kind_fs_poison_str_round_trip() {
+        assert_eq!(FailureKind::FsPoison.as_str(), "fs_poison");
     }
 }
