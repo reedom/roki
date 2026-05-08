@@ -84,6 +84,17 @@ pub enum WorkflowError {
     )]
     SessionRunUnsupported { path: PathBuf },
 
+    #[error("[[cleanup]][{index}] declares pre/post but no run; in {path}")]
+    CleanupMissingRun {
+        path: std::path::PathBuf,
+        index: usize,
+    },
+    #[error("[[cleanup]][{index}] is shorthand (no phases) but declares when.*; in {path}")]
+    CleanupShorthandWithWhen {
+        path: std::path::PathBuf,
+        index: usize,
+    },
+
     #[error(
         "invalid workflow .md frontmatter at {path}: \
          field 'session' has unsupported value '{value}' (allowed: \"session\", \"command\")"

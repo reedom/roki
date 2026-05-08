@@ -92,6 +92,7 @@ mod tests {
                 ghq: g.to_string(),
             }),
             rules: Vec::new(),
+            cleanups: Vec::new(),
         }
     }
 

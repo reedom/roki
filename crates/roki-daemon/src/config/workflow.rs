@@ -36,6 +36,7 @@ pub struct WorkflowConfig {
     /// missing (admission surfaces `NoRepos` per Req 4.4).
     pub repo: Option<AdmissionRepo>,
     pub rules: Vec<Rule>,
+    pub cleanups: Vec<Cleanup>,
 }
 
 /// `[admission]` section.
@@ -51,6 +52,26 @@ pub struct AdmissionSection {
 #[derive(Clone, Debug)]
 pub struct AdmissionRepo {
     pub ghq: String,
+}
+
+/// One `[[cleanup]]` entry.
+///
+/// Shorthand form (no `pre`/`run`/`post`, no `when.*`) represents
+/// unconditional teardown (fr:01 §40). Entries with phases must supply `run`.
+#[derive(Clone, Debug)]
+pub struct Cleanup {
+    pub when_status: Option<String>,
+    pub when_labels_has_all: Vec<String>,
+    pub pre: Option<crate::engine::outcome::PhaseBody>,
+    pub run: Option<crate::engine::outcome::PhaseBody>,
+    pub post: Option<crate::engine::outcome::PhaseBody>,
+}
+
+impl Cleanup {
+    /// Returns `true` only when all three phase fields are `None`.
+    pub fn is_shorthand(&self) -> bool {
+        self.pre.is_none() && self.run.is_none() && self.post.is_none()
+    }
 }
 
 /// One `[[rule]]` entry. Restricts to command-shape phases per slice 1; the
@@ -104,11 +125,13 @@ impl WorkflowConfig {
         // has no parent (e.g. a bare filename).
         let workflow_dir = path.parent().map(Path::to_path_buf).unwrap_or_else(|| PathBuf::from("."));
         let rules = parse_rules(path, &workflow_dir, &root)?;
+        let cleanups = parse_cleanups(path, &workflow_dir, &root)?;
 
         Ok(WorkflowConfig {
             admission,
             repo,
             rules,
+            cleanups,
         })
     }
 }
@@ -504,6 +527,105 @@ fn parse_phase_body(
             stall_seconds: header.stall_seconds,
         })
     }
+}
+
+fn parse_cleanups(
+    path: &Path,
+    workflow_dir: &Path,
+    root: &Value,
+) -> Result<Vec<Cleanup>, WorkflowError> {
+    let Some(arr) = root.get("cleanup").and_then(Value::as_array) else {
+        return Ok(Vec::new());
+    };
+
+    let mut out = Vec::with_capacity(arr.len());
+    for (idx, entry) in arr.iter().enumerate() {
+        let table = entry.as_table().ok_or_else(|| WorkflowError::MissingField {
+            path: path.to_path_buf(),
+            key: format!("cleanup[{idx}]"),
+        })?;
+
+        let when = table.get("when").and_then(Value::as_table);
+        let when_status = when
+            .and_then(|w| w.get("status"))
+            .and_then(Value::as_str)
+            .map(String::from);
+        let when_labels_has_all = when
+            .and_then(|w| w.get("labels"))
+            .and_then(Value::as_table)
+            .and_then(|l| l.get("has_all"))
+            .and_then(Value::as_array)
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|v| v.as_str().map(String::from))
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+
+        let pre = match table.get("pre") {
+            Some(val) => Some(parse_phase_body(
+                path,
+                workflow_dir,
+                &format!("cleanup[{idx}].pre"),
+                val,
+            )?),
+            None => None,
+        };
+        let run_body = match table.get("run") {
+            Some(val) => Some(parse_phase_body(
+                path,
+                workflow_dir,
+                &format!("cleanup[{idx}].run"),
+                val,
+            )?),
+            None => None,
+        };
+        let post = match table.get("post") {
+            Some(val) => Some(parse_phase_body(
+                path,
+                workflow_dir,
+                &format!("cleanup[{idx}].post"),
+                val,
+            )?),
+            None => None,
+        };
+
+        let any_phase = pre.is_some() || run_body.is_some() || post.is_some();
+        let any_when = when_status.is_some() || !when_labels_has_all.is_empty();
+
+        if !any_phase {
+            if any_when {
+                return Err(WorkflowError::CleanupShorthandWithWhen {
+                    path: path.to_path_buf(),
+                    index: idx,
+                });
+            }
+            // Pure shorthand — unconditional teardown.
+        } else if run_body.is_none() {
+            return Err(WorkflowError::CleanupMissingRun {
+                path: path.to_path_buf(),
+                index: idx,
+            });
+        }
+
+        // Slice-2 narrowing: session-shape run is unsupported for cleanup.
+        if let Some(rb) = &run_body {
+            if rb.shape() == crate::engine::outcome::PhaseShape::Session {
+                return Err(WorkflowError::SessionRunUnsupported {
+                    path: path.to_path_buf(),
+                });
+            }
+        }
+
+        out.push(Cleanup {
+            when_status,
+            when_labels_has_all,
+            pre,
+            run: run_body,
+            post,
+        });
+    }
+    Ok(out)
 }
 
 /// Resolve a `path = "..."` value against the workflow file's parent.
@@ -1215,5 +1337,124 @@ session = "session"
             }
             other => panic!("expected UnsupportedRunForm, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn workflow_parses_cleanup_shorthand() {
+        let toml = r#"
+[admission]
+assignee = "me"
+
+[[admission.repos]]
+ghq = "github.com/foo/bar"
+
+[[rule]]
+[rule.when]
+status = "InProgress"
+[rule.when.labels]
+has_all = []
+[rule.run]
+cmd = "true"
+
+[[cleanup]]
+"#;
+        let path = write_tmp(toml);
+        let cfg = WorkflowConfig::load(&path).unwrap();
+        assert_eq!(cfg.cleanups.len(), 1);
+        assert!(cfg.cleanups[0].is_shorthand());
+    }
+
+    #[test]
+    fn workflow_parses_cleanup_with_when_status() {
+        let toml = r#"
+[admission]
+assignee = "me"
+
+[[admission.repos]]
+ghq = "github.com/foo/bar"
+
+[[rule]]
+[rule.when]
+status = "InProgress"
+[rule.when.labels]
+has_all = []
+[rule.run]
+cmd = "true"
+
+[[cleanup]]
+when.status = "Done"
+run.cmd = "echo done"
+"#;
+        let path = write_tmp(toml);
+        let cfg = WorkflowConfig::load(&path).unwrap();
+        assert_eq!(cfg.cleanups.len(), 1);
+        assert!(!cfg.cleanups[0].is_shorthand());
+        assert_eq!(cfg.cleanups[0].when_status.as_deref(), Some("Done"));
+    }
+
+    #[test]
+    fn workflow_rejects_cleanup_with_pre_but_no_run() {
+        let toml = r#"
+[admission]
+assignee = "me"
+
+[[admission.repos]]
+ghq = "github.com/foo/bar"
+
+[[rule]]
+[rule.when]
+status = "InProgress"
+[rule.when.labels]
+has_all = []
+[rule.run]
+cmd = "true"
+
+[[cleanup]]
+when.status = "Done"
+pre.cmd = "echo pre"
+"#;
+        let path = write_tmp(toml);
+        let err = WorkflowConfig::load(&path).unwrap_err();
+        match err {
+            WorkflowError::CleanupMissingRun { .. } => {}
+            other => panic!("expected CleanupMissingRun, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn workflow_rejects_cleanup_shorthand_with_when() {
+        let toml = r#"
+[admission]
+assignee = "me"
+
+[[admission.repos]]
+ghq = "github.com/foo/bar"
+
+[[rule]]
+[rule.when]
+status = "InProgress"
+[rule.when.labels]
+has_all = []
+[rule.run]
+cmd = "true"
+
+[[cleanup]]
+when.status = "Done"
+"#;
+        let path = write_tmp(toml);
+        let err = WorkflowConfig::load(&path).unwrap_err();
+        match err {
+            WorkflowError::CleanupShorthandWithWhen { .. } => {}
+            other => panic!("expected CleanupShorthandWithWhen, got {other:?}"),
+        }
+    }
+
+    /// Helper for cleanup tests.
+    fn write_tmp(toml: &str) -> std::path::PathBuf {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("WORKFLOW.toml");
+        std::fs::write(&path, toml).unwrap();
+        std::mem::forget(dir);
+        path
     }
 }
