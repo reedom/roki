@@ -6,5 +6,6 @@
 
 pub mod cache;
 pub mod dispatcher;
+pub mod real_runner;
 pub mod shutdown;
 pub mod ticket_task;

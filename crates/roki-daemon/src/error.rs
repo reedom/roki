@@ -338,6 +338,9 @@ pub enum SkeletonError {
 
     #[error(transparent)]
     PhaseInfra(#[from] PhaseInfraError),
+
+    #[error("shutdown window exceeded; aborted in-flight ticket tasks")]
+    ShutdownWindowExceeded,
 }
 
 #[cfg(test)]

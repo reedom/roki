@@ -11,18 +11,15 @@
 //! even when `[linear.webhook].secret` is configured (Req 3.3).
 //!
 //! Cross-task state is carried by an `mpsc::Sender<NormalizedTicket>`
-//! (channel capacity 1) plus an `AtomicBool` `cycle_started` (init `false`),
-//! both shared with `runtime`. The handler reads `cycle_started` with
-//! `Acquire` ordering before `try_send`; if the atomic is `true`, or
-//! `try_send` returns `Full` / `Closed`, the response is HTTP 503. This is
-//! the entire backpressure mechanism — no shared mutex, no swap, no
-//! placeholder window.
+//! shared with the dispatcher (slice 5: capacity 64). On `try_send` Full
+//! or Closed the response is HTTP 503 so Linear retries. Dedup of
+//! unchanged tracked-triple webhooks happens further downstream in the
+//! dispatcher's `DiffCache::observe` (`DiffOutcome::Unchanged` → skip).
 
 #![allow(dead_code)]
 
 use std::net::SocketAddr;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
 
 use axum::{
     Json, Router,
@@ -39,16 +36,15 @@ use uuid::Uuid;
 use crate::error::WebhookError;
 use crate::linear::ticket::NormalizedTicket;
 
-/// Cross-task state shared between the axum handler and `runtime`.
+/// Cross-task state shared between the axum handler and the dispatcher.
 ///
-/// `runtime` owns the matching `Receiver` and the write side of
-/// `cycle_started`; the handler holds the clones. Per the design's
-/// State Management section both halves of the pair are required to
-/// preserve the exactly-once cycle invariant (Req 8.4).
+/// The matching `Receiver` is owned by `runtime::run_inner` and forwarded
+/// to the dispatcher's `drain` task. The handler always forwards every
+/// validly parsed ticket; backpressure surfaces as HTTP 503 when the
+/// channel is full or the receiver has been dropped.
 #[derive(Clone)]
 pub struct WebhookState {
     pub sender: Arc<mpsc::Sender<NormalizedTicket>>,
-    pub cycle_started: Arc<AtomicBool>,
 }
 
 /// Build the axum `Router` for the webhook receiver.
@@ -69,24 +65,18 @@ async fn handle(State(state): State<WebhookState>, body: Bytes) -> Response {
         Err(reason) => return reject_invalid_payload(&reason),
     };
 
-    // Acquire load pairs with the runtime's Release store of `true` when a
-    // cycle starts (Req 8.4) or an internal cycle error occurs (Req 8.3).
-    if state.cycle_started.load(Ordering::Acquire) {
-        return service_unavailable("cycle_started");
-    }
-
     match state.sender.try_send(ticket) {
         Ok(()) => (
             StatusCode::ACCEPTED,
             Json(serde_json::json!({"status": "accepted"})),
         )
             .into_response(),
-        // Pre-cycle backpressure: runtime is mid-iteration and has not yet
-        // drained the previous POST (channel capacity is 1).
+        // Channel buffer full: dispatcher hasn't drained yet. Linear
+        // retries on 503 so the next POST gets through once the
+        // dispatcher catches up.
         Err(mpsc::error::TrySendError::Full(_)) => service_unavailable("backpressure"),
-        // Runtime dropped the receiver after the terminal cycle started;
-        // semantically equivalent to `cycle_started == true`.
-        Err(mpsc::error::TrySendError::Closed(_)) => service_unavailable("cycle_started"),
+        // Receiver dropped — daemon is shutting down.
+        Err(mpsc::error::TrySendError::Closed(_)) => service_unavailable("shutting_down"),
     }
 }
 
@@ -210,14 +200,13 @@ pub async fn bind_and_serve(
 mod tests {
     //! Router-level integration tests using `tower::ServiceExt::oneshot`,
     //! exercising every branch of the API and Event contracts: 400 on bad
-    //! body, 202 on good body when capacity is available and the atomic is
-    //! `false`, 503 when the atomic is `true`, 503 when the receiver is
-    //! dropped, and one-202 / one-503 under concurrent good-body POSTs that
-    //! exhaust the channel's capacity-1 buffer.
+    //! body, 202 on good body, 503 when the receiver is dropped, and
+    //! one-202 / one-503 under concurrent good-body POSTs that exhaust a
+    //! capacity-1 channel buffer.
     //!
-    //! These tests cover Req 3.1, 3.2, 3.3, 3.4, and 8.4 at the router
-    //! seam; runtime wiring is exercised by the cycle-level tests in
-    //! later tasks.
+    //! Tests cover Req 3.1, 3.2, 3.3, 3.4 at the router seam; the
+    //! dispatcher's `DiffOutcome::Unchanged` short-circuit handles dedup
+    //! at runtime.
 
     use super::*;
     use axum::body::{Body, to_bytes};
@@ -237,18 +226,12 @@ mod tests {
         })
     }
 
-    fn make_state() -> (
-        WebhookState,
-        mpsc::Receiver<NormalizedTicket>,
-        Arc<AtomicBool>,
-    ) {
+    fn make_state() -> (WebhookState, mpsc::Receiver<NormalizedTicket>) {
         let (tx, rx) = mpsc::channel(1);
-        let cycle_started = Arc::new(AtomicBool::new(false));
         let state = WebhookState {
             sender: Arc::new(tx),
-            cycle_started: cycle_started.clone(),
         };
-        (state, rx, cycle_started)
+        (state, rx)
     }
 
     async fn post_json(app: Router, body: Vec<u8>) -> Response {
@@ -279,7 +262,7 @@ mod tests {
 
     #[tokio::test]
     async fn good_body_returns_202_and_emits_normalized_ticket() {
-        let (state, mut rx, _cycle) = make_state();
+        let (state, mut rx) = make_state();
         let app = router(state);
 
         let res = post_json(app, serde_json::to_vec(&good_body()).unwrap()).await;
@@ -295,7 +278,7 @@ mod tests {
     #[tokio::test]
     async fn good_body_on_arbitrary_path_returns_202() {
         // Path-agnostic routing per design `linear::webhook` (POST /*).
-        let (state, mut rx, _cycle) = make_state();
+        let (state, mut rx) = make_state();
         let app = router(state);
 
         let res = post_to(
@@ -312,7 +295,7 @@ mod tests {
 
     #[tokio::test]
     async fn malformed_json_returns_400_with_invalid_payload_body() {
-        let (state, _rx, _cycle) = make_state();
+        let (state, _rx) = make_state();
         let app = router(state);
 
         let res = post_json(app, b"not json".to_vec()).await;
@@ -325,7 +308,7 @@ mod tests {
 
     #[tokio::test]
     async fn missing_id_returns_400() {
-        let (state, _rx, _cycle) = make_state();
+        let (state, _rx) = make_state();
         let app = router(state);
 
         let mut body = good_body();
@@ -337,7 +320,7 @@ mod tests {
 
     #[tokio::test]
     async fn missing_assignee_id_returns_400() {
-        let (state, _rx, _cycle) = make_state();
+        let (state, _rx) = make_state();
         let app = router(state);
 
         let body = serde_json::json!({
@@ -355,7 +338,7 @@ mod tests {
 
     #[tokio::test]
     async fn missing_state_name_returns_400() {
-        let (state, _rx, _cycle) = make_state();
+        let (state, _rx) = make_state();
         let app = router(state);
 
         let mut body = good_body();
@@ -367,7 +350,7 @@ mod tests {
 
     #[tokio::test]
     async fn missing_label_node_name_returns_400() {
-        let (state, _rx, _cycle) = make_state();
+        let (state, _rx) = make_state();
         let app = router(state);
 
         let body = serde_json::json!({
@@ -384,21 +367,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn cycle_started_returns_503() {
-        let (state, _rx, cycle) = make_state();
-        cycle.store(true, Ordering::Release);
-        let app = router(state);
-
-        let res = post_json(app, serde_json::to_vec(&good_body()).unwrap()).await;
-
-        assert_eq!(res.status(), StatusCode::SERVICE_UNAVAILABLE);
-    }
-
-    #[tokio::test]
     async fn dropped_receiver_returns_503() {
-        // Receiver dropped before cycle_started flipped: TrySendError::Closed
-        // path. Equivalent to cycle started for the operator's purposes.
-        let (state, rx, _cycle) = make_state();
+        // Receiver dropped: TrySendError::Closed path. Surfaces the
+        // "shutting_down" reason on the wire.
+        let (state, rx) = make_state();
         drop(rx);
         let app = router(state);
 
@@ -413,7 +385,7 @@ mod tests {
         // fills the buffer, the second observes TrySendError::Full → 503.
         // Holding `_rx` keeps the receiver alive so we exercise `Full`,
         // not `Closed`.
-        let (state, _rx, _cycle) = make_state();
+        let (state, _rx) = make_state();
         let app1 = router(state.clone());
         let app2 = router(state);
 
@@ -441,7 +413,7 @@ mod tests {
 
     #[tokio::test]
     async fn good_body_propagates_title_and_description() {
-        let (state, mut rx, _cycle) = make_state();
+        let (state, mut rx) = make_state();
         let app = router(state);
 
         let mut body = good_body();
@@ -458,7 +430,7 @@ mod tests {
 
     #[tokio::test]
     async fn missing_title_and_description_default_to_empty() {
-        let (state, mut rx, _cycle) = make_state();
+        let (state, mut rx) = make_state();
         let app = router(state);
 
         // good_body() omits title/description; assert they default to "".
