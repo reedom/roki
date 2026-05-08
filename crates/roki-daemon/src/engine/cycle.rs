@@ -77,9 +77,11 @@ pub async fn run_cycle(
     cycle_kind: CycleKind,
     failure: Option<FailureMeta>,
 ) -> Result<CycleOutcome, PhaseInfraError> {
-    let _ = failure;
     let cycle_id = Uuid::new_v4();
     let mut ctx = PhaseContext::new(admitted, cycle_id, cfg, cycle_kind);
+    if let Some(meta) = failure.clone() {
+        ctx.set_failure(meta);
+    }
     let max_iter = cfg.engine.max_iterations;
     let ticket_id = admitted.ticket.id.clone();
     let mut skip_pre = false;

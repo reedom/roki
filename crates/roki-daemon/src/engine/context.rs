@@ -53,6 +53,18 @@ pub struct RunView {
     pub terminal: Option<serde_json::Value>,
 }
 
+#[derive(Debug, Clone, Serialize)]
+pub struct FailureView {
+    pub kind: String,
+    pub phase: String,
+    pub iter: u32,
+    /// Stringified for Liquid; absent in env when None.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub exit_code: Option<i32>,
+    pub error_text: String,
+    pub failed_cycle_id: String,
+}
+
 /// Engine-side execution context. Mutated through `set_iter`, `set_pre`,
 /// `set_post`, `set_run` between phase invocations.
 #[derive(Debug, Clone, Serialize)]
@@ -67,6 +79,8 @@ pub struct PhaseContext {
     pub post: Option<Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub run: Option<RunView>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub failure: Option<FailureView>,
 }
 
 impl PhaseContext {
@@ -93,7 +107,19 @@ impl PhaseContext {
             pre: None,
             post: None,
             run: None,
+            failure: None,
         }
+    }
+
+    pub fn set_failure(&mut self, meta: crate::engine::outcome::FailureMeta) {
+        self.failure = Some(FailureView {
+            kind: meta.kind.as_str().to_string(),
+            phase: meta.phase.as_str().to_string(),
+            iter: meta.iter,
+            exit_code: meta.exit_code,
+            error_text: meta.error_text,
+            failed_cycle_id: meta.failed_cycle_id.to_string(),
+        });
     }
 
     pub fn set_iter(&mut self, iter: u32) {
@@ -171,6 +197,17 @@ pub fn roki_env_pairs(ctx: &PhaseContext) -> Vec<(String, String)> {
             "ROKI_RUN_DURATION_SECONDS".to_string(),
             run.duration_seconds.to_string(),
         ));
+    }
+
+    if let Some(f) = &ctx.failure {
+        pairs.push(("ROKI_FAILURE_KIND".to_string(), f.kind.clone()));
+        pairs.push(("ROKI_FAILURE_PHASE".to_string(), f.phase.clone()));
+        pairs.push(("ROKI_FAILURE_ITER".to_string(), f.iter.to_string()));
+        if let Some(ec) = f.exit_code {
+            pairs.push(("ROKI_FAILURE_EXIT_CODE".to_string(), ec.to_string()));
+        }
+        pairs.push(("ROKI_FAILURE_ERROR_TEXT".to_string(), f.error_text.clone()));
+        pairs.push(("ROKI_FAILURE_FAILED_CYCLE_ID".to_string(), f.failed_cycle_id.clone()));
     }
 
     pairs
@@ -378,5 +415,54 @@ mod tests {
 
         let env: Vec<(String, String)> = roki_env_pairs(&ctx).into_iter().collect();
         assert!(env.iter().any(|(k, v)| k == "ROKI_CYCLE_KIND" && v == "failure"));
+    }
+
+    #[test]
+    fn phase_context_failure_view_populated() {
+        use crate::engine::outcome::{CycleKind, FailureKind, FailureMeta, PhaseKind};
+        let failed_cycle_id = uuid::Uuid::from_u128(42);
+        let meta = FailureMeta {
+            failed_cycle_id,
+            kind: FailureKind::Unparseable,
+            phase: PhaseKind::Post,
+            iter: 3,
+            exit_code: Some(0),
+            error_text: "no JSON object on stdout".into(),
+        };
+        let mut ctx = PhaseContext::new(&admitted(), uuid::Uuid::nil(), &cfg(5), CycleKind::Failure);
+        ctx.set_failure(meta);
+
+        let env: std::collections::HashMap<String, String> = roki_env_pairs(&ctx).into_iter().collect();
+        assert_eq!(env.get("ROKI_FAILURE_KIND").unwrap(), "unparseable");
+        assert_eq!(env.get("ROKI_FAILURE_PHASE").unwrap(), "post");
+        assert_eq!(env.get("ROKI_FAILURE_ITER").unwrap(), "3");
+        assert_eq!(env.get("ROKI_FAILURE_EXIT_CODE").unwrap(), "0");
+        assert_eq!(env.get("ROKI_FAILURE_ERROR_TEXT").unwrap(), "no JSON object on stdout");
+        assert_eq!(env.get("ROKI_FAILURE_FAILED_CYCLE_ID").unwrap(), &failed_cycle_id.to_string());
+    }
+
+    #[test]
+    fn phase_context_failure_absent_for_rule_cycle() {
+        use crate::engine::outcome::CycleKind;
+        let ctx = PhaseContext::new(&admitted(), uuid::Uuid::nil(), &cfg(5), CycleKind::Rule);
+        let env: std::collections::HashMap<String, String> = roki_env_pairs(&ctx).into_iter().collect();
+        assert!(!env.contains_key("ROKI_FAILURE_KIND"));
+    }
+
+    #[test]
+    fn phase_context_failure_exit_code_absent_when_none() {
+        use crate::engine::outcome::{CycleKind, FailureKind, FailureMeta, PhaseKind};
+        let meta = FailureMeta {
+            failed_cycle_id: uuid::Uuid::nil(),
+            kind: FailureKind::Stall,
+            phase: PhaseKind::Run,
+            iter: 1,
+            exit_code: None,
+            error_text: "stall".into(),
+        };
+        let mut ctx = PhaseContext::new(&admitted(), uuid::Uuid::nil(), &cfg(5), CycleKind::Failure);
+        ctx.set_failure(meta);
+        let env: std::collections::HashMap<String, String> = roki_env_pairs(&ctx).into_iter().collect();
+        assert!(!env.contains_key("ROKI_FAILURE_EXIT_CODE"));
     }
 }
