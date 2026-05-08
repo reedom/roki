@@ -123,7 +123,7 @@ session_root = "{session_root}"
         }
     });
     reqwest::Client::new()
-        .post(&format!("http://127.0.0.1:{port}/"))
+        .post(format!("http://127.0.0.1:{port}/"))
         .json(&payload)
         .send()
         .await

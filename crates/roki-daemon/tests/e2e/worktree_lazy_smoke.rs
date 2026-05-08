@@ -167,7 +167,7 @@ async fn post_webhook(port: u16, ticket_id: &str) {
     });
     let client = reqwest::Client::new();
     let resp = client
-        .post(&format!("http://127.0.0.1:{port}/"))
+        .post(format!("http://127.0.0.1:{port}/"))
         .json(&payload)
         .send()
         .await
