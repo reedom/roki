@@ -98,7 +98,7 @@ pub async fn run_cycle(
         // Resolve cwd via the same ghq path the command-shape executor uses.
         // The executor resolves it lazily per-call; the supervisor must have
         // it up-front because spawn happens before the first phase invocation.
-        let cwd = crate::engine::phase::resolve_ghq_base(&ctx.repo.ghq).await?;
+        let cwd = crate::engine::cwd::resolve(&ctx.repo.ghq, &ticket_id).await?;
         let session_cfg = build_session_config(cfg, &ctx, &cwd)?;
         Some(SessionSupervisor::spawn(session_cfg).await?)
     } else {
