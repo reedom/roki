@@ -33,7 +33,10 @@ fn truncate_tail(s: &str, max: usize) -> String {
     if s.len() <= max {
         return s.to_string();
     }
-    let start = s.len().saturating_sub(max);
+    let target = s.len().saturating_sub(max);
+    let start = (target..=s.len())
+        .find(|&i| s.is_char_boundary(i))
+        .unwrap_or(s.len());
     format!("...{}", &s[start..])
 }
 
@@ -792,5 +795,79 @@ mod tests {
             }
             _ => panic!("expected Failed"),
         }
+    }
+
+    #[test]
+    fn truncate_tail_handles_multi_byte_utf8_at_boundary() {
+        // Build a string where the computed start index will fall in the middle of a multi-byte char.
+        // We need total_len - max to land on a byte that's not a char boundary.
+        // A 4-byte emoji (🦀) followed by ASCII: if we have 4100 bytes and max=4096,
+        // start=4. If the last 4 bytes before position 4100 are a 4-byte emoji starting at 4096,
+        // then trying to slice from index 4 would fail if it's mid-emoji.
+        // Simpler: make a string with padding + emoji where truncation lands mid-emoji.
+        let mut s = String::new();
+        // Write enough ASCII to reach a position where truncation will hit an emoji badly.
+        // We want: total_bytes - max to be non-char-boundary.
+        // If max=10 and we have 15 bytes with the last 4 being emoji, start=5.
+        // Position 5 might be in the middle of the emoji if emoji starts earlier.
+
+        // Create: "aaaaaaaaaa🦀" = 10 bytes ASCII + 4 bytes emoji = 14 bytes total
+        for _ in 0..10 {
+            s.push('a');
+        }
+        s.push('🦀');
+
+        // Now truncate to max=12: should try to slice from index 14-12=2.
+        // Index 2 is a valid char boundary (it's in the ASCII part).
+        // Let's adjust: make it so truncation lands in emoji.
+        // "aaaaaaaaaa🦀" with max=11 means start=14-11=3, still valid.
+        // We need the emoji to start earlier. Try: "aaaa🦀aaaaaa" = 4+4+6 = 14
+        s.clear();
+        for _ in 0..4 {
+            s.push('a');
+        }
+        s.push('🦀');
+        for _ in 0..6 {
+            s.push('a');
+        }
+        // Now s has 14 bytes. With max=11, start=14-11=3.
+        // Position 3 is between 'a' and emoji start, valid boundary.
+        // We need a bigger emoji or different placement.
+
+        // Better approach: use a scenario where byte arithmetic breaks.
+        // "a🦀a🦀a🦀a🦀a" - each emoji is 4 bytes, alternating with ASCII.
+        s.clear();
+        s.push('a');
+        s.push('🦀');
+        s.push('a');
+        s.push('🦀');
+        s.push('a');
+        s.push('🦀');
+        s.push('a');
+        s.push('🦀');
+        s.push('a');
+        // 5 'a's (5 bytes) + 4 emojis (16 bytes) = 21 bytes
+        // With max=19, start=21-19=2. Pos 2 is between first 'a' and first emoji.
+        // Still valid. Let's try max=18: start=3, which is the second byte of emoji at pos 1.
+
+        let truncated = super::truncate_tail(&s, 18);
+        // The old code would panic if start=3 is not a char boundary.
+        // The new code should find the next char boundary and succeed.
+        assert!(truncated.starts_with("..."));
+        // Result should be valid UTF-8.
+        let _ = truncated.chars().count();  // This would panic if invalid UTF-8
+    }
+
+    #[test]
+    fn truncate_tail_short_string_passthrough() {
+        assert_eq!(super::truncate_tail("hello", 100), "hello");
+    }
+
+    #[test]
+    fn truncate_tail_ascii_at_max() {
+        let s = "x".repeat(50);
+        let out = super::truncate_tail(&s, 10);
+        assert!(out.starts_with("..."));
+        assert_eq!(out.len(), 10 + 3);  // last 10 chars + "..." prefix
     }
 }
