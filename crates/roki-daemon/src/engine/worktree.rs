@@ -17,63 +17,41 @@
 
 use std::path::PathBuf;
 
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
 pub enum WorktreeError {
+    #[error("wt binary not found on PATH")]
     WtNotFound,
+
+    #[error("wt switch-create failed (exit={exit_code:?}): {stderr}")]
     SwitchCreateFailed {
         stderr: String,
         exit_code: Option<i32>,
     },
+
+    #[error("wt list failed (exit={exit_code:?}): {stderr}")]
     ListFailed {
         stderr: String,
         exit_code: Option<i32>,
     },
+
+    #[error("wt remove failed (exit={exit_code:?}): {stderr}")]
     RemoveFailed {
         stderr: String,
         exit_code: Option<i32>,
     },
-    PathEscape {
-        resolved: PathBuf,
-        root: PathBuf,
-    },
+
+    #[error("worktree path {} escapes root {}", resolved.display(), root.display())]
+    PathEscape { resolved: PathBuf, root: PathBuf },
+
+    #[error("worktree path {} already used for ticket {ticket_id}", existing_path.display())]
     Conflict {
         ticket_id: String,
         existing_path: PathBuf,
     },
-    Io(std::io::Error),
-}
 
-impl std::fmt::Display for WorktreeError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            WorktreeError::WtNotFound => write!(f, "wt binary not found on PATH"),
-            WorktreeError::SwitchCreateFailed { stderr, exit_code } => {
-                write!(f, "wt switch-create failed (exit={exit_code:?}): {stderr}")
-            }
-            WorktreeError::ListFailed { stderr, exit_code } => {
-                write!(f, "wt list failed (exit={exit_code:?}): {stderr}")
-            }
-            WorktreeError::RemoveFailed { stderr, exit_code } => {
-                write!(f, "wt remove failed (exit={exit_code:?}): {stderr}")
-            }
-            WorktreeError::PathEscape { resolved, root } => {
-                write!(f, "worktree path {resolved:?} escapes root {root:?}")
-            }
-            WorktreeError::Conflict {
-                ticket_id,
-                existing_path,
-            } => {
-                write!(
-                    f,
-                    "worktree path {existing_path:?} already used for ticket {ticket_id}"
-                )
-            }
-            WorktreeError::Io(e) => write!(f, "worktree io error: {e}"),
-        }
-    }
+    #[error("worktree io error: {0}")]
+    Io(#[from] std::io::Error),
 }
-
-impl std::error::Error for WorktreeError {}
 
 impl WorktreeError {
     /// Exit code from the underlying `wt` invocation when one exists, else `None`.
@@ -103,15 +81,32 @@ pub async fn remove(_ghq: &str, _ticket_id: &str) -> Result<bool, WorktreeError>
 mod tests {
     use super::*;
 
-    #[tokio::test]
-    async fn error_display_round_trip() {
+    #[test]
+    fn wt_not_found_display() {
         let e = WorktreeError::WtNotFound;
         assert!(format!("{e}").contains("wt binary not found"));
     }
 
-    #[tokio::test]
-    async fn signatures_compile() {
-        // Pure type-level check: the symbols exist.
+    #[test]
+    fn switch_create_failed_display_includes_exit_code() {
+        let e = WorktreeError::SwitchCreateFailed {
+            stderr: "boom".to_string(),
+            exit_code: Some(7),
+        };
+        let s = format!("{e}");
+        assert!(s.contains("Some(7)"), "{s}");
+        assert!(s.contains("boom"), "{s}");
+    }
+
+    #[test]
+    fn signatures_compile() {
+        // Bind the function items so the test fails to compile if any of
+        // the three public async fns are removed or renamed. Type-annotated
+        // assignments would not survive async fn return types (impl Future
+        // is unnameable), so `let _ = item;` is the right shape.
+        let _ = ensure;
+        let _ = exists;
+        let _ = remove;
         let _ = WorktreeError::WtNotFound;
     }
 }
