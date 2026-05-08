@@ -39,7 +39,13 @@ use crate::error::{SkeletonError, WebhookError};
 use crate::linear::client::{LinearClient, MeId};
 use crate::linear::ticket::NormalizedTicket;
 use crate::linear::webhook::{self, WebhookState};
-use crate::rule;
+
+/// Carries the resolved dispatch target through to the cycle call site.
+enum DispatchedEntry {
+    Rule(crate::config::workflow::Rule),
+    Cleanup(crate::config::workflow::Cleanup),
+    Shorthand,
+}
 
 /// Run the skeleton pipeline.
 ///
@@ -101,9 +107,9 @@ pub(crate) async fn run_inner(config_path: &Path) -> Result<(), SkeletonError> {
     }));
 
     // 6. Pipeline loop. Each iteration drains one POST; admission rejection
-    //    and rule no-match re-arm the loop. The first match locks the
+    //    and dispatch no-match re-arm the loop. The first match locks the
     //    cycle and breaks out into the cycle-bound stage below.
-    let (admitted, matched_rule) = loop {
+    let (admitted, cycle_kind, dispatched) = loop {
         let Some(ticket) = rx.recv().await else {
             // Sender side dropped without ever delivering a ticket. The
             // listener task either failed to bind or exited prematurely;
@@ -127,16 +133,34 @@ pub(crate) async fn run_inner(config_path: &Path) -> Result<(), SkeletonError> {
         // against a literal id, the field is unused; pass an empty value.
         let me_ref = me.clone().unwrap_or_else(|| MeId(String::new()));
         match admission::accept(&ticket, &workflow, &me_ref) {
-            Ok(admitted) => match rule::first_match(&admitted, &workflow.rules) {
-                Some(matched) => break (admitted, matched.clone()),
-                None => {
-                    tracing::info!(
-                        ticket_id = %admitted.ticket.id,
-                        "rule no-match; awaiting next webhook"
-                    );
-                    continue;
+            Ok(admitted) => {
+                use crate::engine::dispatch::{evaluate, DispatchMode, DispatchTarget};
+                match evaluate(&admitted, &workflow, DispatchMode::Default) {
+                    DispatchTarget::Cycle { kind, rule: Some(r), .. } => {
+                        break (admitted, kind, DispatchedEntry::Rule(r.clone()));
+                    }
+                    DispatchTarget::Cycle { kind, cleanup: Some(c), .. } => {
+                        break (admitted, kind, DispatchedEntry::Cleanup(c.clone()));
+                    }
+                    DispatchTarget::CleanupShorthand => {
+                        break (
+                            admitted,
+                            crate::engine::outcome::CycleKind::Cleanup,
+                            DispatchedEntry::Shorthand,
+                        );
+                    }
+                    DispatchTarget::NoMatch => {
+                        tracing::info!(
+                            ticket_id = %admitted.ticket.id,
+                            "no dispatch match; awaiting next webhook"
+                        );
+                        continue;
+                    }
+                    DispatchTarget::Cycle { rule: None, cleanup: None, .. } => unreachable!(
+                        "dispatch::evaluate returned Cycle with neither rule nor cleanup"
+                    ),
                 }
-            },
+            }
             Err(err) => {
                 tracing::info!(
                     ticket_id = %ticket.id,
@@ -158,16 +182,20 @@ pub(crate) async fn run_inner(config_path: &Path) -> Result<(), SkeletonError> {
             cfg.default_ai_command.stall_seconds,
         ),
     };
-    let outcome = crate::engine::run_cycle(
-        &executor,
-        &admitted,
-        &matched_rule,
-        &cfg.paths.session_root,
-        &cfg,
-        crate::engine::outcome::CycleKind::Rule,
-        None,
-    )
-    .await?;
+    let outcome = match dispatched {
+        DispatchedEntry::Rule(rule) => crate::engine::run_cycle(
+            &executor,
+            &admitted,
+            &rule,
+            &cfg.paths.session_root,
+            &cfg,
+            cycle_kind,
+            None,
+        )
+        .await?,
+        DispatchedEntry::Cleanup(_) => unimplemented!("cleanup cycle wired in Task 14"),
+        DispatchedEntry::Shorthand => unimplemented!("shorthand wired in Task 14"),
+    };
 
     // 8. Graceful shutdown.
     let _ = shutdown_tx.send(());
