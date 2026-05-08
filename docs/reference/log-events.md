@@ -40,7 +40,7 @@ Attached to every event via tracing spans (when in scope).
 | `phase_started` | Phase subprocess spawned | `phase`, cli line (Liquid-rendered, secrets-redacted), env var keys, working directory |
 | `phase_completed` | Phase clean exit | `phase`, exit code, duration, terminal directive (when applicable), head/tail summary of stderr |
 | `phase_failed` | Phase failure | `phase`, `failure.kind` per [fr:01 §Failure handling](../fr/01-engine-model.md), `error_text`, head/tail summary of stderr |
-| `failure_unhandled` | A `phase_failed` failure had no `[[on_failure]]` first-match | `(ticket.id, cycle.id, failure.kind, phase, error_text)`. The escalation queue is **not** touched ([fr:06 §Failure-handler cycle](../fr/06-failure-handling.md)) |
+| `failure_unhandled` | A cycle failure was not recovered: no `[[on_failure]]` match (`marker = none`), handler cycle itself failed (`marker = recursion_bound`), or handler cycle hit an infra error (`marker = recursion_bound`) | `(ticket.id, cycle.id, cycle.kind, failure.kind, phase, error_text, marker)`. Daemon exits 1. The escalation queue is **not** touched ([fr:06 §Failure-handler cycle](../fr/06-failure-handling.md)) |
 | `cycle_completed` | Cycle ends with terminal directive | `cycle.kind`, terminal directive, iter count, duration |
 | `cycle_aborted` | Cycle aborted (failure or admission lost mid-cycle) | `cycle.kind`, `failure.kind` (if applicable), iter count |
 | `escalation_added` | Escalation queue entry added | Daemon-stuck failures only: failure-handler cycle that itself failed, or daemon-internal error with no cycle association ([fr:06 §Escalation queue](../fr/06-failure-handling.md)) |

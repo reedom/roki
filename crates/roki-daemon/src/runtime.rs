@@ -249,21 +249,12 @@ pub(crate) async fn run_inner(config_path: &Path) -> Result<(), SkeletonError> {
         }
     };
 
-    // 8. Graceful shutdown.
-    let _ = shutdown_tx.send(());
-    let listener_result = listener_handle.await;
-
-    match cycle_outcome_result {
+    // 8. Handle the cycle outcome. The failure handler must run before the
+    //    listener is shut down because it may spawn a Failure cycle.
+    let final_result: Result<(), SkeletonError> = match cycle_outcome_result {
         CycleOutcomeOrShortcircuit::Shorthand => {
             // delete_immediate already emitted both events. Exit 0.
-            match listener_result {
-                Ok(Ok(())) => Ok(()),
-                Ok(Err(err)) => Err(SkeletonError::Webhook(err)),
-                Err(join_err) => Err(SkeletonError::Webhook(WebhookError::BindFailed {
-                    addr: addr.to_string(),
-                    source: std::io::Error::other(join_err),
-                })),
-            }
+            Ok(())
         }
         CycleOutcomeOrShortcircuit::Cycle { kind, outcome } => match outcome {
             crate::engine::CycleOutcome::Completed { iters, cycle_id } => {
@@ -288,14 +279,7 @@ pub(crate) async fn run_inner(config_path: &Path) -> Result<(), SkeletonError> {
                         })
                     })?;
                 }
-                match listener_result {
-                    Ok(Ok(())) => Ok(()),
-                    Ok(Err(err)) => Err(SkeletonError::Webhook(err)),
-                    Err(join_err) => Err(SkeletonError::Webhook(WebhookError::BindFailed {
-                        addr: addr.to_string(),
-                        source: std::io::Error::other(join_err),
-                    })),
-                }
+                Ok(())
             }
             crate::engine::CycleOutcome::Failed { meta } => {
                 tracing::error!(
@@ -304,29 +288,164 @@ pub(crate) async fn run_inner(config_path: &Path) -> Result<(), SkeletonError> {
                     iter = meta.iter,
                     "cycle failed"
                 );
-                match listener_result {
-                    Ok(Ok(())) => {}
-                    Ok(Err(err)) => {
-                        tracing::error!(
-                            error = %err,
-                            "webhook listener errored after cycle failure"
-                        );
-                    }
-                    Err(join_err) => {
-                        tracing::error!(
-                            error = %join_err,
-                            "webhook listener task panicked after cycle failure"
-                        );
+                let decision = handle_failed_cycle(
+                    &meta,
+                    kind,
+                    &workflow,
+                    &executor,
+                    &admitted,
+                    &cfg,
+                    &mut events,
+                )
+                .await;
+                match decision {
+                    FailureDecision::HandlerSucceeded => Ok(()),
+                    FailureDecision::Unhandled => {
+                        Err(SkeletonError::PhaseInfra(
+                            crate::error::PhaseInfraError::CycleFailed {
+                                kind: meta.kind,
+                                iter: meta.iter,
+                            },
+                        ))
                     }
                 }
-                Err(SkeletonError::PhaseInfra(
-                    crate::error::PhaseInfraError::CycleFailed {
-                        kind: meta.kind,
-                        iter: meta.iter,
-                    },
-                ))
             }
         },
+    };
+
+    // 9. Graceful shutdown — runs exactly once on every exit path.
+    let _ = shutdown_tx.send(());
+    let listener_result = listener_handle.await;
+
+    // Merge listener errors into the final result.
+    match final_result {
+        Ok(()) => match listener_result {
+            Ok(Ok(())) => Ok(()),
+            Ok(Err(err)) => Err(SkeletonError::Webhook(err)),
+            Err(join_err) => Err(SkeletonError::Webhook(WebhookError::BindFailed {
+                addr: addr.to_string(),
+                source: std::io::Error::other(join_err),
+            })),
+        },
+        Err(cycle_err) => {
+            match listener_result {
+                Ok(Ok(())) => {}
+                Ok(Err(err)) => {
+                    tracing::error!(error = %err, "webhook listener errored after cycle failure");
+                }
+                Err(join_err) => {
+                    tracing::error!(
+                        error = %join_err,
+                        "webhook listener task panicked after cycle failure"
+                    );
+                }
+            }
+            Err(cycle_err)
+        }
+    }
+}
+
+enum FailureDecision {
+    HandlerSucceeded,
+    Unhandled,
+}
+
+async fn handle_failed_cycle(
+    meta: &crate::engine::outcome::FailureMeta,
+    failed_cycle_kind: crate::engine::outcome::CycleKind,
+    workflow: &crate::config::workflow::WorkflowConfig,
+    executor: &crate::engine::CommandPhaseExecutor,
+    admitted: &crate::admission::AdmittedTicket,
+    cfg: &crate::config::roki::RokiConfig,
+    events: &mut crate::events::EventWriter,
+) -> FailureDecision {
+    use crate::engine::outcome::CycleKind;
+    use crate::events::{Event, FailureMarker, FailureMetaSer, now_rfc3339};
+
+    // Recursion bound: a failure cycle that itself fails must not recurse.
+    if failed_cycle_kind == CycleKind::Failure {
+        let _ = events.emit(&Event::FailureUnhandled {
+            ts: now_rfc3339(),
+            cycle_id: meta.failed_cycle_id.to_string(),
+            cycle_kind: "failure".into(),
+            failure: FailureMetaSer::from_meta(meta),
+            marker: FailureMarker::RecursionBound,
+        });
+        return FailureDecision::Unhandled;
+    }
+
+    // First-match against [[on_failure]].
+    let Some(handler) = crate::engine::on_failure::route(&workflow.on_failures, meta) else {
+        let _ = events.emit(&Event::FailureUnhandled {
+            ts: now_rfc3339(),
+            cycle_id: meta.failed_cycle_id.to_string(),
+            cycle_kind: failed_cycle_kind.as_str().to_string(),
+            failure: FailureMetaSer::from_meta(meta),
+            marker: FailureMarker::None,
+        });
+        return FailureDecision::Unhandled;
+    };
+
+    // Convert OnFailure -> Rule shape for run_cycle.
+    let handler_rule = on_failure_to_rule(handler);
+    let handler_outcome = match crate::engine::run_cycle(
+        executor,
+        admitted,
+        &handler_rule,
+        &cfg.paths.session_root,
+        cfg,
+        CycleKind::Failure,
+        Some(meta.clone()),
+    )
+    .await
+    {
+        Ok(o) => o,
+        Err(infra) => {
+            tracing::error!(?infra, "handler cycle infra error");
+            let _ = events.emit(&Event::FailureUnhandled {
+                ts: now_rfc3339(),
+                cycle_id: meta.failed_cycle_id.to_string(),
+                cycle_kind: "failure".into(),
+                failure: FailureMetaSer::from_meta(meta),
+                marker: FailureMarker::RecursionBound,
+            });
+            return FailureDecision::Unhandled;
+        }
+    };
+
+    match handler_outcome {
+        crate::engine::CycleOutcome::Completed { iters, cycle_id } => {
+            let _ = events.emit(&Event::CycleCompleted {
+                ts: now_rfc3339(),
+                cycle_id: cycle_id.to_string(),
+                cycle_kind: "failure".into(),
+                iters,
+                outcome: None,
+            });
+            FailureDecision::HandlerSucceeded
+        }
+        crate::engine::CycleOutcome::Failed { meta: handler_meta } => {
+            let _ = events.emit(&Event::FailureUnhandled {
+                ts: now_rfc3339(),
+                cycle_id: handler_meta.failed_cycle_id.to_string(),
+                cycle_kind: "failure".into(),
+                failure: FailureMetaSer::from_meta(&handler_meta),
+                marker: FailureMarker::RecursionBound,
+            });
+            FailureDecision::Unhandled
+        }
+    }
+}
+
+fn on_failure_to_rule(
+    h: &crate::engine::on_failure::OnFailure,
+) -> crate::config::workflow::Rule {
+    crate::config::workflow::Rule {
+        when_status: String::new(),
+        when_labels_has_all: vec![],
+        pre: h.pre.clone(),
+        run: h.run.clone(),
+        post: h.post.clone(),
     }
 }
 

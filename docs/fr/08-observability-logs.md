@@ -63,7 +63,7 @@ Canonical event names emitted on the structured pipeline. `roki events --kind <n
 | `phase_started` | Phase subprocess spawned |
 | `phase_completed` | Phase clean exit; carries head/tail stderr summary |
 | `phase_failed` | Phase failure (`failure.kind` per [01-engine-model](01-engine-model.md) §Failure kinds) |
-| `failure_unhandled` | A `phase_failed` failure had no `[[on_failure]]` first-match. Carries `(ticket_id, cycle_id, failure.kind, phase, error_text)`. The daemon does not enqueue an escalation entry for these — operators that want a TUI surface filter `roki events --kind failure_unhandled` ([06-failure-handling §Failure-handler cycle](06-failure-handling.md)). |
+| `failure_unhandled` | A cycle failure was not recovered: no `[[on_failure]]` match (`marker = none`), handler cycle itself failed (`marker = recursion_bound`), or handler cycle hit an infra error (`marker = recursion_bound`). Carries `(ticket_id, cycle_id, cycle_kind, failure.kind, phase, error_text, marker)`. Daemon exits 1. No escalation queue entry ([06-failure-handling §Failure-handler cycle](06-failure-handling.md)). |
 | `cycle_completed` | Cycle ends with terminal directive |
 | `cycle_aborted` | Cycle aborted (failure or admission lost mid-cycle) |
 | `escalation_added` | Escalation queue entry added (daemon-stuck failure: failure-cycle inside failure-cycle, or daemon-internal error with no cycle) |
