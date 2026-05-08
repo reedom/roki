@@ -133,14 +133,10 @@ session_root = "{session_root}"
         .unwrap();
     assert_eq!(resp.status().as_u16(), 202);
 
-    let status = tokio::time::timeout(Duration::from_secs(15), child.wait())
-        .await
-        .expect("binary should exit within 15s")
-        .expect("child wait succeeds");
-    assert!(
-        status.success(),
-        "binary should exit success, got {status:?}"
-    );
+    let events_path = session_root.join("ENG-RT.events.jsonl");
+    wait_for_event_count(&events_path, "cycle_completed", 1, Duration::from_secs(15)).await;
+    let exit = sigterm_and_wait(&mut child, Duration::from_secs(10)).await;
+    assert_eq!(exit, Some(0), "binary should exit 0 after SIGTERM");
 
     let cycle_root = session_root.join("ENG-RT");
     let cycle_entry = std::fs::read_dir(&cycle_root)
@@ -189,4 +185,38 @@ async fn wait_for_listener(addr: SocketAddr) {
         sleep(Duration::from_millis(100)).await;
     }
     panic!("webhook listener never came up at {addr}");
+}
+
+async fn wait_for_event_count(
+    path: &std::path::Path,
+    event_kind: &str,
+    expected: usize,
+    timeout: Duration,
+) {
+    let needle = format!("\"event\":\"{event_kind}\"");
+    let deadline = tokio::time::Instant::now() + timeout;
+    while tokio::time::Instant::now() < deadline {
+        if let Ok(body) = tokio::fs::read_to_string(path).await {
+            if body.matches(&needle).count() >= expected {
+                return;
+            }
+        }
+        sleep(Duration::from_millis(50)).await;
+    }
+    panic!(
+        "timed out waiting for {expected} occurrences of {event_kind} in {}",
+        path.display()
+    );
+}
+
+async fn sigterm_and_wait(child: &mut tokio::process::Child, timeout: Duration) -> Option<i32> {
+    use nix::sys::signal::{Signal, kill};
+    use nix::unistd::Pid;
+    if let Some(pid) = child.id() {
+        let _ = kill(Pid::from_raw(pid as i32), Signal::SIGTERM);
+    }
+    match tokio::time::timeout(timeout, child.wait()).await {
+        Ok(Ok(status)) => status.code(),
+        _ => None,
+    }
 }

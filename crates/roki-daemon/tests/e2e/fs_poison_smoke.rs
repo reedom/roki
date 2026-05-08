@@ -1,18 +1,18 @@
-//! E2E: session_root is a regular file, not a directory. Every attempt to
-//! create iter dirs (and the events file) underneath it fails with ENOTDIR,
-//! which routes to FailureKind::FsPoison. The matching [[on_failure]] handler
-//! is dispatched but its iter dir creation also fails (same broken root) →
-//! recursion_bound. The daemon must exit non-zero.
+//! E2E: session_root is a regular file, not a directory. The persistent
+//! daemon (slice 5+) opens a daemon-scoped event log at startup; that open
+//! fails with ENOTDIR before the webhook listener binds. The binary exits
+//! non-zero with a startup error.
 //!
-//! The events file cannot be written (session_root is a file), so no JSONL
-//! assertions are made; only the process exit code is checked.
+//! Pre-slice-5 the daemon would have started, accepted the webhook, then
+//! routed FsPoison through [[on_failure]] → recursion_bound and exited 1.
+//! The post-slice-5 daemon fails earlier (startup) but still exits non-zero
+//! when session_root is unusable, which is the contract this test pins.
 
-use std::net::{SocketAddr, TcpListener};
+use std::net::TcpListener;
 use std::time::Duration;
 
 use tempfile::TempDir;
 use tokio::process::Command;
-use tokio::time::sleep;
 use wiremock::matchers::method;
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
@@ -114,50 +114,22 @@ session_root = "{session_root}"
         .spawn()
         .expect("spawn roki binary");
 
-    let webhook_addr: SocketAddr = ([127, 0, 0, 1], port).into();
-    wait_for_listener(webhook_addr).await;
+    // Reference ticket_id and port to keep them used; the daemon exits at
+    // startup before the listener binds, so no webhook is sent.
+    let _ = (ticket_id, port);
 
-    let webhook_url = format!("http://127.0.0.1:{port}/");
-    let payload = serde_json::json!({
-        "action": "update",
-        "type": "Issue",
-        "data": {
-            "id": ticket_id,
-            "assignee": {"id": "u1"},
-            "state": {"name": "in_progress"},
-            "labels": []
-        }
-    });
-    let client = reqwest::Client::new();
-    let resp = client
-        .post(&webhook_url)
-        .json(&payload)
-        .send()
+    // The daemon's startup-time daemon-event-log open fails when
+    // session_root is a regular file; the binary exits non-zero before the
+    // webhook listener binds. Wait for the natural exit (this is one of the
+    // few cases where the persistent daemon does NOT stay alive).
+    let status = tokio::time::timeout(Duration::from_secs(10), child.wait())
         .await
-        .unwrap();
-    assert_eq!(resp.status().as_u16(), 202);
-
-    let status = tokio::time::timeout(Duration::from_secs(15), child.wait())
-        .await
-        .expect("binary should exit within 15s")
+        .expect("binary should exit within 10s on startup error")
         .expect("child wait succeeds");
-
-    // FsPoison → on_failure handler dispatched → handler cycle also hits
-    // FsPoison (same broken root) → recursion_bound → daemon exits non-zero.
     assert!(
         !status.success(),
-        "binary should exit non-zero on fs_poison; got {status:?}"
+        "binary should exit non-zero on fs_poison startup; got {status:?}"
     );
     // The events file cannot exist when session_root is a plain file;
     // no JSONL assertions are possible here.
-}
-
-async fn wait_for_listener(addr: SocketAddr) {
-    for _ in 0..50 {
-        if tokio::net::TcpStream::connect(addr).await.is_ok() {
-            return;
-        }
-        sleep(Duration::from_millis(100)).await;
-    }
-    panic!("webhook listener never came up at {addr}");
 }
