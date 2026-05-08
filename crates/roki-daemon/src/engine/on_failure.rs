@@ -1,9 +1,12 @@
+#![allow(dead_code)]
+
 //! `[[on_failure]]` first-match evaluation against a `FailureMeta`.
 //!
 //! Per fr:06 §53 + §63, `when.kind` accepts:
 //!   - single value: `when.kind = "stall"`
 //!   - in-array:     `when.kind.in = ["unparseable", "schema_drift"]`
 //!   - not:          `when.kind.not = "iter_exhausted"`
+//!
 //! plus optional `when.phase = "pre" | "run" | "post"`.
 //!
 //! Exactly one of the three `when.kind` forms may be set per entry; mixing
@@ -34,7 +37,7 @@ impl OnFailure {
             KindMatcher::In(ks) => ks.contains(&meta.kind),
             KindMatcher::Not(k) => *k != meta.kind,
         };
-        let phase_ok = self.when_phase.map_or(true, |p| p == meta.phase);
+        let phase_ok = self.when_phase.is_none_or(|p| p == meta.phase);
         kind_ok && phase_ok
     }
 }
