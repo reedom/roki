@@ -61,22 +61,7 @@ pub async fn delete_immediate(
         reason: WorktreeDeleteReason::CleanupShorthand,
     });
     if let Err(err) = crate::engine::worktree::remove(ghq, ticket_id).await {
-        let _ = events.emit(&Event::FailureUnhandled {
-            ts: now_rfc3339(),
-            cycle_id: cycle_id.to_string(),
-            cycle_kind: "cleanup".into(),
-            failure: FailureMetaSer {
-                kind: "fs_poison".into(),
-                phase: None,
-                iter: 0,
-                exit_code: err.exit_code(),
-                error_text: format!("cleanup wt remove failed: {err}"),
-            },
-            marker: FailureMarker::CleanupFsError,
-        });
-        return Err(CleanupError::FsError(std::io::Error::other(format!(
-            "{err}"
-        ))));
+        return Err(emit_wt_remove_error(events, &cycle_id.to_string(), &err));
     }
     remove_ticket_dir(session_root, ticket_id, Some(cycle_id), events)
 }
@@ -97,22 +82,7 @@ pub async fn post_cycle_delete(
         reason: WorktreeDeleteReason::CleanupTerminal,
     });
     if let Err(err) = crate::engine::worktree::remove(ghq, ticket_id).await {
-        let _ = events.emit(&Event::FailureUnhandled {
-            ts: now_rfc3339(),
-            cycle_id: cycle_id.to_string(),
-            cycle_kind: "cleanup".into(),
-            failure: FailureMetaSer {
-                kind: "fs_poison".into(),
-                phase: None,
-                iter: 0,
-                exit_code: err.exit_code(),
-                error_text: format!("cleanup wt remove failed: {err}"),
-            },
-            marker: FailureMarker::CleanupFsError,
-        });
-        return Err(CleanupError::FsError(std::io::Error::other(format!(
-            "{err}"
-        ))));
+        return Err(emit_wt_remove_error(events, &cycle_id.to_string(), &err));
     }
     remove_ticket_dir(session_root, ticket_id, Some(cycle_id), events)
 }
@@ -144,6 +114,30 @@ fn remove_ticket_dir(
             Err(CleanupError::FsError(e))
         }
     }
+}
+
+/// Emit a `failure_unhandled marker=cleanup_fs_error` event for a `wt remove`
+/// failure during cleanup, and build the `CleanupError` to return. Caller is
+/// expected to early-return with the result.
+fn emit_wt_remove_error(
+    events: &mut EventWriter,
+    cycle_id: &str,
+    err: &crate::engine::worktree::WorktreeError,
+) -> CleanupError {
+    let _ = events.emit(&Event::FailureUnhandled {
+        ts: now_rfc3339(),
+        cycle_id: cycle_id.to_string(),
+        cycle_kind: "cleanup".into(),
+        failure: FailureMetaSer {
+            kind: "fs_poison".into(),
+            phase: None,
+            iter: 0,
+            exit_code: err.exit_code(),
+            error_text: format!("cleanup wt remove failed: {err}"),
+        },
+        marker: FailureMarker::CleanupFsError,
+    });
+    CleanupError::FsError(std::io::Error::other(err.to_string()))
 }
 
 fn sanitize_ticket(id: &str) -> String {

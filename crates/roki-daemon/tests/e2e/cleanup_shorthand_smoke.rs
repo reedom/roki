@@ -31,6 +31,9 @@ async fn cleanup_shorthand_deletes_ticket_dir() {
     let session_root = work.path().join("sessions");
     std::fs::create_dir_all(&session_root).unwrap();
 
+    let wt_root = work.path().join("wts");
+    std::fs::create_dir_all(&wt_root).unwrap();
+
     // Pre-populate a stale ticket dir so we can prove the shorthand deleted it.
     let ticket_id = "ENG-99";
     let ticket_dir = session_root.join(ticket_id);
@@ -98,6 +101,7 @@ session_root = "{session_root}"
         .arg(&roki_path)
         .env("ROKI_LINEAR_GRAPHQL_URL", linear.uri())
         .env("ROKI_GHQ_BASE_OVERRIDE", work.path())
+        .env("ROKI_WT_ROOT_OVERRIDE", &wt_root)
         .kill_on_drop(true)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
