@@ -24,7 +24,7 @@
 use std::collections::HashSet;
 
 use crate::admission::AdmittedTicket;
-use crate::config::workflow::Rule;
+use crate::config::workflow::{Cleanup, Rule};
 
 /// Return the first rule whose `when.status` equals the ticket's status and
 /// whose `when.labels.has_all` is fully contained in the ticket's labels, or
@@ -42,6 +42,27 @@ pub fn first_match<'a>(
     rules.iter().find(|rule| matches(admitted, &labels, rule))
 }
 
+/// First-match against `[[cleanup]]` entries. Mirrors `first_match` for rules:
+/// `when.status` matches the ticket's current status if set, and
+/// `when.labels.has_all` matches if every listed label is on the ticket.
+/// Shorthand entries (no `when.*`) match unconditionally.
+pub fn first_cleanup_match<'a>(
+    admitted: &AdmittedTicket,
+    cleanups: &'a [Cleanup],
+) -> Option<&'a Cleanup> {
+    cleanups.iter().find(|c| {
+        let status_ok = c
+            .when_status
+            .as_deref()
+            .is_none_or(|s| s == admitted.ticket.status);
+        let labels_ok = c
+            .when_labels_has_all
+            .iter()
+            .all(|l| admitted.ticket.labels.iter().any(|tl| tl == l));
+        status_ok && labels_ok
+    })
+}
+
 /// String equality on `when.status` plus set containment on
 /// `when.labels.has_all` against the ticket's labels (Req 5.2). An empty
 /// `has_all` trivially matches because every element of the empty set is
@@ -57,6 +78,72 @@ fn matches(
     rule.when_labels_has_all
         .iter()
         .all(|wanted| ticket_labels.contains(wanted.as_str()))
+}
+
+#[cfg(test)]
+pub(crate) fn admitted_with(status: &str, labels: Vec<String>) -> crate::admission::AdmittedTicket {
+    crate::admission::AdmittedTicket {
+        ticket: crate::linear::ticket::NormalizedTicket::new(
+            "ENG-DSP".to_string(),
+            Some("u1".to_string()),
+            status.to_string(),
+            labels,
+            "T".to_string(),
+            "B".to_string(),
+        ),
+        ghq: "github.com/acme/widget".to_string(),
+    }
+}
+
+#[cfg(test)]
+mod cleanup_tests {
+    use super::*;
+    use crate::config::workflow::Cleanup;
+
+    fn admitted(status: &str, labels: Vec<String>) -> crate::admission::AdmittedTicket {
+        super::admitted_with(status, labels)
+    }
+
+    #[test]
+    fn shorthand_matches_unconditionally() {
+        let cleanups = vec![Cleanup {
+            when_status: None,
+            when_labels_has_all: vec![],
+            pre: None,
+            run: None,
+            post: None,
+        }];
+        let a = admitted("InProgress", vec![]);
+        assert!(first_cleanup_match(&a, &cleanups).is_some());
+    }
+
+    #[test]
+    fn status_filter_excludes_non_matching() {
+        let cleanups = vec![Cleanup {
+            when_status: Some("Done".into()),
+            when_labels_has_all: vec![],
+            pre: None,
+            run: Some(crate::engine::outcome::PhaseBody::InlineCmd { cmd: "true".into() }),
+            post: None,
+        }];
+        let a = admitted("InProgress", vec![]);
+        assert!(first_cleanup_match(&a, &cleanups).is_none());
+    }
+
+    #[test]
+    fn labels_has_all_requires_every_label() {
+        let cleanups = vec![Cleanup {
+            when_status: None,
+            when_labels_has_all: vec!["urgent".into(), "bug".into()],
+            pre: None,
+            run: Some(crate::engine::outcome::PhaseBody::InlineCmd { cmd: "true".into() }),
+            post: None,
+        }];
+        let a1 = admitted("InProgress", vec!["urgent".into()]);
+        assert!(first_cleanup_match(&a1, &cleanups).is_none());
+        let a2 = admitted("InProgress", vec!["urgent".into(), "bug".into()]);
+        assert!(first_cleanup_match(&a2, &cleanups).is_some());
+    }
 }
 
 #[cfg(test)]

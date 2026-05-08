@@ -11,6 +11,7 @@
 pub mod context;
 pub mod cycle;
 pub mod directive;
+pub mod dispatch;
 pub mod on_failure;
 pub mod outcome;
 pub mod phase;
