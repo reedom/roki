@@ -69,31 +69,33 @@ pub async fn ensure(_ghq: &str, _ticket_id: &str) -> Result<PathBuf, WorktreeErr
     unimplemented!("Task 4 implements ensure")
 }
 
-pub async fn exists(ghq: &str, ticket_id: &str) -> Result<Option<PathBuf>, WorktreeError> {
+pub async fn exists(_ghq: &str, ticket_id: &str) -> Result<Option<PathBuf>, WorktreeError> {
     if let Some(root) = std::env::var_os("ROKI_WT_ROOT_OVERRIDE") {
         let path = PathBuf::from(root).join(ticket_id);
         return Ok(if path.is_dir() { Some(path) } else { None });
     }
-    wt_list_find(ghq, ticket_id).await
+    wt_list_find(ticket_id).await
 }
 
-async fn wt_bin() -> std::ffi::OsString {
+fn wt_bin() -> std::ffi::OsString {
     std::env::var_os("ROKI_WT_BIN_OVERRIDE").unwrap_or_else(|| "wt".into())
 }
 
 /// Run `wt list` and return the path whose branch matches `ticket_id`.
-/// `wt list` prints one `<branch>\t<absolute-path>` line per worktree on
-/// stdout. Branch name = ticket id verbatim per fr:05 line 36.
-async fn wt_list_find(_ghq: &str, ticket_id: &str) -> Result<Option<PathBuf>, WorktreeError> {
+/// `wt list` prints one line per worktree on stdout, formatted as
+/// `<branch>` followed by whitespace-separated metadata whose first field
+/// is the absolute path. Branch name = ticket id verbatim per fr:05 line 36.
+async fn wt_list_find(ticket_id: &str) -> Result<Option<PathBuf>, WorktreeError> {
     use tokio::process::Command;
-    let bin = wt_bin().await;
-    let out = Command::new(&bin).arg("list").output().await.map_err(|e| {
-        if e.kind() == std::io::ErrorKind::NotFound {
-            WorktreeError::WtNotFound
-        } else {
-            WorktreeError::Io(e)
-        }
-    })?;
+    let bin = wt_bin();
+    let out = Command::new(&bin)
+        .arg("list")
+        .output()
+        .await
+        .map_err(|e| match e.kind() {
+            std::io::ErrorKind::NotFound => WorktreeError::WtNotFound,
+            _ => WorktreeError::Io(e),
+        })?;
     if !out.status.success() {
         return Err(WorktreeError::ListFailed {
             stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
@@ -101,12 +103,15 @@ async fn wt_list_find(_ghq: &str, ticket_id: &str) -> Result<Option<PathBuf>, Wo
         });
     }
     for line in String::from_utf8_lossy(&out.stdout).lines() {
-        // wt list output is `<branch>\t<path>` (or whitespace-separated for
-        // some wt versions); accept either by splitting on the first run of
-        // whitespace.
-        let mut parts = line.splitn(2, char::is_whitespace);
-        let branch = parts.next().unwrap_or("").trim();
-        let path = parts.next().unwrap_or("").trim();
+        // wt list output is `<branch>` followed by whitespace-separated
+        // metadata; the absolute path is the first whitespace-delimited
+        // field after the branch. Splitting on the first whitespace run
+        // accepts both tab- and space-separated formats.
+        let Some((branch, rest)) = line.split_once(char::is_whitespace) else {
+            continue;
+        };
+        let branch = branch.trim();
+        let path = rest.trim();
         if branch == ticket_id && !path.is_empty() {
             return Ok(Some(PathBuf::from(path)));
         }
