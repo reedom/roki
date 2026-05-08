@@ -23,7 +23,7 @@ use super::session::{SessionShutdownReason, SessionSupervisor};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CycleOutcome {
-    Completed { iters: u32 },
+    Completed { iters: u32, cycle_id: uuid::Uuid },
     Failed { meta: FailureMeta },
 }
 
@@ -166,7 +166,7 @@ pub async fn run_cycle(
                             payload,
                         } => {
                             ctx.set_pre(payload);
-                            break 'cycle Ok(CycleOutcome::Completed { iters: iter });
+                            break 'cycle Ok(CycleOutcome::Completed { iters: iter, cycle_id });
                         }
                         PhaseOutcome::PreDirective {
                             directive: PreDirective::Run,
@@ -313,7 +313,7 @@ pub async fn run_cycle(
 
             match next {
                 PostDirective::End => {
-                    break 'cycle Ok(CycleOutcome::Completed { iters: iter });
+                    break 'cycle Ok(CycleOutcome::Completed { iters: iter, cycle_id });
                 }
                 PostDirective::Pre => {
                     if iter == max_iter {
@@ -600,7 +600,7 @@ mod tests {
         let r = rule(Some(PhaseBody::InlineCmd { cmd: "true".into() }), None);
         let outcome =
             run_cycle(&exec, &admitted(), &r, tmp.path(), &cfg(10), CycleKind::Rule, None).await.unwrap();
-        assert_eq!(outcome, CycleOutcome::Completed { iters: 1 });
+        assert!(matches!(outcome, CycleOutcome::Completed { iters: 1, .. }));
         let calls = exec.calls.lock().unwrap().clone();
         assert_eq!(calls, vec![(1, PhaseKind::Pre)]);
     }
@@ -637,7 +637,7 @@ mod tests {
         );
         let outcome =
             run_cycle(&exec, &admitted(), &r, tmp.path(), &cfg(10), CycleKind::Rule, None).await.unwrap();
-        assert_eq!(outcome, CycleOutcome::Completed { iters: 1 });
+        assert!(matches!(outcome, CycleOutcome::Completed { iters: 1, .. }));
     }
 
     #[tokio::test]
@@ -665,7 +665,7 @@ mod tests {
         );
         let outcome =
             run_cycle(&exec, &admitted(), &r, tmp.path(), &cfg(10), CycleKind::Rule, None).await.unwrap();
-        assert_eq!(outcome, CycleOutcome::Completed { iters: 2 });
+        assert!(matches!(outcome, CycleOutcome::Completed { iters: 2, .. }));
         let calls = exec.calls.lock().unwrap().clone();
         let pre_iter2 = calls.iter().find(|(i, k)| *i == 2 && *k == PhaseKind::Pre);
         assert!(pre_iter2.is_none(), "iter 2 pre must be skipped, calls: {calls:?}");
@@ -709,7 +709,7 @@ mod tests {
         let r = rule(None, None);
         let outcome =
             run_cycle(&exec, &admitted(), &r, tmp.path(), &cfg(10), CycleKind::Rule, None).await.unwrap();
-        assert_eq!(outcome, CycleOutcome::Completed { iters: 1 });
+        assert!(matches!(outcome, CycleOutcome::Completed { iters: 1, .. }));
     }
 
     #[tokio::test]
@@ -725,7 +725,7 @@ mod tests {
         let r = rule(None, Some(PhaseBody::InlineCmd { cmd: "true".into() }));
         let outcome =
             run_cycle(&exec, &admitted(), &r, tmp.path(), &cfg(10), CycleKind::Rule, None).await.unwrap();
-        assert_eq!(outcome, CycleOutcome::Completed { iters: 1 });
+        assert!(matches!(outcome, CycleOutcome::Completed { iters: 1, .. }));
     }
 
     #[tokio::test]
@@ -785,7 +785,7 @@ mod tests {
         );
         let outcome =
             run_cycle(&exec, &admitted(), &r, tmp.path(), &cfg(10), CycleKind::Rule, None).await.unwrap();
-        assert_eq!(outcome, CycleOutcome::Completed { iters: 2 });
+        assert!(matches!(outcome, CycleOutcome::Completed { iters: 2, .. }));
         let calls = exec.calls.lock().unwrap().clone();
         let pre_iter2 = calls.iter().find(|(i, k)| *i == 2 && *k == PhaseKind::Pre);
         assert!(pre_iter2.is_some(), "iter 2 pre must run after PostDirective::Pre, calls: {calls:?}");

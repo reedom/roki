@@ -109,7 +109,7 @@ pub(crate) async fn run_inner(config_path: &Path) -> Result<(), SkeletonError> {
     // 6. Pipeline loop. Each iteration drains one POST; admission rejection
     //    and dispatch no-match re-arm the loop. The first match locks the
     //    cycle and breaks out into the cycle-bound stage below.
-    let (admitted, cycle_kind, dispatched) = loop {
+    let (admitted, _cycle_kind, dispatched) = loop {
         let Some(ticket) = rx.recv().await else {
             // Sender side dropped without ever delivering a ticket. The
             // listener task either failed to bind or exited prematurely;
@@ -176,70 +176,170 @@ pub(crate) async fn run_inner(config_path: &Path) -> Result<(), SkeletonError> {
     cycle_started.store(true, Ordering::Release);
     drop(rx);
 
+    let mut events = crate::events::EventWriter::open(&cfg.paths.session_root, &admitted.ticket.id)
+        .map_err(|e| {
+            SkeletonError::Capture(crate::error::CaptureError::OpenFile {
+                path: crate::events::events_path(&cfg.paths.session_root, &admitted.ticket.id),
+                source: e,
+            })
+        })?;
+
     let executor = crate::engine::CommandPhaseExecutor {
         default_cli: cfg.default_ai_command.cli.clone(),
         stall: crate::engine::phase::StallWindow::CommandDefault(
             cfg.default_ai_command.stall_seconds,
         ),
     };
-    let outcome = match dispatched {
-        DispatchedEntry::Rule(rule) => crate::engine::run_cycle(
-            &executor,
-            &admitted,
-            &rule,
-            &cfg.paths.session_root,
-            &cfg,
-            cycle_kind,
-            None,
-        )
-        .await?,
-        DispatchedEntry::Cleanup(_) => unimplemented!("cleanup cycle wired in Task 14"),
-        DispatchedEntry::Shorthand => unimplemented!("shorthand wired in Task 14"),
+
+    enum CycleOutcomeOrShortcircuit {
+        Cycle {
+            kind: crate::engine::outcome::CycleKind,
+            outcome: crate::engine::CycleOutcome,
+        },
+        Shorthand,
+    }
+
+    let cycle_outcome_result: CycleOutcomeOrShortcircuit = match dispatched {
+        DispatchedEntry::Rule(rule) => {
+            let outcome = crate::engine::run_cycle(
+                &executor,
+                &admitted,
+                &rule,
+                &cfg.paths.session_root,
+                &cfg,
+                crate::engine::outcome::CycleKind::Rule,
+                None,
+            )
+            .await?;
+            CycleOutcomeOrShortcircuit::Cycle {
+                kind: crate::engine::outcome::CycleKind::Rule,
+                outcome,
+            }
+        }
+        DispatchedEntry::Cleanup(cleanup) => {
+            let rule_view = cleanup_to_rule(&cleanup);
+            let outcome = crate::engine::run_cycle(
+                &executor,
+                &admitted,
+                &rule_view,
+                &cfg.paths.session_root,
+                &cfg,
+                crate::engine::outcome::CycleKind::Cleanup,
+                None,
+            )
+            .await?;
+            CycleOutcomeOrShortcircuit::Cycle {
+                kind: crate::engine::outcome::CycleKind::Cleanup,
+                outcome,
+            }
+        }
+        DispatchedEntry::Shorthand => {
+            crate::engine::cleanup::delete_immediate(
+                &admitted.ticket.id,
+                &cfg.paths.session_root,
+                &mut events,
+            )
+            .map_err(|e| {
+                SkeletonError::Capture(crate::error::CaptureError::Write {
+                    path: events.path().to_path_buf(),
+                    source: std::io::Error::other(e),
+                })
+            })?;
+            CycleOutcomeOrShortcircuit::Shorthand
+        }
     };
 
     // 8. Graceful shutdown.
     let _ = shutdown_tx.send(());
     let listener_result = listener_handle.await;
 
-    // Cycle failures terminate the binary with exit 1.
-    match outcome {
-        crate::engine::CycleOutcome::Completed { .. } => match listener_result {
-            Ok(Ok(())) => Ok(()),
-            Ok(Err(err)) => Err(SkeletonError::Webhook(err)),
-            Err(join_err) => Err(SkeletonError::Webhook(WebhookError::BindFailed {
-                addr: addr.to_string(),
-                source: std::io::Error::other(join_err),
-            })),
-        },
-        crate::engine::CycleOutcome::Failed { meta } => {
-            tracing::error!(
-                failure_kind = %meta.kind.as_str(),
-                phase = %meta.phase.as_str(),
-                iter = meta.iter,
-                "cycle failed"
-            );
+    match cycle_outcome_result {
+        CycleOutcomeOrShortcircuit::Shorthand => {
+            // delete_immediate already emitted both events. Exit 0.
             match listener_result {
-                Ok(Ok(())) => {}
-                Ok(Err(err)) => {
-                    tracing::error!(
-                        error = %err,
-                        "webhook listener errored after cycle failure"
-                    );
+                Ok(Ok(())) => Ok(()),
+                Ok(Err(err)) => Err(SkeletonError::Webhook(err)),
+                Err(join_err) => Err(SkeletonError::Webhook(WebhookError::BindFailed {
+                    addr: addr.to_string(),
+                    source: std::io::Error::other(join_err),
+                })),
+            }
+        }
+        CycleOutcomeOrShortcircuit::Cycle { kind, outcome } => match outcome {
+            crate::engine::CycleOutcome::Completed { iters, cycle_id } => {
+                let _ = events.emit(&crate::events::Event::CycleCompleted {
+                    ts: crate::events::now_rfc3339(),
+                    cycle_id: cycle_id.to_string(),
+                    cycle_kind: kind.as_str().to_string(),
+                    iters,
+                    outcome: None,
+                });
+                if kind == crate::engine::outcome::CycleKind::Cleanup {
+                    crate::engine::cleanup::post_cycle_delete(
+                        &admitted.ticket.id,
+                        &cfg.paths.session_root,
+                        cycle_id,
+                        &mut events,
+                    )
+                    .map_err(|e| {
+                        SkeletonError::Capture(crate::error::CaptureError::Write {
+                            path: events.path().to_path_buf(),
+                            source: std::io::Error::other(e),
+                        })
+                    })?;
                 }
-                Err(join_err) => {
-                    tracing::error!(
-                        error = %join_err,
-                        "webhook listener task panicked after cycle failure"
-                    );
+                match listener_result {
+                    Ok(Ok(())) => Ok(()),
+                    Ok(Err(err)) => Err(SkeletonError::Webhook(err)),
+                    Err(join_err) => Err(SkeletonError::Webhook(WebhookError::BindFailed {
+                        addr: addr.to_string(),
+                        source: std::io::Error::other(join_err),
+                    })),
                 }
             }
-            Err(SkeletonError::PhaseInfra(
-                crate::error::PhaseInfraError::CycleFailed {
-                    kind: meta.kind,
-                    iter: meta.iter,
-                },
-            ))
-        }
+            crate::engine::CycleOutcome::Failed { meta } => {
+                tracing::error!(
+                    failure_kind = %meta.kind.as_str(),
+                    phase = %meta.phase.as_str(),
+                    iter = meta.iter,
+                    "cycle failed"
+                );
+                match listener_result {
+                    Ok(Ok(())) => {}
+                    Ok(Err(err)) => {
+                        tracing::error!(
+                            error = %err,
+                            "webhook listener errored after cycle failure"
+                        );
+                    }
+                    Err(join_err) => {
+                        tracing::error!(
+                            error = %join_err,
+                            "webhook listener task panicked after cycle failure"
+                        );
+                    }
+                }
+                Err(SkeletonError::PhaseInfra(
+                    crate::error::PhaseInfraError::CycleFailed {
+                        kind: meta.kind,
+                        iter: meta.iter,
+                    },
+                ))
+            }
+        },
+    }
+}
+
+/// Convert a `Cleanup` entry into a `Rule` view for `run_cycle`.
+/// Only called for non-shorthand cleanup entries; `run` is present by
+/// parser invariant (`WorkflowError::CleanupMissingRun` guards the load).
+fn cleanup_to_rule(c: &crate::config::workflow::Cleanup) -> crate::config::workflow::Rule {
+    crate::config::workflow::Rule {
+        when_status: c.when_status.clone().unwrap_or_default(),
+        when_labels_has_all: c.when_labels_has_all.clone(),
+        pre: c.pre.clone(),
+        run: c.run.clone().expect("non-shorthand cleanup has run"),
+        post: c.post.clone(),
     }
 }
 
