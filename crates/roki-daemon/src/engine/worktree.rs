@@ -16,6 +16,7 @@
 #![allow(dead_code)]
 
 use std::path::PathBuf;
+use tokio::process::Command;
 
 #[derive(Debug, thiserror::Error)]
 pub enum WorktreeError {
@@ -78,7 +79,6 @@ pub async fn ensure(ghq: &str, ticket_id: &str) -> Result<PathBuf, WorktreeError
 }
 
 async fn wt_switch_create(ticket_id: &str) -> Result<PathBuf, WorktreeError> {
-    use tokio::process::Command;
     let bin = wt_bin();
     let out = Command::new(&bin)
         .arg("switch-create")
@@ -100,12 +100,15 @@ async fn wt_switch_create(ticket_id: &str) -> Result<PathBuf, WorktreeError> {
         Some(p) => Ok(p),
         None => Err(WorktreeError::SwitchCreateFailed {
             stderr: "wt switch-create succeeded but worktree not found by wt list".to_string(),
-            exit_code: out.status.code(),
+            exit_code: None,
         }),
     }
 }
 
-pub async fn exists(_ghq: &str, ticket_id: &str) -> Result<Option<PathBuf>, WorktreeError> {
+pub async fn exists(ghq: &str, ticket_id: &str) -> Result<Option<PathBuf>, WorktreeError> {
+    // Currently unused: `wt list` is global and override-mode is path-only.
+    // Task 6 path-safety canonicalize will consume it via the ghq base path.
+    let _ = ghq;
     if let Some(root) = std::env::var_os("ROKI_WT_ROOT_OVERRIDE") {
         let path = PathBuf::from(root).join(ticket_id);
         return Ok(if path.is_dir() { Some(path) } else { None });
@@ -122,7 +125,6 @@ fn wt_bin() -> std::ffi::OsString {
 /// `<branch>` followed by whitespace-separated metadata whose first field
 /// is the absolute path. Branch name = ticket id verbatim per fr:05 line 36.
 async fn wt_list_find(ticket_id: &str) -> Result<Option<PathBuf>, WorktreeError> {
-    use tokio::process::Command;
     let bin = wt_bin();
     let out = Command::new(&bin)
         .arg("list")
