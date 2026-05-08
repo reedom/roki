@@ -1,0 +1,444 @@
+#![allow(dead_code)]
+
+//! Per-ticket actor (slice 5).
+//!
+//! Each admitted ticket gets one `tokio::task` running this loop. The
+//! task reads webhooks from a capacity-1 mpsc inbox, dispatches against
+//! the current cache snapshot, runs one cycle at a time, and re-arms
+//! against `pending_recheck` after each cycle terminates. The task exits
+//! on cleanup-cycle eviction or on `DispatchMsg::Shutdown`.
+
+use std::path::PathBuf;
+use std::sync::Arc;
+
+use tokio::sync::mpsc;
+use uuid::Uuid;
+
+use crate::admission::AdmittedTicket;
+use crate::config::roki::RokiConfig;
+use crate::config::workflow::WorkflowConfig;
+use crate::daemon::cache::DiffCache;
+use crate::engine::dispatch::{DispatchMode, DispatchTarget, evaluate_from_cache};
+use crate::engine::outcome::CycleKind;
+
+/// Message carried on a ticket task's inbox.
+#[derive(Debug)]
+pub enum DispatchMsg {
+    Webhook(AdmittedTicket),
+    Shutdown,
+}
+
+/// Outcome of one ticket-task loop iteration. Returned by the inner step
+/// function so the test harness can assert against the decision the task
+/// took without reading the full event log.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StepOutcome {
+    Dispatched { kind: CycleKind, evicted: bool },
+    NoMatch,
+    QueuedPending,
+    Shutdown,
+}
+
+/// Trait the ticket task uses to invoke a cycle. Production wires this to
+/// `engine::cycle::run_cycle` via `RealCycleRunner` (Task 8); unit tests
+/// substitute a mock to exercise the loop deterministically.
+#[async_trait::async_trait]
+pub trait CycleRunner: Send + Sync {
+    async fn run_cycle(
+        &self,
+        admitted: &AdmittedTicket,
+        target: DispatchTarget<'_>,
+        cycle_id: Uuid,
+    ) -> CycleResult;
+}
+
+#[derive(Debug, Clone)]
+pub enum CycleResult {
+    Completed {
+        kind: CycleKind,
+        iters: u32,
+    },
+    Failed {
+        meta: crate::engine::outcome::FailureMeta,
+        kind: CycleKind,
+    },
+    /// Cleanup-shorthand path — the runner already performed the
+    /// immediate-delete side effect.
+    ShorthandDeleted,
+}
+
+/// Run the ticket-task loop until `inbox` closes or `Shutdown` arrives.
+/// Tests instantiate this with a mock runner.
+#[allow(clippy::too_many_arguments)]
+pub async fn run_ticket_task<R: CycleRunner>(
+    ticket_id: String,
+    cache: Arc<DiffCache>,
+    workflow: Arc<WorkflowConfig>,
+    cfg: Arc<RokiConfig>,
+    mode: DispatchMode,
+    runner: Arc<R>,
+    mut inbox: mpsc::Receiver<DispatchMsg>,
+    inbox_self: mpsc::Sender<DispatchMsg>,
+    session_root: PathBuf,
+) {
+    while let Some(msg) = inbox.recv().await {
+        let outcome = match msg {
+            DispatchMsg::Shutdown => StepOutcome::Shutdown,
+            DispatchMsg::Webhook(admitted) => {
+                step_once(
+                    &ticket_id,
+                    admitted,
+                    cache.clone(),
+                    workflow.clone(),
+                    cfg.clone(),
+                    mode,
+                    runner.clone(),
+                    &inbox_self,
+                    &session_root,
+                )
+                .await
+            }
+        };
+
+        if matches!(
+            outcome,
+            StepOutcome::Shutdown | StepOutcome::Dispatched { evicted: true, .. }
+        ) {
+            break;
+        }
+    }
+}
+
+/// One iteration of the ticket-task loop. Extracted so unit tests can
+/// drive it directly without spawning a task or wiring an mpsc pair.
+#[allow(clippy::too_many_arguments)]
+pub async fn step_once<R: CycleRunner>(
+    ticket_id: &str,
+    _admitted_in: AdmittedTicket,
+    cache: Arc<DiffCache>,
+    workflow: Arc<WorkflowConfig>,
+    _cfg: Arc<RokiConfig>,
+    mode: DispatchMode,
+    runner: Arc<R>,
+    inbox_self: &mpsc::Sender<DispatchMsg>,
+    _session_root: &std::path::Path,
+) -> StepOutcome {
+    // The dispatcher already updated the cache via `cache.observe`. We
+    // re-snapshot here because additional webhooks may have arrived
+    // between the dispatcher's send and the ticket task's recv.
+    let snapshot = match cache.snapshot(ticket_id).await {
+        Some(s) => s,
+        None => return StepOutcome::NoMatch,
+    };
+
+    let target = evaluate_from_cache(ticket_id, &snapshot, &workflow, mode);
+    let (kind, target_owned) = match target {
+        DispatchTarget::NoMatch => return StepOutcome::NoMatch,
+        DispatchTarget::CleanupShorthand => (CycleKind::Cleanup, DispatchTarget::CleanupShorthand),
+        DispatchTarget::Cycle {
+            kind,
+            rule,
+            cleanup,
+        } => (
+            kind,
+            DispatchTarget::Cycle {
+                kind,
+                rule,
+                cleanup,
+            },
+        ),
+    };
+
+    let synthetic = synthesize_admitted(ticket_id, &snapshot);
+    let cycle_id = Uuid::new_v4();
+    cache.set_cycle_id(ticket_id, cycle_id).await;
+    let result = runner.run_cycle(&synthetic, target_owned, cycle_id).await;
+    cache.clear_cycle_id(ticket_id).await;
+
+    let evicted = matches!(
+        &result,
+        CycleResult::Completed {
+            kind: CycleKind::Cleanup,
+            ..
+        } | CycleResult::ShorthandDeleted
+    );
+
+    if evicted {
+        cache.evict(ticket_id).await;
+        return StepOutcome::Dispatched {
+            kind,
+            evicted: true,
+        };
+    }
+
+    if cache.take_pending_recheck(ticket_id).await {
+        if let Some(snap2) = cache.snapshot(ticket_id).await {
+            let refreshed = synthesize_admitted(ticket_id, &snap2);
+            // Ignore Full/Closed: Full means an already-queued webhook
+            // will trigger the re-eval; Closed means the task is exiting
+            // anyway.
+            let _ = inbox_self.try_send(DispatchMsg::Webhook(refreshed));
+        }
+        return StepOutcome::QueuedPending;
+    }
+
+    StepOutcome::Dispatched {
+        kind,
+        evicted: false,
+    }
+}
+
+fn synthesize_admitted(ticket_id: &str, snap: &crate::daemon::cache::CacheEntry) -> AdmittedTicket {
+    AdmittedTicket {
+        ticket: crate::linear::ticket::NormalizedTicket::new(
+            ticket_id.into(),
+            Some(snap.assignee.clone()),
+            snap.status.clone(),
+            snap.labels.iter().cloned().collect(),
+            String::new(),
+            String::new(),
+        ),
+        ghq: snap.repo.clone(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Mutex as StdMutex;
+    use tempfile::TempDir;
+
+    use crate::config::workflow::{AdmissionRepo, AdmissionSection, Cleanup, Rule, WorkflowConfig};
+    use crate::engine::outcome::PhaseBody;
+
+    struct MockCycleRunner {
+        next: StdMutex<Vec<CycleResult>>,
+        invocations: StdMutex<u32>,
+    }
+
+    #[async_trait::async_trait]
+    impl CycleRunner for MockCycleRunner {
+        async fn run_cycle(
+            &self,
+            _a: &AdmittedTicket,
+            _t: DispatchTarget<'_>,
+            _id: Uuid,
+        ) -> CycleResult {
+            *self.invocations.lock().unwrap() += 1;
+            self.next
+                .lock()
+                .unwrap()
+                .pop()
+                .unwrap_or(CycleResult::Completed {
+                    kind: CycleKind::Rule,
+                    iters: 1,
+                })
+        }
+    }
+
+    fn workflow_with_rule(status: &str) -> WorkflowConfig {
+        WorkflowConfig {
+            admission: AdmissionSection {
+                assignee: "u1".into(),
+            },
+            repo: Some(AdmissionRepo {
+                ghq: "github.com/example/repo".into(),
+            }),
+            rules: vec![Rule {
+                when_status: status.into(),
+                when_labels_has_all: vec![],
+                pre: None,
+                run: PhaseBody::InlineCmd { cmd: "true".into() },
+                post: None,
+            }],
+            cleanups: vec![],
+            on_failures: vec![],
+        }
+    }
+
+    fn workflow_with_cleanup(status: &str) -> WorkflowConfig {
+        WorkflowConfig {
+            admission: AdmissionSection {
+                assignee: "u1".into(),
+            },
+            repo: Some(AdmissionRepo {
+                ghq: "github.com/example/repo".into(),
+            }),
+            rules: vec![],
+            cleanups: vec![Cleanup {
+                when_status: Some(status.into()),
+                when_labels_has_all: vec![],
+                pre: None,
+                run: Some(PhaseBody::InlineCmd { cmd: "true".into() }),
+                post: None,
+            }],
+            on_failures: vec![],
+        }
+    }
+
+    fn admitted(id: &str, status: &str) -> AdmittedTicket {
+        AdmittedTicket {
+            ticket: crate::linear::ticket::NormalizedTicket::new(
+                id.into(),
+                Some("u1".into()),
+                status.into(),
+                vec![],
+                String::new(),
+                String::new(),
+            ),
+            ghq: "github.com/example/repo".into(),
+        }
+    }
+
+    fn cfg_for(path: &std::path::Path) -> Arc<RokiConfig> {
+        Arc::new(RokiConfig::test_default(path))
+    }
+
+    #[tokio::test]
+    async fn dispatch_on_first_webhook_runs_cycle() {
+        let work = TempDir::new().unwrap();
+        let cache = Arc::new(DiffCache::new());
+        let wf = Arc::new(workflow_with_rule("InProgress"));
+        let runner = Arc::new(MockCycleRunner {
+            next: StdMutex::new(vec![CycleResult::Completed {
+                kind: CycleKind::Rule,
+                iters: 1,
+            }]),
+            invocations: StdMutex::new(0),
+        });
+
+        let a = admitted("t1", "InProgress");
+        cache.observe(&a).await;
+
+        let (tx, _rx) = mpsc::channel(1);
+        let outcome = step_once(
+            "t1",
+            a,
+            cache.clone(),
+            wf,
+            cfg_for(work.path()),
+            DispatchMode::Default,
+            runner.clone(),
+            &tx,
+            work.path(),
+        )
+        .await;
+
+        assert!(matches!(
+            outcome,
+            StepOutcome::Dispatched {
+                kind: CycleKind::Rule,
+                evicted: false
+            }
+        ));
+        assert_eq!(*runner.invocations.lock().unwrap(), 1);
+    }
+
+    #[tokio::test]
+    async fn cleanup_completion_evicts_cache_entry() {
+        let work = TempDir::new().unwrap();
+        let cache = Arc::new(DiffCache::new());
+        let wf = Arc::new(workflow_with_cleanup("Done"));
+        let runner = Arc::new(MockCycleRunner {
+            next: StdMutex::new(vec![CycleResult::Completed {
+                kind: CycleKind::Cleanup,
+                iters: 1,
+            }]),
+            invocations: StdMutex::new(0),
+        });
+
+        let a = admitted("t1", "Done");
+        cache.observe(&a).await;
+
+        let (tx, _rx) = mpsc::channel(1);
+        let outcome = step_once(
+            "t1",
+            a,
+            cache.clone(),
+            wf,
+            cfg_for(work.path()),
+            DispatchMode::Default,
+            runner,
+            &tx,
+            work.path(),
+        )
+        .await;
+
+        assert!(matches!(
+            outcome,
+            StepOutcome::Dispatched {
+                kind: CycleKind::Cleanup,
+                evicted: true
+            }
+        ));
+        assert!(cache.snapshot("t1").await.is_none());
+    }
+
+    #[tokio::test]
+    async fn pending_recheck_loops_back_via_inbox() {
+        let work = TempDir::new().unwrap();
+        let cache = Arc::new(DiffCache::new());
+        let wf = Arc::new(workflow_with_rule("InProgress"));
+        let runner = Arc::new(MockCycleRunner {
+            next: StdMutex::new(vec![CycleResult::Completed {
+                kind: CycleKind::Rule,
+                iters: 1,
+            }]),
+            invocations: StdMutex::new(0),
+        });
+
+        let a = admitted("t1", "InProgress");
+        cache.observe(&a).await;
+        cache.set_pending_recheck("t1").await;
+
+        let (tx, mut rx) = mpsc::channel(1);
+        let outcome = step_once(
+            "t1",
+            a,
+            cache.clone(),
+            wf,
+            cfg_for(work.path()),
+            DispatchMode::Default,
+            runner,
+            &tx,
+            work.path(),
+        )
+        .await;
+
+        assert!(matches!(outcome, StepOutcome::QueuedPending));
+        let queued = rx.try_recv().expect("loop-back msg present");
+        assert!(matches!(queued, DispatchMsg::Webhook(_)));
+        assert!(!cache.snapshot("t1").await.unwrap().pending_recheck);
+    }
+
+    #[tokio::test]
+    async fn no_match_returns_no_match() {
+        let work = TempDir::new().unwrap();
+        let cache = Arc::new(DiffCache::new());
+        let wf = Arc::new(workflow_with_rule("InProgress"));
+        let runner = Arc::new(MockCycleRunner {
+            next: StdMutex::new(vec![]),
+            invocations: StdMutex::new(0),
+        });
+
+        let a = admitted("t1", "Triage");
+        cache.observe(&a).await;
+
+        let (tx, _rx) = mpsc::channel(1);
+        let outcome = step_once(
+            "t1",
+            a,
+            cache,
+            wf,
+            cfg_for(work.path()),
+            DispatchMode::Default,
+            runner.clone(),
+            &tx,
+            work.path(),
+        )
+        .await;
+
+        assert_eq!(outcome, StepOutcome::NoMatch);
+        assert_eq!(*runner.invocations.lock().unwrap(), 0);
+    }
+}

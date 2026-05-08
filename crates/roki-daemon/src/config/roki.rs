@@ -174,6 +174,40 @@ impl RokiConfig {
 
         raw_cfg.validate(path)
     }
+
+    /// Build the smallest legal `RokiConfig` for unit tests.
+    ///
+    /// Mirrors the canonical TOML shape used by slice 1-4 e2e fixtures:
+    /// every required section populated with placeholder values rooted at
+    /// `session_root`. The returned config is suitable for tests that
+    /// thread a config through code paths but do not actually consume any
+    /// of its fields beyond construction.
+    ///
+    /// `#[cfg(test)]` so production code cannot reach the helper.
+    #[cfg(test)]
+    pub fn test_default(session_root: &Path) -> Self {
+        Self {
+            linear: LinearSection {
+                token: "x".to_string(),
+            },
+            linear_webhook: LinearWebhookSection {
+                bind: "127.0.0.1".to_string(),
+                port: 0,
+                secret: None,
+            },
+            default_ai_command: DefaultAiCommandSection {
+                cli: "echo".to_string(),
+                stall_seconds: 300,
+            },
+            engine: EngineSection::default(),
+            paths: PathsSection {
+                workflow: session_root.join("WORKFLOW.toml"),
+                session_root: session_root.to_path_buf(),
+            },
+            log: LogSection::default(),
+            default_ai_session: None,
+        }
+    }
 }
 
 // ---------- Permissive raw shape for staged validation ----------
@@ -398,6 +432,15 @@ mod tests {
         let mut f = std::fs::File::create(&path).expect("create toml");
         f.write_all(body.as_bytes()).expect("write toml");
         path
+    }
+
+    #[test]
+    fn test_default_yields_legal_engine_section() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let cfg = RokiConfig::test_default(dir.path());
+        assert!(cfg.engine.max_iterations >= 1);
+        assert_eq!(cfg.paths.session_root, dir.path());
+        assert_eq!(cfg.linear_webhook.bind, "127.0.0.1");
     }
 
     const HAPPY_PATH_TOML: &str = r#"
