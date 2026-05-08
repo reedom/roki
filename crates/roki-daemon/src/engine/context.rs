@@ -70,7 +70,12 @@ pub struct PhaseContext {
 }
 
 impl PhaseContext {
-    pub fn new(admitted: &AdmittedTicket, cycle_id: Uuid, cfg: &RokiConfig) -> Self {
+    pub fn new(
+        admitted: &AdmittedTicket,
+        cycle_id: Uuid,
+        cfg: &RokiConfig,
+        cycle_kind: crate::engine::outcome::CycleKind,
+    ) -> Self {
         Self {
             ticket: TicketView::from(&admitted.ticket),
             repo: RepoView {
@@ -78,7 +83,7 @@ impl PhaseContext {
             },
             cycle: CycleView {
                 id: cycle_id.to_string(),
-                kind: "rule",
+                kind: cycle_kind.as_str(),
                 trigger: "runtime",
                 iter: 0,
             },
@@ -274,7 +279,7 @@ mod tests {
 
     #[test]
     fn env_pairs_include_ticket_repo_cycle_config_at_iter_zero() {
-        let ctx = PhaseContext::new(&admitted(), Uuid::nil(), &cfg(7));
+        let ctx = PhaseContext::new(&admitted(), Uuid::nil(), &cfg(7), crate::engine::outcome::CycleKind::Rule);
         let pairs = roki_env_pairs(&ctx);
         assert!(pairs.iter().any(|(k, v)| k == "ROKI_TICKET_ID" && v == "ENG-1"));
         assert!(pairs.iter().any(|(k, v)| k == "ROKI_REPO" && v == "github.com/acme/widget"));
@@ -287,7 +292,7 @@ mod tests {
 
     #[test]
     fn env_pairs_export_pre_top_level_scalars_only() {
-        let mut ctx = PhaseContext::new(&admitted(), Uuid::nil(), &cfg(10));
+        let mut ctx = PhaseContext::new(&admitted(), Uuid::nil(), &cfg(10), crate::engine::outcome::CycleKind::Rule);
         ctx.set_pre(serde_json::json!({
             "directive": "run",
             "outcome": "success",
@@ -309,7 +314,7 @@ mod tests {
 
     #[test]
     fn env_pairs_skip_keys_with_non_ascii_chars() {
-        let mut ctx = PhaseContext::new(&admitted(), Uuid::nil(), &cfg(10));
+        let mut ctx = PhaseContext::new(&admitted(), Uuid::nil(), &cfg(10), crate::engine::outcome::CycleKind::Rule);
         ctx.set_pre(serde_json::json!({
             "directive": "run",
             "my-field": "x", // hyphen — uppercase is "MY-FIELD", '-' is not legal.
@@ -322,7 +327,7 @@ mod tests {
 
     #[test]
     fn env_pairs_export_run_exit_code_and_duration() {
-        let mut ctx = PhaseContext::new(&admitted(), Uuid::nil(), &cfg(10));
+        let mut ctx = PhaseContext::new(&admitted(), Uuid::nil(), &cfg(10), crate::engine::outcome::CycleKind::Rule);
         ctx.set_run(7, 42, None);
         let pairs = roki_env_pairs(&ctx);
         assert!(pairs.iter().any(|(k, v)| k == "ROKI_RUN_EXIT_CODE" && v == "7"));
@@ -331,7 +336,7 @@ mod tests {
 
     #[test]
     fn run_terminal_exposed_via_liquid() {
-        let mut ctx = PhaseContext::new(&admitted(), Uuid::nil(), &cfg(10));
+        let mut ctx = PhaseContext::new(&admitted(), Uuid::nil(), &cfg(10), crate::engine::outcome::CycleKind::Rule);
         let terminal = serde_json::json!({"is_error": false, "result": "ok"});
         ctx.set_run(0, 12, Some(terminal));
         let rendered = crate::engine::template::render_str(
@@ -344,7 +349,7 @@ mod tests {
 
     #[test]
     fn run_terminal_clears_between_iters() {
-        let mut ctx = PhaseContext::new(&admitted(), Uuid::nil(), &cfg(10));
+        let mut ctx = PhaseContext::new(&admitted(), Uuid::nil(), &cfg(10), crate::engine::outcome::CycleKind::Rule);
         ctx.set_run(0, 1, Some(serde_json::json!({"is_error": false})));
         ctx.set_iter(2);
         let rendered =
@@ -354,7 +359,7 @@ mod tests {
 
     #[test]
     fn liquid_object_carries_ticket_repo_and_cycle_iter() {
-        let mut ctx = PhaseContext::new(&admitted(), Uuid::nil(), &cfg(10));
+        let mut ctx = PhaseContext::new(&admitted(), Uuid::nil(), &cfg(10), crate::engine::outcome::CycleKind::Rule);
         ctx.set_iter(3);
         let obj = to_liquid_object(&ctx);
         // Values are nested liquid Objects; project to JSON for cheap assertions.
@@ -363,5 +368,15 @@ mod tests {
         assert_eq!(json["repo"]["ghq"], "github.com/acme/widget");
         assert_eq!(json["cycle"]["iter"], 3);
         assert_eq!(json["config"]["max_iterations"], 10);
+    }
+
+    #[test]
+    fn phase_context_cycle_kind_failure() {
+        use crate::engine::outcome::CycleKind;
+        let ctx = PhaseContext::new(&admitted(), uuid::Uuid::nil(), &cfg(5), CycleKind::Failure);
+        assert_eq!(ctx.cycle.kind, "failure");
+
+        let env: Vec<(String, String)> = roki_env_pairs(&ctx).into_iter().collect();
+        assert!(env.iter().any(|(k, v)| k == "ROKI_CYCLE_KIND" && v == "failure"));
     }
 }

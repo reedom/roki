@@ -164,6 +164,8 @@ pub(crate) async fn run_inner(config_path: &Path) -> Result<(), SkeletonError> {
         &matched_rule,
         &cfg.paths.session_root,
         &cfg,
+        crate::engine::outcome::CycleKind::Rule,
+        None,
     )
     .await?;
 

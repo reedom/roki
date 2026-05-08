@@ -15,8 +15,8 @@ use crate::error::{CaptureError, PhaseInfraError};
 
 use super::context::PhaseContext;
 use super::outcome::{
-    FailureKind, FailureMeta, PhaseBody, PhaseKind, PhaseOutcome, PhaseShape, PostDirective,
-    PreDirective,
+    CycleKind, FailureKind, FailureMeta, PhaseBody, PhaseKind, PhaseOutcome, PhaseShape,
+    PostDirective, PreDirective,
 };
 use super::phase::PhaseExecutor;
 use super::session::{SessionShutdownReason, SessionSupervisor};
@@ -74,9 +74,12 @@ pub async fn run_cycle(
     rule: &Rule,
     session_root: &Path,
     cfg: &RokiConfig,
+    cycle_kind: CycleKind,
+    failure: Option<FailureMeta>,
 ) -> Result<CycleOutcome, PhaseInfraError> {
+    let _ = failure;
     let cycle_id = Uuid::new_v4();
-    let mut ctx = PhaseContext::new(admitted, cycle_id, cfg);
+    let mut ctx = PhaseContext::new(admitted, cycle_id, cfg, cycle_kind);
     let max_iter = cfg.engine.max_iterations;
     let ticket_id = admitted.ticket.id.clone();
     let mut skip_pre = false;
@@ -594,7 +597,7 @@ mod tests {
         )]);
         let r = rule(Some(PhaseBody::InlineCmd { cmd: "true".into() }), None);
         let outcome =
-            run_cycle(&exec, &admitted(), &r, tmp.path(), &cfg(10)).await.unwrap();
+            run_cycle(&exec, &admitted(), &r, tmp.path(), &cfg(10), CycleKind::Rule, None).await.unwrap();
         assert_eq!(outcome, CycleOutcome::Completed { iters: 1 });
         let calls = exec.calls.lock().unwrap().clone();
         assert_eq!(calls, vec![(1, PhaseKind::Pre)]);
@@ -631,7 +634,7 @@ mod tests {
             Some(PhaseBody::InlineCmd { cmd: "true".into() }),
         );
         let outcome =
-            run_cycle(&exec, &admitted(), &r, tmp.path(), &cfg(10)).await.unwrap();
+            run_cycle(&exec, &admitted(), &r, tmp.path(), &cfg(10), CycleKind::Rule, None).await.unwrap();
         assert_eq!(outcome, CycleOutcome::Completed { iters: 1 });
     }
 
@@ -659,7 +662,7 @@ mod tests {
             Some(PhaseBody::InlineCmd { cmd: "true".into() }),
         );
         let outcome =
-            run_cycle(&exec, &admitted(), &r, tmp.path(), &cfg(10)).await.unwrap();
+            run_cycle(&exec, &admitted(), &r, tmp.path(), &cfg(10), CycleKind::Rule, None).await.unwrap();
         assert_eq!(outcome, CycleOutcome::Completed { iters: 2 });
         let calls = exec.calls.lock().unwrap().clone();
         let pre_iter2 = calls.iter().find(|(i, k)| *i == 2 && *k == PhaseKind::Pre);
@@ -683,7 +686,7 @@ mod tests {
         ]);
         let r = rule(None, Some(PhaseBody::InlineCmd { cmd: "true".into() }));
         let outcome =
-            run_cycle(&exec, &admitted(), &r, tmp.path(), &cfg(2)).await.unwrap();
+            run_cycle(&exec, &admitted(), &r, tmp.path(), &cfg(2), CycleKind::Rule, None).await.unwrap();
         match outcome {
             CycleOutcome::Failed { meta } => {
                 assert_eq!(meta.kind, FailureKind::IterExhausted);
@@ -703,7 +706,7 @@ mod tests {
         )]);
         let r = rule(None, None);
         let outcome =
-            run_cycle(&exec, &admitted(), &r, tmp.path(), &cfg(10)).await.unwrap();
+            run_cycle(&exec, &admitted(), &r, tmp.path(), &cfg(10), CycleKind::Rule, None).await.unwrap();
         assert_eq!(outcome, CycleOutcome::Completed { iters: 1 });
     }
 
@@ -719,7 +722,7 @@ mod tests {
         ]);
         let r = rule(None, Some(PhaseBody::InlineCmd { cmd: "true".into() }));
         let outcome =
-            run_cycle(&exec, &admitted(), &r, tmp.path(), &cfg(10)).await.unwrap();
+            run_cycle(&exec, &admitted(), &r, tmp.path(), &cfg(10), CycleKind::Rule, None).await.unwrap();
         assert_eq!(outcome, CycleOutcome::Completed { iters: 1 });
     }
 
@@ -736,7 +739,7 @@ mod tests {
             PhaseOutcome::RunDone { exit_code: 0, duration_seconds: 0 },
         )]);
         let r = rule(Some(PhaseBody::InlineCmd { cmd: "true".into() }), None);
-        let err = run_cycle(&exec, &admitted(), &r, tmp.path(), &cfg(10))
+        let err = run_cycle(&exec, &admitted(), &r, tmp.path(), &cfg(10), CycleKind::Rule, None)
             .await
             .expect_err("wrong variant must surface as Err");
         match err {
@@ -779,7 +782,7 @@ mod tests {
             Some(PhaseBody::InlineCmd { cmd: "true".into() }),
         );
         let outcome =
-            run_cycle(&exec, &admitted(), &r, tmp.path(), &cfg(10)).await.unwrap();
+            run_cycle(&exec, &admitted(), &r, tmp.path(), &cfg(10), CycleKind::Rule, None).await.unwrap();
         assert_eq!(outcome, CycleOutcome::Completed { iters: 2 });
         let calls = exec.calls.lock().unwrap().clone();
         let pre_iter2 = calls.iter().find(|(i, k)| *i == 2 && *k == PhaseKind::Pre);
@@ -796,7 +799,7 @@ mod tests {
         )]);
         let r = rule(Some(PhaseBody::InlineCmd { cmd: "true".into() }), None);
         let outcome =
-            run_cycle(&exec, &admitted(), &r, tmp.path(), &cfg(10)).await.unwrap();
+            run_cycle(&exec, &admitted(), &r, tmp.path(), &cfg(10), CycleKind::Rule, None).await.unwrap();
         match outcome {
             CycleOutcome::Failed { meta } => {
                 assert_eq!(meta.kind, FailureKind::Unparseable);
@@ -848,7 +851,7 @@ mod tests {
         let bad_root = blocker.as_path();
         let exec = FakeExec::new(vec![]);
         let r = rule(None, None);
-        let outcome = run_cycle(&exec, &admitted(), &r, bad_root, &cfg(10))
+        let outcome = run_cycle(&exec, &admitted(), &r, bad_root, &cfg(10), CycleKind::Rule, None)
             .await
             .unwrap();
         match outcome {
@@ -892,7 +895,7 @@ mod tests {
         let exec = FailingCaptureExec;
         let r = rule(Some(PhaseBody::InlineCmd { cmd: "true".into() }), None);
 
-        let outcome = run_cycle(&exec, &admitted(), &r, tmp.path(), &cfg(10))
+        let outcome = run_cycle(&exec, &admitted(), &r, tmp.path(), &cfg(10), CycleKind::Rule, None)
             .await
             .unwrap();
 

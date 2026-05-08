@@ -455,7 +455,7 @@ mod tests {
     use super::*;
     use crate::admission::AdmittedTicket;
     use crate::config::roki::*;
-    use crate::engine::outcome::PreDirective;
+    use crate::engine::outcome::{CycleKind, PreDirective};
     use crate::linear::ticket::NormalizedTicket;
     use std::path::PathBuf;
     use uuid::Uuid;
@@ -568,7 +568,7 @@ mod tests {
             default_cli: "echo".to_string(),
             cwd: tmp.path().to_path_buf(),
         };
-        let mut ctx = PhaseContext::new(&admitted(), Uuid::nil(), &cfg());
+        let mut ctx = PhaseContext::new(&admitted(), Uuid::nil(), &cfg(), CycleKind::Rule);
         ctx.set_iter(1);
         let body = PhaseBody::InlineCmd { cmd: "printf hello; printf err 1>&2; exit 5".into() };
 
@@ -593,7 +593,7 @@ mod tests {
             default_cli: "echo".to_string(),
             cwd: tmp.path().to_path_buf(),
         };
-        let ctx = PhaseContext::new(&admitted(), Uuid::nil(), &cfg());
+        let ctx = PhaseContext::new(&admitted(), Uuid::nil(), &cfg(), CycleKind::Rule);
         let body = PhaseBody::InlineCmd {
             cmd: r#"printf '{"directive":"run","outcome":"ok"}'"#.to_string(),
         };
@@ -619,7 +619,7 @@ mod tests {
             default_cli: "echo".to_string(),
             cwd: tmp.path().to_path_buf(),
         };
-        let ctx = PhaseContext::new(&admitted(), Uuid::nil(), &cfg());
+        let ctx = PhaseContext::new(&admitted(), Uuid::nil(), &cfg(), CycleKind::Rule);
         let body = PhaseBody::InlineCmd { cmd: r#"printf 'not json'"#.to_string() };
 
         let out = exec.execute(PhaseKind::Pre, &body, &ctx, &iter_dir).await.unwrap();
@@ -636,7 +636,7 @@ mod tests {
         // the env_clear + roki_env_pairs + Command::env loop are exercised.
         let tmp = tempfile::tempdir().unwrap();
         let iter_dir = crate::capture::create_iter_dir(tmp.path(), "ENG-9", Uuid::nil(), 1).unwrap();
-        let mut ctx = PhaseContext::new(&admitted(), Uuid::nil(), &cfg());
+        let mut ctx = PhaseContext::new(&admitted(), Uuid::nil(), &cfg(), CycleKind::Rule);
         ctx.set_iter(1);
         let body = PhaseBody::InlineCmd {
             cmd: r#"printf 'TID=%s|GHQ=%s|ITER=%s' "$ROKI_TICKET_ID" "$ROKI_REPO" "$ROKI_CYCLE_ITER""#
@@ -667,7 +667,7 @@ mod tests {
         // mirrors stdin and we can assert the directive JSON parses through.
         let tmp = tempfile::tempdir().unwrap();
         let iter_dir = crate::capture::create_iter_dir(tmp.path(), "ENG-9", Uuid::nil(), 1).unwrap();
-        let ctx = PhaseContext::new(&admitted(), Uuid::nil(), &cfg());
+        let ctx = PhaseContext::new(&admitted(), Uuid::nil(), &cfg(), CycleKind::Rule);
         let body = PhaseBody::InlinePrompt {
             prompt: r#"{"directive":"run","outcome":"piped"}"#.to_string(),
         };
@@ -696,7 +696,7 @@ mod tests {
         let body_path = tmp.path().join("phase.md");
         std::fs::write(&body_path, workflow_body).unwrap();
 
-        let ctx = PhaseContext::new(&admitted(), Uuid::nil(), &cfg());
+        let ctx = PhaseContext::new(&admitted(), Uuid::nil(), &cfg(), CycleKind::Rule);
         let body = PhaseBody::Path {
             path: body_path.clone(),
             cli_override: Some("cat".to_string()),
@@ -731,7 +731,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let iter_dir = crate::capture::create_iter_dir(tmp.path(), "ENG-9", Uuid::nil(), 1).unwrap();
         let missing = tmp.path().join("does-not-exist.md");
-        let ctx = PhaseContext::new(&admitted(), Uuid::nil(), &cfg());
+        let ctx = PhaseContext::new(&admitted(), Uuid::nil(), &cfg(), CycleKind::Rule);
         let body = PhaseBody::Path {
             path: missing.clone(),
             cli_override: Some("cat".to_string()),
@@ -775,7 +775,7 @@ mod tests {
             cmd: r#"printf '%s\n' '{"type":"thinking"}' '{"type":"result","is_error":false,"result":"ok"}'"#
                 .to_string(),
         };
-        let ctx = PhaseContext::new(&admitted(), Uuid::nil(), &cfg());
+        let ctx = PhaseContext::new(&admitted(), Uuid::nil(), &cfg(), CycleKind::Rule);
         let cwd = tmp.path().to_path_buf();
         let outcome = super::execute_at(
             "echo unused",
@@ -812,7 +812,7 @@ mod tests {
         let body = crate::engine::outcome::PhaseBody::InlineCmd {
             cmd: "echo plain".to_string(),
         };
-        let ctx = PhaseContext::new(&admitted(), Uuid::nil(), &cfg());
+        let ctx = PhaseContext::new(&admitted(), Uuid::nil(), &cfg(), CycleKind::Rule);
         let cwd = tmp.path().to_path_buf();
         let _ = super::execute_at(
             "echo unused",
@@ -843,7 +843,7 @@ mod tests {
         let body = PhaseBody::InlineCmd {
             cmd: "sleep 30".to_string(),
         };
-        let ctx = PhaseContext::new(&admitted(), Uuid::nil(), &cfg());
+        let ctx = PhaseContext::new(&admitted(), Uuid::nil(), &cfg(), CycleKind::Rule);
         let cwd = tmp.path().to_path_buf();
         let outcome = super::execute_at(
             "echo unused",
