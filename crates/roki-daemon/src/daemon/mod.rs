@@ -4,5 +4,6 @@
 //! shutdown coordinator. The cycle engine in `engine::*` is reused
 //! unchanged.
 
+pub mod cache;
 pub mod shutdown;
-// `cache`, `dispatcher`, `ticket_task` are added in subsequent tasks.
+// `dispatcher`, `ticket_task` are added in subsequent tasks.
