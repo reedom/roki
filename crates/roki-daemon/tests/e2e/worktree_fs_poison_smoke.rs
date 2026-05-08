@@ -1,7 +1,8 @@
-//! E2E: a non-shorthand [[cleanup]] entry runs as a cleanup cycle, then
-//! post_cycle_delete removes the ticket dir. Two events emitted in order.
+//! E2E: wt switch-create failure routes through FailureKind::FsPoison and
+//! is matched by [[on_failure]] when.kind = "fs_poison".
 
 use std::net::{SocketAddr, TcpListener};
+use std::path::PathBuf;
 use std::time::Duration;
 
 use tempfile::TempDir;
@@ -11,11 +12,11 @@ use wiremock::matchers::method;
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
 #[tokio::test]
-async fn cleanup_cycle_runs_then_deletes() {
+async fn wt_create_failure_routes_through_on_failure() {
     let port = TcpListener::bind("127.0.0.1:0")
-        .expect("bind ephemeral webhook port")
+        .unwrap()
         .local_addr()
-        .expect("local_addr")
+        .unwrap()
         .port();
 
     let linear = MockServer::start().await;
@@ -26,18 +27,18 @@ async fn cleanup_cycle_runs_then_deletes() {
         .mount(&linear)
         .await;
 
-    let work = TempDir::new().expect("workspace tempdir");
+    let work = TempDir::new().unwrap();
     let session_root = work.path().join("sessions");
     std::fs::create_dir_all(&session_root).unwrap();
 
-    let wt_root = work.path().join("wts");
-    std::fs::create_dir_all(&wt_root).unwrap();
+    let ticket_id = "OPS-400";
 
-    let ticket_id = "ENG-100";
+    let fixture =
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/e2e/fixtures/wt_fail_create.sh");
+    assert!(fixture.is_file(), "fixture script missing: {fixture:?}");
 
     let workflow_path = work.path().join("WORKFLOW.toml");
-    let workflow_body = format!(
-        r#"
+    let workflow_body = r#"
 [admission]
 assignee = "u1"
 
@@ -49,20 +50,19 @@ ghq = "github.com/example/repo"
 status = "in_progress"
 [rule.when.labels]
 has_all = []
+[rule.pre]
+cmd = "printf '{\"directive\":\"run\"}'"
 [rule.run]
 cmd = "true"
 
-[[cleanup]]
-[cleanup.when]
-status = "done"
-[cleanup.when.labels]
-has_all = []
-[cleanup.run]
-cmd = "echo cleanup-run"
-[cleanup.post]
-cmd = "printf '{{\"directive\":\"end\",\"outcome\":\"cleanup_done\"}}'"
-"#
-    );
+[[on_failure]]
+[on_failure.when]
+kind = "fs_poison"
+[on_failure.run]
+cmd = "true"
+[on_failure.post]
+cmd = "printf '{\"directive\":\"end\"}'"
+"#;
     std::fs::write(&workflow_path, workflow_body).unwrap();
 
     let roki_path = work.path().join("roki.toml");
@@ -79,7 +79,7 @@ port = {port}
 cli = "echo"
 
 [engine]
-max_iterations = 5
+max_iterations = 3
 
 [paths]
 workflow = "{workflow}"
@@ -100,87 +100,56 @@ session_root = "{session_root}"
         .arg(&roki_path)
         .env("ROKI_LINEAR_GRAPHQL_URL", linear.uri())
         .env("ROKI_GHQ_BASE_OVERRIDE", work.path())
-        .env("ROKI_WT_ROOT_OVERRIDE", &wt_root)
+        .env("ROKI_WT_BIN_OVERRIDE", &fixture)
+        // No ROKI_WT_ROOT_OVERRIDE here: we want the real shell-out path.
         .kill_on_drop(true)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .spawn()
-        .expect("spawn roki binary");
+        .unwrap();
 
     let webhook_addr: SocketAddr = ([127, 0, 0, 1], port).into();
     wait_for_listener(webhook_addr).await;
 
-    let webhook_url = format!("http://127.0.0.1:{port}/");
-    // status "done" matches the cleanup entry's when.status="done" and does
-    // NOT match the rule's when.status="in_progress", so dispatch picks cleanup.
     let payload = serde_json::json!({
         "action": "update",
         "type": "Issue",
         "data": {
             "id": ticket_id,
             "assignee": {"id": "u1"},
-            "state": {"name": "done"},
+            "state": {"name": "in_progress"},
             "labels": []
         }
     });
-    let client = reqwest::Client::new();
-    let resp = client
-        .post(&webhook_url)
+    reqwest::Client::new()
+        .post(format!("http://127.0.0.1:{port}/"))
         .json(&payload)
         .send()
         .await
         .unwrap();
-    assert_eq!(resp.status().as_u16(), 202);
 
     let status = tokio::time::timeout(Duration::from_secs(15), child.wait())
         .await
-        .expect("binary should exit within 15s")
-        .expect("child wait succeeds");
-    assert!(status.success(), "binary should exit 0, got {status:?}");
-
-    let ticket_dir = session_root.join(ticket_id);
+        .unwrap()
+        .unwrap();
     assert!(
-        !ticket_dir.exists(),
-        "ticket dir should be deleted after cleanup cycle; remains at {ticket_dir:?}"
+        status.success(),
+        "[[on_failure]] handler should succeed -> exit 0, got {status:?}"
     );
 
     let events_path = session_root.join(format!("{ticket_id}.events.jsonl"));
-    let body = std::fs::read_to_string(&events_path)
-        .unwrap_or_else(|e| panic!("events.jsonl must exist at {events_path:?}: {e}"));
-    let lines: Vec<&str> = body.lines().collect();
-
-    assert_eq!(
-        lines.len(),
-        2,
-        "expected 2 events: cycle_completed + worktree_delete_requested; got:\n{body}"
-    );
+    let body = std::fs::read_to_string(&events_path).unwrap();
+    // Expect: rule cycle's directive parse never reaches a cycle_completed
+    // because it failed at FsPoison. The handler cycle_completed line follows.
     assert!(
-        lines[0].contains("\"event\":\"cycle_completed\""),
-        "line 0 must be cycle_completed: {}",
-        lines[0]
+        body.contains("\"cycle_kind\":\"failure\""),
+        "expected a failure-cycle cycle_completed line in events.jsonl:\n{body}"
     );
+    // No failure_unhandled because the handler matched and succeeded.
     assert!(
-        lines[0].contains("\"cycle_kind\":\"cleanup\""),
-        "line 0 must have cycle_kind=cleanup: {}",
-        lines[0]
-    );
-    let iters_one = lines[0].contains("\"iters\":1");
-    let iters_more = lines[0].contains("\"iters\":2") || lines[0].contains("\"iters\":3");
-    assert!(
-        iters_one || iters_more,
-        "iters should be >= 1; got {}",
-        lines[0]
-    );
-    assert!(
-        lines[1].contains("\"event\":\"worktree_delete_requested\""),
-        "line 1 must be worktree_delete_requested: {}",
-        lines[1]
-    );
-    assert!(
-        lines[1].contains("\"reason\":\"cleanup_terminal\""),
-        "line 1 must have reason=cleanup_terminal: {}",
-        lines[1]
+        !body.contains("\"failure_unhandled\""),
+        "should not have emitted failure_unhandled:\n{body}"
     );
 }
 

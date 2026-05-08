@@ -72,7 +72,7 @@ impl PhaseExecutor for CommandPhaseExecutor {
         ctx: &PhaseContext,
         iter_dir: &Path,
     ) -> Result<PhaseOutcome, PhaseInfraError> {
-        let cwd = resolve_ghq_base(&ctx.repo.ghq).await?;
+        let cwd = crate::engine::cwd::resolve(&ctx.repo.ghq, &ctx.repo.ticket_id).await?;
         let resolved_stall = body
             .stall_seconds_override()
             .unwrap_or_else(|| self.stall.seconds());

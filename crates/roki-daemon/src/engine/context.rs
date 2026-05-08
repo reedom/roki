@@ -29,6 +29,10 @@ pub struct TicketView {
 #[derive(Debug, Clone, Serialize)]
 pub struct RepoView {
     pub ghq: String,
+    /// Mirrors `ticket.id`; kept here so `cwd::resolve` can borrow `repo`
+    /// without touching `ticket`.
+    #[serde(skip)]
+    pub ticket_id: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -94,6 +98,7 @@ impl PhaseContext {
             ticket: TicketView::from(&admitted.ticket),
             repo: RepoView {
                 ghq: admitted.ghq.clone(),
+                ticket_id: admitted.ticket.id.clone(),
             },
             cycle: CycleView {
                 id: cycle_id.to_string(),
@@ -268,22 +273,22 @@ pub fn to_liquid_object(ctx: &PhaseContext) -> liquid::Object {
 mod tests {
     use super::*;
 
-    fn ticket() -> NormalizedTicket {
-        NormalizedTicket::new(
-            "ENG-1".to_string(),
-            Some("u1".to_string()),
-            "in_progress".to_string(),
-            vec!["bug".to_string()],
-            "Title".to_string(),
-            "Body".to_string(),
-        )
+    fn admitted_with_id(id: &str) -> AdmittedTicket {
+        AdmittedTicket {
+            ticket: NormalizedTicket::new(
+                id.to_string(),
+                Some("u1".to_string()),
+                "in_progress".to_string(),
+                vec!["bug".to_string()],
+                "Title".to_string(),
+                "Body".to_string(),
+            ),
+            ghq: "github.com/acme/widget".to_string(),
+        }
     }
 
     fn admitted() -> AdmittedTicket {
-        AdmittedTicket {
-            ticket: ticket(),
-            ghq: "github.com/acme/widget".to_string(),
-        }
+        admitted_with_id("ENG-1")
     }
 
     fn cfg(max_iterations: u32) -> RokiConfig {
@@ -545,5 +550,18 @@ mod tests {
         let env: std::collections::HashMap<String, String> =
             roki_env_pairs(&ctx).into_iter().collect();
         assert!(!env.contains_key("ROKI_FAILURE_EXIT_CODE"));
+    }
+
+    #[test]
+    fn repo_view_carries_ticket_id() {
+        let admitted = admitted_with_id("OPS-100");
+        let ctx = PhaseContext::new(
+            &admitted,
+            uuid::Uuid::nil(),
+            &cfg(5),
+            crate::engine::outcome::CycleKind::Rule,
+        );
+        assert_eq!(ctx.repo.ticket_id, "OPS-100");
+        assert_eq!(ctx.ticket.id, "OPS-100");
     }
 }

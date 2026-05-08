@@ -57,6 +57,8 @@ async fn skeleton_runs_one_cycle_and_rejects_subsequent_webhook() {
     let work = TempDir::new().expect("workspace tempdir");
     let session_root = work.path().join("sessions");
     std::fs::create_dir_all(&session_root).expect("create sessions dir");
+    let wt_root = work.path().join("wts");
+    std::fs::create_dir_all(&wt_root).unwrap();
     let workflow_path = work.path().join("WORKFLOW.toml");
     let roki_path = work.path().join("roki.toml");
 
@@ -118,6 +120,7 @@ session_root = "{session_root}"
         .arg(&roki_path)
         .env("ROKI_LINEAR_GRAPHQL_URL", linear.uri())
         .env("ROKI_GHQ_BASE_OVERRIDE", work.path())
+        .env("ROKI_WT_ROOT_OVERRIDE", &wt_root)
         .kill_on_drop(true)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())

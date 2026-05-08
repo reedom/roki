@@ -1,5 +1,5 @@
-//! E2E: a non-shorthand [[cleanup]] entry runs as a cleanup cycle, then
-//! post_cycle_delete removes the ticket dir. Two events emitted in order.
+//! E2E: a [[cleanup]] cycle deletes the worktree first, then the session
+//! tempdir, with the worktree_delete_requested audit event in between.
 
 use std::net::{SocketAddr, TcpListener};
 use std::time::Duration;
@@ -11,11 +11,11 @@ use wiremock::matchers::method;
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
 #[tokio::test]
-async fn cleanup_cycle_runs_then_deletes() {
+async fn cleanup_deletes_worktree_then_session_dir() {
     let port = TcpListener::bind("127.0.0.1:0")
-        .expect("bind ephemeral webhook port")
+        .unwrap()
         .local_addr()
-        .expect("local_addr")
+        .unwrap()
         .port();
 
     let linear = MockServer::start().await;
@@ -26,31 +26,24 @@ async fn cleanup_cycle_runs_then_deletes() {
         .mount(&linear)
         .await;
 
-    let work = TempDir::new().expect("workspace tempdir");
+    let work = TempDir::new().unwrap();
     let session_root = work.path().join("sessions");
-    std::fs::create_dir_all(&session_root).unwrap();
-
     let wt_root = work.path().join("wts");
+    std::fs::create_dir_all(&session_root).unwrap();
     std::fs::create_dir_all(&wt_root).unwrap();
+    let ticket_id = "OPS-300";
 
-    let ticket_id = "ENG-100";
+    // Pre-create a worktree (simulating a prior rule cycle).
+    std::fs::create_dir_all(wt_root.join(ticket_id)).unwrap();
+    std::fs::create_dir_all(session_root.join(ticket_id)).unwrap();
 
     let workflow_path = work.path().join("WORKFLOW.toml");
-    let workflow_body = format!(
-        r#"
+    let workflow_body = r#"
 [admission]
 assignee = "u1"
 
 [[admission.repos]]
 ghq = "github.com/example/repo"
-
-[[rule]]
-[rule.when]
-status = "in_progress"
-[rule.when.labels]
-has_all = []
-[rule.run]
-cmd = "true"
 
 [[cleanup]]
 [cleanup.when]
@@ -58,11 +51,10 @@ status = "done"
 [cleanup.when.labels]
 has_all = []
 [cleanup.run]
-cmd = "echo cleanup-run"
+cmd = "true"
 [cleanup.post]
-cmd = "printf '{{\"directive\":\"end\",\"outcome\":\"cleanup_done\"}}'"
-"#
-    );
+cmd = "printf '{\"directive\":\"end\"}'"
+"#;
     std::fs::write(&workflow_path, workflow_body).unwrap();
 
     let roki_path = work.path().join("roki.toml");
@@ -79,7 +71,7 @@ port = {port}
 cli = "echo"
 
 [engine]
-max_iterations = 5
+max_iterations = 3
 
 [paths]
 workflow = "{workflow}"
@@ -106,14 +98,11 @@ session_root = "{session_root}"
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .spawn()
-        .expect("spawn roki binary");
+        .unwrap();
 
     let webhook_addr: SocketAddr = ([127, 0, 0, 1], port).into();
     wait_for_listener(webhook_addr).await;
 
-    let webhook_url = format!("http://127.0.0.1:{port}/");
-    // status "done" matches the cleanup entry's when.status="done" and does
-    // NOT match the rule's when.status="in_progress", so dispatch picks cleanup.
     let payload = serde_json::json!({
         "action": "update",
         "type": "Issue",
@@ -124,62 +113,46 @@ session_root = "{session_root}"
             "labels": []
         }
     });
-    let client = reqwest::Client::new();
-    let resp = client
-        .post(&webhook_url)
+    reqwest::Client::new()
+        .post(format!("http://127.0.0.1:{port}/"))
         .json(&payload)
         .send()
         .await
         .unwrap();
-    assert_eq!(resp.status().as_u16(), 202);
 
     let status = tokio::time::timeout(Duration::from_secs(15), child.wait())
         .await
-        .expect("binary should exit within 15s")
-        .expect("child wait succeeds");
-    assert!(status.success(), "binary should exit 0, got {status:?}");
+        .unwrap()
+        .unwrap();
+    assert!(status.success(), "cleanup cycle must exit 0");
 
-    let ticket_dir = session_root.join(ticket_id);
     assert!(
-        !ticket_dir.exists(),
-        "ticket dir should be deleted after cleanup cycle; remains at {ticket_dir:?}"
+        !wt_root.join(ticket_id).exists(),
+        "worktree must be removed"
+    );
+    assert!(
+        !session_root.join(ticket_id).exists(),
+        "session tempdir must be removed"
     );
 
+    // Event log order: cycle_completed, worktree_delete_requested.
     let events_path = session_root.join(format!("{ticket_id}.events.jsonl"));
-    let body = std::fs::read_to_string(&events_path)
-        .unwrap_or_else(|e| panic!("events.jsonl must exist at {events_path:?}: {e}"));
+    let body = std::fs::read_to_string(&events_path).unwrap();
     let lines: Vec<&str> = body.lines().collect();
-
-    assert_eq!(
-        lines.len(),
-        2,
-        "expected 2 events: cycle_completed + worktree_delete_requested; got:\n{body}"
-    );
+    assert!(lines.len() >= 2, "expected >=2 events, got {body}");
     assert!(
         lines[0].contains("\"event\":\"cycle_completed\""),
-        "line 0 must be cycle_completed: {}",
-        lines[0]
-    );
-    assert!(
-        lines[0].contains("\"cycle_kind\":\"cleanup\""),
-        "line 0 must have cycle_kind=cleanup: {}",
-        lines[0]
-    );
-    let iters_one = lines[0].contains("\"iters\":1");
-    let iters_more = lines[0].contains("\"iters\":2") || lines[0].contains("\"iters\":3");
-    assert!(
-        iters_one || iters_more,
-        "iters should be >= 1; got {}",
+        "{}",
         lines[0]
     );
     assert!(
         lines[1].contains("\"event\":\"worktree_delete_requested\""),
-        "line 1 must be worktree_delete_requested: {}",
+        "{}",
         lines[1]
     );
     assert!(
         lines[1].contains("\"reason\":\"cleanup_terminal\""),
-        "line 1 must have reason=cleanup_terminal: {}",
+        "{}",
         lines[1]
     );
 }

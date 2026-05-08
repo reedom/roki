@@ -299,6 +299,14 @@ pub enum PhaseInfraError {
     #[error("[default.ai.session].cli not configured but cycle requires session shape")]
     SessionCliMissing,
 
+    /// Worktree create / list / remove failed before subprocess launch.
+    /// Cycle driver converts this to FailureKind::FsPoison.
+    #[error("worktree operation failed: {error_text}")]
+    WorktreeError {
+        error_text: String,
+        exit_code: Option<i32>,
+    },
+
     #[error(transparent)]
     Capture(#[from] CaptureError),
 }

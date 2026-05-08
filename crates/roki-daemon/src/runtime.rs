@@ -250,9 +250,11 @@ pub(crate) async fn run_inner(config_path: &Path, mode: DispatchMode) -> Result<
         DispatchedEntry::Shorthand => {
             crate::engine::cleanup::delete_immediate(
                 &admitted.ticket.id,
+                &admitted.ghq,
                 &cfg.paths.session_root,
                 &mut events,
             )
+            .await
             .map_err(|e| {
                 SkeletonError::Capture(crate::error::CaptureError::Write {
                     path: events.path().to_path_buf(),
@@ -282,10 +284,12 @@ pub(crate) async fn run_inner(config_path: &Path, mode: DispatchMode) -> Result<
                 if kind == crate::engine::outcome::CycleKind::Cleanup {
                     crate::engine::cleanup::post_cycle_delete(
                         &admitted.ticket.id,
+                        &admitted.ghq,
                         &cfg.paths.session_root,
                         cycle_id,
                         &mut events,
                     )
+                    .await
                     .map_err(|e| {
                         SkeletonError::Capture(crate::error::CaptureError::Write {
                             path: events.path().to_path_buf(),

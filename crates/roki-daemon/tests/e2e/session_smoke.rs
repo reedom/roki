@@ -32,6 +32,8 @@ async fn session_two_iter_smoke() {
     let work = TempDir::new().expect("workspace tempdir");
     let session_root = work.path().join("sessions");
     std::fs::create_dir_all(&session_root).unwrap();
+    let wt_root = work.path().join("wts");
+    std::fs::create_dir_all(&wt_root).unwrap();
 
     let counter_path = work.path().join("counter");
     let pid_path = work.path().join("agent.pid");
@@ -130,6 +132,7 @@ session_root = "{session_root}"
         .arg(&roki_path)
         .env("ROKI_LINEAR_GRAPHQL_URL", linear.uri())
         .env("ROKI_GHQ_BASE_OVERRIDE", work.path())
+        .env("ROKI_WT_ROOT_OVERRIDE", &wt_root)
         .kill_on_drop(true)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
