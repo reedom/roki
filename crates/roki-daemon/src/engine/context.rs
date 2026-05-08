@@ -29,6 +29,7 @@ pub struct TicketView {
 #[derive(Debug, Clone, Serialize)]
 pub struct RepoView {
     pub ghq: String,
+    pub ticket_id: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -94,6 +95,7 @@ impl PhaseContext {
             ticket: TicketView::from(&admitted.ticket),
             repo: RepoView {
                 ghq: admitted.ghq.clone(),
+                ticket_id: admitted.ticket.id.clone(),
             },
             cycle: CycleView {
                 id: cycle_id.to_string(),
@@ -545,5 +547,28 @@ mod tests {
         let env: std::collections::HashMap<String, String> =
             roki_env_pairs(&ctx).into_iter().collect();
         assert!(!env.contains_key("ROKI_FAILURE_EXIT_CODE"));
+    }
+
+    #[test]
+    fn repo_view_carries_ticket_id() {
+        let admitted = crate::admission::AdmittedTicket {
+            ticket: crate::linear::ticket::NormalizedTicket::new(
+                "OPS-100".to_string(),
+                Some("u1".to_string()),
+                "in_progress".to_string(),
+                vec![],
+                "Title".to_string(),
+                "Body".to_string(),
+            ),
+            ghq: "github.com/acme/widget".to_string(),
+        };
+        let cycle_id = uuid::Uuid::new_v4();
+        let ctx = PhaseContext::new(
+            &admitted,
+            cycle_id,
+            &cfg(5),
+            crate::engine::outcome::CycleKind::Rule,
+        );
+        assert_eq!(ctx.repo.ticket_id, "OPS-100");
     }
 }
