@@ -221,6 +221,23 @@ impl FailureKind {
     }
 }
 
+/// Full failure record routed to `[[on_failure]]` and exposed as
+/// `{{ failure.* }}` per fr:01 §107.
+#[derive(Debug, Clone)]
+pub struct FailureMeta {
+    /// UUID of the cycle that failed (NOT the handler cycle).
+    pub failed_cycle_id: uuid::Uuid,
+    pub kind: FailureKind,
+    pub phase: PhaseKind,
+    pub iter: u32,
+    /// Subprocess exit code when applicable; `None` for stall/template_error/
+    /// fs_poison/iter_exhausted detected before exit.
+    pub exit_code: Option<i32>,
+    /// Operator-facing description: head + tail of stderr, or a synthesized
+    /// message for non-subprocess failures (template render, fs error, etc.).
+    pub error_text: String,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -263,5 +280,21 @@ mod tests {
     #[test]
     fn failure_kind_fs_poison_str_round_trip() {
         assert_eq!(FailureKind::FsPoison.as_str(), "fs_poison");
+    }
+
+    #[test]
+    fn failure_meta_constructor_round_trip() {
+        let id = uuid::Uuid::nil();
+        let meta = FailureMeta {
+            failed_cycle_id: id,
+            kind: FailureKind::Stall,
+            phase: PhaseKind::Run,
+            iter: 2,
+            exit_code: Some(124),
+            error_text: "stall after 30s".into(),
+        };
+        assert_eq!(meta.kind.as_str(), "stall");
+        assert_eq!(meta.phase.as_str(), "run");
+        assert_eq!(meta.iter, 2);
     }
 }
