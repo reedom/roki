@@ -11,7 +11,7 @@ use uuid::Uuid;
 use crate::admission::AdmittedTicket;
 use crate::config::roki::RokiConfig;
 use crate::config::workflow::Rule;
-use crate::error::PhaseInfraError;
+use crate::error::{CaptureError, PhaseInfraError};
 
 use super::context::PhaseContext;
 use super::outcome::{
@@ -25,6 +25,28 @@ use super::session::{SessionShutdownReason, SessionSupervisor};
 pub enum CycleOutcome {
     Completed { iters: u32 },
     Failed { meta: FailureMeta },
+}
+
+/// Convert a `CaptureError` that occurred before subprocess launch into a
+/// `CycleOutcome::Failed` with `FailureKind::FsPoison`. Used at every site
+/// where a `PhaseInfraError::Capture` surfaces from file-open or dir-create
+/// calls before any process output exists.
+fn fs_poison_outcome(
+    capture_err: CaptureError,
+    cycle_id: uuid::Uuid,
+    phase: PhaseKind,
+    iter: u32,
+) -> CycleOutcome {
+    CycleOutcome::Failed {
+        meta: FailureMeta {
+            failed_cycle_id: cycle_id,
+            kind: FailureKind::FsPoison,
+            phase,
+            iter,
+            exit_code: None,
+            error_text: format!("session_tempdir creation failed: {capture_err}"),
+        },
+    }
 }
 
 /// Return the tail (up to `max` bytes) of `s`, prefixed with `...` when
@@ -91,7 +113,9 @@ pub async fn run_cycle(
                 iter,
             ) {
                 Ok(d) => d,
-                Err(err) => break 'cycle Err(err.into()),
+                Err(err) => {
+                    break 'cycle Ok(fs_poison_outcome(err, cycle_id, PhaseKind::Pre, iter));
+                }
             };
 
             // Pre.
@@ -108,6 +132,11 @@ pub async fn run_cycle(
                     .await
                     {
                         Ok(o) => o,
+                        Err(PhaseInfraError::Capture(e)) => {
+                            break 'cycle Ok(fs_poison_outcome(
+                                e, cycle_id, PhaseKind::Pre, iter,
+                            ));
+                        }
                         Err(err) => break 'cycle Err(err),
                     };
                     match outcome {
@@ -163,6 +192,11 @@ pub async fn run_cycle(
             let run_outcome =
                 match executor.execute(PhaseKind::Run, &rule.run, &ctx, &iter_dir).await {
                     Ok(o) => o,
+                    Err(PhaseInfraError::Capture(e)) => {
+                        break 'cycle Ok(fs_poison_outcome(
+                            e, cycle_id, PhaseKind::Run, iter,
+                        ));
+                    }
                     Err(err) => break 'cycle Err(err),
                 };
             match run_outcome {
@@ -225,6 +259,11 @@ pub async fn run_cycle(
                 .await
                 {
                     Ok(o) => o,
+                    Err(PhaseInfraError::Capture(e)) => {
+                        break 'cycle Ok(fs_poison_outcome(
+                            e, cycle_id, PhaseKind::Post, iter,
+                        ));
+                    }
                     Err(err) => break 'cycle Err(err),
                 };
                 match outcome {
@@ -794,6 +833,78 @@ mod tests {
                 assert_eq!(meta.kind.as_str(), "iter_exhausted");
             }
             _ => panic!("expected Failed"),
+        }
+    }
+
+    #[tokio::test]
+    async fn fs_poison_when_session_root_unwritable() {
+        // iter_dir creation fails because the session_root path has a file
+        // component where a directory is required. This exercises the
+        // create_iter_dir → FsPoison conversion in run_cycle.
+        let tmp = tempfile::tempdir().unwrap();
+        let blocker = tmp.path().join("blocker");
+        std::fs::write(&blocker, b"i am a file").unwrap();
+        // Pass the blocker file as session_root so create_iter_dir fails.
+        let bad_root = blocker.as_path();
+        let exec = FakeExec::new(vec![]);
+        let r = rule(None, None);
+        let outcome = run_cycle(&exec, &admitted(), &r, bad_root, &cfg(10))
+            .await
+            .unwrap();
+        match outcome {
+            CycleOutcome::Failed { meta } => {
+                assert_eq!(meta.kind, FailureKind::FsPoison);
+                assert_eq!(meta.iter, 1);
+                assert!(meta.exit_code.is_none());
+                assert!(meta.error_text.contains("session_tempdir"));
+            }
+            other => panic!("expected FsPoison; got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn fs_poison_when_phase_capture_open_fails() {
+        // FailingCaptureExec simulates a per-phase capture file open failure,
+        // exactly as CommandPhaseExecutor would surface it when open_phase_files
+        // returns CaptureError::OpenFile before the subprocess is launched.
+        struct FailingCaptureExec;
+
+        #[async_trait]
+        impl PhaseExecutor for FailingCaptureExec {
+            async fn execute(
+                &self,
+                _kind: PhaseKind,
+                _body: &PhaseBody,
+                _ctx: &PhaseContext,
+                _iter_dir: &Path,
+            ) -> Result<PhaseOutcome, PhaseInfraError> {
+                Err(PhaseInfraError::Capture(crate::error::CaptureError::OpenFile {
+                    path: PathBuf::from("/tmp/fake/pre.stdout"),
+                    source: std::io::Error::new(
+                        std::io::ErrorKind::PermissionDenied,
+                        "denied",
+                    ),
+                }))
+            }
+        }
+
+        let tmp = tempfile::tempdir().unwrap();
+        let exec = FailingCaptureExec;
+        let r = rule(Some(PhaseBody::InlineCmd { cmd: "true".into() }), None);
+
+        let outcome = run_cycle(&exec, &admitted(), &r, tmp.path(), &cfg(10))
+            .await
+            .unwrap();
+
+        match outcome {
+            CycleOutcome::Failed { meta } => {
+                assert_eq!(meta.kind, FailureKind::FsPoison);
+                assert_eq!(meta.phase, PhaseKind::Pre);
+                assert_eq!(meta.iter, 1);
+                assert!(meta.exit_code.is_none());
+                assert!(meta.error_text.contains("session_tempdir"));
+            }
+            other => panic!("expected FsPoison; got {other:?}"),
         }
     }
 
