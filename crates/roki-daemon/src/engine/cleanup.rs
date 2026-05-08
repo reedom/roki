@@ -40,8 +40,9 @@ impl std::error::Error for CleanupError {}
 
 /// Shorthand path. `cycle_id` is synthesized so the structured event has a
 /// stable id.
-pub fn delete_immediate(
+pub async fn delete_immediate(
     ticket_id: &str,
+    ghq: &str,
     session_root: &Path,
     events: &mut EventWriter,
 ) -> Result<(), CleanupError> {
@@ -59,13 +60,32 @@ pub fn delete_immediate(
         cycle_id: Some(cycle_id.to_string()),
         reason: WorktreeDeleteReason::CleanupShorthand,
     });
+    if let Err(err) = crate::engine::worktree::remove(ghq, ticket_id).await {
+        let _ = events.emit(&Event::FailureUnhandled {
+            ts: now_rfc3339(),
+            cycle_id: cycle_id.to_string(),
+            cycle_kind: "cleanup".into(),
+            failure: FailureMetaSer {
+                kind: "fs_poison".into(),
+                phase: None,
+                iter: 0,
+                exit_code: err.exit_code(),
+                error_text: format!("cleanup wt remove failed: {err}"),
+            },
+            marker: FailureMarker::CleanupFsError,
+        });
+        return Err(CleanupError::FsError(std::io::Error::other(format!(
+            "{err}"
+        ))));
+    }
     remove_ticket_dir(session_root, ticket_id, Some(cycle_id), events)
 }
 
 /// Post-cycle delete. Called only after a non-shorthand cleanup cycle
 /// completes. `cycle_id` is the cleanup cycle's UUID.
-pub fn post_cycle_delete(
+pub async fn post_cycle_delete(
     ticket_id: &str,
+    ghq: &str,
     session_root: &Path,
     cycle_id: Uuid,
     events: &mut EventWriter,
@@ -76,6 +96,24 @@ pub fn post_cycle_delete(
         cycle_id: Some(cycle_id.to_string()),
         reason: WorktreeDeleteReason::CleanupTerminal,
     });
+    if let Err(err) = crate::engine::worktree::remove(ghq, ticket_id).await {
+        let _ = events.emit(&Event::FailureUnhandled {
+            ts: now_rfc3339(),
+            cycle_id: cycle_id.to_string(),
+            cycle_kind: "cleanup".into(),
+            failure: FailureMetaSer {
+                kind: "fs_poison".into(),
+                phase: None,
+                iter: 0,
+                exit_code: err.exit_code(),
+                error_text: format!("cleanup wt remove failed: {err}"),
+            },
+            marker: FailureMarker::CleanupFsError,
+        });
+        return Err(CleanupError::FsError(std::io::Error::other(format!(
+            "{err}"
+        ))));
+    }
     remove_ticket_dir(session_root, ticket_id, Some(cycle_id), events)
 }
 
@@ -127,33 +165,84 @@ mod tests {
     #[test]
     fn delete_immediate_removes_existing_dir() {
         let tmp = tempfile::tempdir().unwrap();
-        let root = tmp.path();
+        let wt_root = tmp.path().join("wts");
+        let root = tmp.path().join("sessions");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::create_dir_all(&wt_root).unwrap();
         let dir = root.join("OPS-1");
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("data.txt"), "hi").unwrap();
 
-        let mut w = EventWriter::open(root, "OPS-1").unwrap();
-        delete_immediate("OPS-1", root, &mut w).unwrap();
+        let mut w = EventWriter::open(&root, "OPS-1").unwrap();
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(async {
+                temp_env::async_with_vars(
+                    [("ROKI_WT_ROOT_OVERRIDE", Some(wt_root.to_str().unwrap()))],
+                    async {
+                        delete_immediate("OPS-1", "github.com/acme/widget", &root, &mut w)
+                            .await
+                            .unwrap();
+                    },
+                )
+                .await
+            });
         assert!(!dir.exists());
     }
 
     #[test]
     fn delete_immediate_succeeds_when_dir_absent() {
         let tmp = tempfile::tempdir().unwrap();
-        let root = tmp.path();
-        let mut w = EventWriter::open(root, "OPS-2").unwrap();
-        delete_immediate("OPS-2", root, &mut w).unwrap();
+        let wt_root = tmp.path().join("wts");
+        let root = tmp.path().join("sessions");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::create_dir_all(&wt_root).unwrap();
+        let mut w = EventWriter::open(&root, "OPS-2").unwrap();
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(async {
+                temp_env::async_with_vars(
+                    [("ROKI_WT_ROOT_OVERRIDE", Some(wt_root.to_str().unwrap()))],
+                    async {
+                        delete_immediate("OPS-2", "github.com/acme/widget", &root, &mut w)
+                            .await
+                            .unwrap();
+                    },
+                )
+                .await
+            });
     }
 
     #[test]
     fn delete_immediate_emits_two_events() {
         let tmp = tempfile::tempdir().unwrap();
-        let root = tmp.path();
-        let mut w = EventWriter::open(root, "OPS-3").unwrap();
-        delete_immediate("OPS-3", root, &mut w).unwrap();
+        let wt_root = tmp.path().join("wts");
+        let root = tmp.path().join("sessions");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::create_dir_all(&wt_root).unwrap();
+        let mut w = EventWriter::open(&root, "OPS-3").unwrap();
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(async {
+                temp_env::async_with_vars(
+                    [("ROKI_WT_ROOT_OVERRIDE", Some(wt_root.to_str().unwrap()))],
+                    async {
+                        delete_immediate("OPS-3", "github.com/acme/widget", &root, &mut w)
+                            .await
+                            .unwrap();
+                    },
+                )
+                .await
+            });
         drop(w);
 
-        let body = std::fs::read_to_string(crate::events::events_path(root, "OPS-3")).unwrap();
+        let body = std::fs::read_to_string(crate::events::events_path(&root, "OPS-3")).unwrap();
         let lines: Vec<&str> = body.lines().collect();
         assert_eq!(lines.len(), 2);
         assert!(lines[0].contains("\"event\":\"cycle_completed\""));
@@ -166,18 +255,76 @@ mod tests {
     #[test]
     fn post_cycle_delete_emits_one_event_then_removes() {
         let tmp = tempfile::tempdir().unwrap();
-        let root = tmp.path();
+        let wt_root = tmp.path().join("wts");
+        let root = tmp.path().join("sessions");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::create_dir_all(&wt_root).unwrap();
         let dir = root.join("OPS-4");
         std::fs::create_dir_all(&dir).unwrap();
 
         let cycle_id = Uuid::new_v4();
-        let mut w = EventWriter::open(root, "OPS-4").unwrap();
-        post_cycle_delete("OPS-4", root, cycle_id, &mut w).unwrap();
+        let mut w = EventWriter::open(&root, "OPS-4").unwrap();
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(async {
+                temp_env::async_with_vars(
+                    [("ROKI_WT_ROOT_OVERRIDE", Some(wt_root.to_str().unwrap()))],
+                    async {
+                        post_cycle_delete(
+                            "OPS-4",
+                            "github.com/acme/widget",
+                            &root,
+                            cycle_id,
+                            &mut w,
+                        )
+                        .await
+                        .unwrap();
+                    },
+                )
+                .await
+            });
         drop(w);
 
         assert!(!dir.exists());
-        let body = std::fs::read_to_string(crate::events::events_path(root, "OPS-4")).unwrap();
+        let body = std::fs::read_to_string(crate::events::events_path(&root, "OPS-4")).unwrap();
         assert!(body.contains("\"reason\":\"cleanup_terminal\""));
         assert!(body.contains(&cycle_id.to_string()));
+    }
+
+    #[test]
+    fn delete_immediate_removes_worktree_then_session_dir() {
+        // Single-threaded — env muts are local.
+        let tmp = tempfile::tempdir().unwrap();
+        let wt_root = tmp.path().join("wts");
+        let session_root = tmp.path().join("sessions");
+        std::fs::create_dir_all(wt_root.join("OPS-12")).unwrap();
+        std::fs::create_dir_all(session_root.join("OPS-12")).unwrap();
+        std::fs::write(session_root.join("OPS-12").join("data"), "x").unwrap();
+
+        let mut w = EventWriter::open(&session_root, "OPS-12").unwrap();
+
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            temp_env::async_with_vars(
+                [("ROKI_WT_ROOT_OVERRIDE", Some(wt_root.to_str().unwrap()))],
+                async {
+                    delete_immediate("OPS-12", "github.com/acme/widget", &session_root, &mut w)
+                        .await
+                        .unwrap();
+                },
+            )
+            .await
+        });
+
+        assert!(!wt_root.join("OPS-12").exists(), "worktree must be removed");
+        assert!(
+            !session_root.join("OPS-12").exists(),
+            "session dir must be removed"
+        );
     }
 }
