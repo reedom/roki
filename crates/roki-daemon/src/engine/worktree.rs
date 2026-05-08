@@ -114,7 +114,7 @@ pub async fn exists(ghq: &str, ticket_id: &str) -> Result<Option<PathBuf>, Workt
     if let Some(root_os) = std::env::var_os("ROKI_WT_ROOT_OVERRIDE") {
         let root = PathBuf::from(root_os);
         let path = root.join(ticket_id);
-        if !path.exists() {
+        if !path.is_dir() {
             return Ok(None);
         }
         return Ok(Some(canonicalize_under_root(&path, &root)?));
@@ -145,6 +145,11 @@ fn wt_bin() -> std::ffi::OsString {
 /// `wt list` prints one line per worktree on stdout, formatted as
 /// `<branch>` followed by whitespace-separated metadata whose first field
 /// is the absolute path. Branch name = ticket id verbatim per fr:05 line 36.
+///
+/// The returned path is NOT canonicalized here. Spec §5 path-safety only
+/// applies to the override path; production-path canonicalization is
+/// deferred to `cwd::resolve` (Task 7), which has the ghq base available
+/// as the natural confinement root.
 async fn wt_list_find(ticket_id: &str) -> Result<Option<PathBuf>, WorktreeError> {
     let bin = wt_bin();
     let out = Command::new(&bin)
@@ -353,8 +358,8 @@ mod tests {
         }
     }
 
-    #[tokio::test]
-    async fn exists_detects_conflict_via_wt_list() {
+    #[test]
+    fn conflict_variant_constructs() {
         // Override-mode is path-based; conflict comes from real `wt list` output.
         // This test documents the contract via a unit fake of wt_list_find that
         // is exercised in the e2e harness; here we only assert the error
