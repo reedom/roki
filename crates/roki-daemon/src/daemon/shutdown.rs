@@ -24,10 +24,14 @@ impl ShutdownToken {
     }
 
     pub async fn wait(&self) {
-        if self.flag.load(Ordering::Acquire) {
-            return;
+        let notified = self.notified.notified();
+        tokio::pin!(notified);
+        // Pre-register the waiter so a concurrent notify_waiters() call cannot
+        // be missed.
+        notified.as_mut().enable();
+        if !self.flag.load(Ordering::Acquire) {
+            notified.await;
         }
-        self.notified.notified().await;
     }
 
     pub fn is_fired(&self) -> bool {
@@ -77,5 +81,22 @@ mod tests {
         tok.fire();
         tok.fire();
         assert!(tok.is_fired());
+        // Wait should still exit immediately after a double-fire.
+        tokio::time::timeout(std::time::Duration::from_millis(50), tok.wait())
+            .await
+            .expect("wait should return immediately after double fire");
+    }
+
+    #[tokio::test]
+    async fn fire_immediately_after_wait_starts_still_wakes() {
+        let tok = ShutdownToken::new();
+        let tok2 = tok.clone();
+        let waiter = tokio::spawn(async move { tok2.wait().await });
+        // No sleep — fire on the same tokio scheduler tick the waiter starts.
+        tok.fire();
+        tokio::time::timeout(std::time::Duration::from_millis(200), waiter)
+            .await
+            .expect("waiter must wake within 200ms")
+            .expect("join");
     }
 }
