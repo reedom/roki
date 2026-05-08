@@ -182,10 +182,6 @@ pub enum FailureKind {
     /// Stdout silent for `stall_seconds`; supervisor SIGTERMed (and SIGKILLed
     /// after grace if necessary). Applies to both shapes.
     Stall,
-    /// SessionSupervisor failed to spawn the long-lived child (missing cli,
-    /// exec error). Reported as a phase failure on the first session-shape
-    /// phase the cycle attempts.
-    SessionSpawn,
 }
 
 impl FailureKind {
@@ -197,7 +193,6 @@ impl FailureKind {
             FailureKind::TemplateError => "template_error",
             FailureKind::IterExhausted => "iter_exhausted",
             FailureKind::Stall => "stall",
-            FailureKind::SessionSpawn => "session_spawn",
         }
     }
 }
@@ -232,6 +227,5 @@ mod tests {
     #[test]
     fn failure_kind_stall_str_round_trip() {
         assert_eq!(FailureKind::Stall.as_str(), "stall");
-        assert_eq!(FailureKind::SessionSpawn.as_str(), "session_spawn");
     }
 }

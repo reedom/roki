@@ -401,9 +401,10 @@ pub enum FailureKind {
     TemplateError,
     IterExhausted,
     Stall,                  // NEW: stall_seconds exceeded (any shape)
-    SessionSpawn,           // NEW: SessionSupervisor::spawn failed (cli missing, exec error)
 }
 ```
+
+Session-spawn failures (missing `[default.ai.session].cli`, exec error) flow as `PhaseInfraError::SessionSpawn → SkeletonError`, not as a directive-routed `FailureKind`. fr:06 catalog defines no `session_spawn` kind, so adding one would leak into operator `[[on_failure]]` matchers as a vocabulary the FR does not sanction.
 
 | Trigger                                                                | Surface                                          | Exit |
 | ---------------------------------------------------------------------- | ------------------------------------------------ | ---- |
@@ -510,7 +511,7 @@ Existing `iteration_smoke.rs` (slice 1) is untouched: it uses `cmd`-form phases,
 ### 12.1 Slice 1 call sites that change
 
 - `engine::outcome::PhaseBody::Path` gains `shape: PhaseShape` and `stall_seconds: Option<u32>` fields, parsed from the workflow .md frontmatter. `InlineCmd` and `InlinePrompt` are unchanged in field shape — their phase shape is fixed by variant identity.
-- `engine::outcome::FailureKind` gains `Stall` and `SessionSpawn`. Failure-table tests in `cycle.rs` are extended.
+- `engine::outcome::FailureKind` gains `Stall`. Failure-table tests in `cycle.rs` are extended. Session-spawn failures are surfaced via `PhaseInfraError::SessionSpawn → SkeletonError` (no new `FailureKind` variant; fr:06 catalog has no `session_spawn` kind).
 - `engine::cycle::run_cycle` resolves each phase's shape (variant-fixed for inline forms; field-driven for `Path`) and dispatches between `CommandPhaseExecutor` and `SessionSupervisor`. The `PhaseExecutor` trait is retained for command-shape so slice-1 unit tests continue to pass.
 - `engine::phase::CommandPhaseExecutor::execute` is rewritten: stdout is teed via a tokio task instead of redirected to a `File` directly, in order to (a) feed the watchdog and (b) extract `run.terminal.json`. The behaviour for non-stream-json stdout is unchanged on disk.
 - `config::workflow::parse_phase_body` no longer accepts `session` on inline tables. The slice-1 `WorkflowError::SessionShapeUnsupported` is removed; load errors now surface as `InvalidSessionField` (path-form .md frontmatter only) or `SessionRunUnsupported` (run resolved to Session).
