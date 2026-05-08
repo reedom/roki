@@ -69,8 +69,49 @@ pub async fn ensure(_ghq: &str, _ticket_id: &str) -> Result<PathBuf, WorktreeErr
     unimplemented!("Task 4 implements ensure")
 }
 
-pub async fn exists(_ghq: &str, _ticket_id: &str) -> Result<Option<PathBuf>, WorktreeError> {
-    unimplemented!("Task 3 implements exists")
+pub async fn exists(ghq: &str, ticket_id: &str) -> Result<Option<PathBuf>, WorktreeError> {
+    if let Some(root) = std::env::var_os("ROKI_WT_ROOT_OVERRIDE") {
+        let path = PathBuf::from(root).join(ticket_id);
+        return Ok(if path.is_dir() { Some(path) } else { None });
+    }
+    wt_list_find(ghq, ticket_id).await
+}
+
+async fn wt_bin() -> std::ffi::OsString {
+    std::env::var_os("ROKI_WT_BIN_OVERRIDE").unwrap_or_else(|| "wt".into())
+}
+
+/// Run `wt list` and return the path whose branch matches `ticket_id`.
+/// `wt list` prints one `<branch>\t<absolute-path>` line per worktree on
+/// stdout. Branch name = ticket id verbatim per fr:05 line 36.
+async fn wt_list_find(_ghq: &str, ticket_id: &str) -> Result<Option<PathBuf>, WorktreeError> {
+    use tokio::process::Command;
+    let bin = wt_bin().await;
+    let out = Command::new(&bin).arg("list").output().await.map_err(|e| {
+        if e.kind() == std::io::ErrorKind::NotFound {
+            WorktreeError::WtNotFound
+        } else {
+            WorktreeError::Io(e)
+        }
+    })?;
+    if !out.status.success() {
+        return Err(WorktreeError::ListFailed {
+            stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
+            exit_code: out.status.code(),
+        });
+    }
+    for line in String::from_utf8_lossy(&out.stdout).lines() {
+        // wt list output is `<branch>\t<path>` (or whitespace-separated for
+        // some wt versions); accept either by splitting on the first run of
+        // whitespace.
+        let mut parts = line.splitn(2, char::is_whitespace);
+        let branch = parts.next().unwrap_or("").trim();
+        let path = parts.next().unwrap_or("").trim();
+        if branch == ticket_id && !path.is_empty() {
+            return Ok(Some(PathBuf::from(path)));
+        }
+    }
+    Ok(None)
 }
 
 pub async fn remove(_ghq: &str, _ticket_id: &str) -> Result<bool, WorktreeError> {
@@ -108,5 +149,32 @@ mod tests {
         let _ = exists;
         let _ = remove;
         let _ = WorktreeError::WtNotFound;
+    }
+
+    #[tokio::test]
+    async fn exists_override_present() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        std::fs::create_dir_all(root.join("OPS-1")).unwrap();
+        let result = temp_env::async_with_vars(
+            [("ROKI_WT_ROOT_OVERRIDE", Some(root.to_str().unwrap()))],
+            async { exists("github.com/acme/widget", "OPS-1").await },
+        )
+        .await
+        .unwrap();
+        assert_eq!(result, Some(root.join("OPS-1")));
+    }
+
+    #[tokio::test]
+    async fn exists_override_absent() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let result = temp_env::async_with_vars(
+            [("ROKI_WT_ROOT_OVERRIDE", Some(root.to_str().unwrap()))],
+            async { exists("github.com/acme/widget", "OPS-2").await },
+        )
+        .await
+        .unwrap();
+        assert_eq!(result, None);
     }
 }
