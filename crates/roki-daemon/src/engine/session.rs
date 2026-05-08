@@ -17,6 +17,7 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use serde_json::Value;
 use tokio::process::{Child, ChildStdin};
@@ -48,12 +49,16 @@ pub struct SessionConfig {
     pub envs: Vec<(String, String)>,
 }
 
-/// One event the reader task pushes onto the directive channel.
+/// One event the reader task or stall task pushes onto the directive channel.
 #[derive(Debug)]
 pub enum SessionEvent {
     Directive { value: Value },
     SchemaDrift,
     Exit,
+    /// Stall watchdog fired: idle exceeded `stall_seconds`. The stall task
+    /// emits this *before* terminating the child so `run_turn` observes it
+    /// ahead of the reader's `Exit`. Per fr:04 §126 / fr:01 §123-125.
+    Stall,
 }
 
 #[derive(Debug, Clone)]
@@ -63,7 +68,7 @@ pub(crate) struct TurnState {
 }
 
 pub struct SessionSupervisor {
-    pub(crate) child: Mutex<Option<Child>>,
+    pub(crate) child: Arc<Mutex<Option<Child>>>,
     pub(crate) stdin: Mutex<Option<ChildStdin>>,
     pub(crate) out_events: Arc<Mutex<Option<OutEventsFiles>>>,
     pub(crate) stderr_file: Arc<Mutex<Option<std::fs::File>>>,
@@ -71,6 +76,7 @@ pub struct SessionSupervisor {
     pub(crate) turn: watch::Sender<TurnState>,
     pub(crate) dir_rx: Mutex<mpsc::Receiver<SessionEvent>>,
     pub(crate) watchdog: Watchdog,
+    pub(crate) watchdog_armed: Arc<AtomicBool>,
     pub(crate) default_stall_seconds: u32,
     pub(crate) between_turn_stderr: Arc<Mutex<StderrBuf>>,
 }
@@ -108,6 +114,7 @@ impl SessionSupervisor {
         let stderr = child.stderr.take().expect("piped");
 
         let watchdog = Watchdog::new(cfg.default_stall_seconds);
+        let watchdog_armed = Arc::new(AtomicBool::new(false));
         let out_events: Arc<Mutex<Option<OutEventsFiles>>> = Arc::new(Mutex::new(None));
         let stderr_file: Arc<Mutex<Option<std::fs::File>>> = Arc::new(Mutex::new(None));
         let between_turn_stderr = Arc::new(Mutex::new(StderrBuf {
@@ -119,6 +126,7 @@ impl SessionSupervisor {
             generation: 0,
         });
         let (dir_tx, dir_rx) = mpsc::channel(8);
+        let child_arc: Arc<Mutex<Option<Child>>> = Arc::new(Mutex::new(Some(child)));
 
         // Stdout reader task takes out_events.
         {
@@ -126,6 +134,7 @@ impl SessionSupervisor {
             let oe = out_events.clone();
             let sf = stderr_file.clone();
             let turn_rx = turn_rx.clone();
+            let dir_tx = dir_tx.clone();
             tokio::spawn(reader_task(stdout, watchdog, oe, sf, turn_rx, dir_tx));
         }
         // Stderr drain task takes stderr_file + buffer.
@@ -134,9 +143,17 @@ impl SessionSupervisor {
             let buf = between_turn_stderr.clone();
             tokio::spawn(stderr_drain_task(stderr, sf, buf));
         }
+        // Stall supervisor task: polls watchdog while armed, terminates child
+        // and emits SessionEvent::Stall on fire. Per fr:04 §126.
+        {
+            let watchdog = watchdog.clone();
+            let armed = watchdog_armed.clone();
+            let child_arc = child_arc.clone();
+            tokio::spawn(stall_supervisor_task(watchdog, armed, child_arc, dir_tx));
+        }
 
         Ok(Self {
-            child: Mutex::new(Some(child)),
+            child: child_arc,
             stdin: Mutex::new(Some(stdin)),
             out_events,
             stderr_file,
@@ -144,6 +161,7 @@ impl SessionSupervisor {
             turn: turn_tx,
             dir_rx: Mutex::new(dir_rx),
             watchdog,
+            watchdog_armed,
             default_stall_seconds: cfg.default_stall_seconds,
             between_turn_stderr,
         })
@@ -230,6 +248,11 @@ impl SessionSupervisor {
         } else {
             self.watchdog.set_stall_seconds(self.default_stall_seconds);
         }
+        // Reset idle clock so a long pause between turns (e.g. command-shape
+        // run between session pre and post) does not count toward this turn's
+        // stall window. Then arm the stall supervisor.
+        self.watchdog.tick_stdout();
+        self.watchdog_armed.store(true, Ordering::Relaxed);
 
         // Write body to stdin — keep stdin open across turns.
         {
@@ -247,9 +270,10 @@ impl SessionSupervisor {
                 .map_err(|_| PhaseInfraError::SessionStdinClosed { phase: kind })?;
         }
 
-        // Await directive (or schema drift, or exit).
+        // Await directive (or schema drift, or stall, or exit).
         let mut rx_guard = self.dir_rx.lock().await;
         let event = rx_guard.recv().await;
+        self.watchdog_armed.store(false, Ordering::Relaxed);
 
         match event {
             Some(SessionEvent::Directive { value }) => {
@@ -291,6 +315,9 @@ impl SessionSupervisor {
                     kind: FailureKind::SchemaDrift,
                 })
             }
+            Some(SessionEvent::Stall) => Ok(PhaseOutcome::Failure {
+                kind: FailureKind::Stall,
+            }),
             Some(SessionEvent::Exit) => Ok(PhaseOutcome::Failure {
                 kind: FailureKind::ProcessCrash,
             }),
@@ -450,6 +477,50 @@ async fn reader_task(
     let _ = dir_tx.send(SessionEvent::Exit).await;
 }
 
+async fn stall_supervisor_task(
+    watchdog: Watchdog,
+    armed: Arc<AtomicBool>,
+    child: Arc<Mutex<Option<Child>>>,
+    dir_tx: mpsc::Sender<SessionEvent>,
+) {
+    use std::time::Duration;
+    let mut interval = tokio::time::interval(Duration::from_millis(250));
+    interval.tick().await;
+    loop {
+        interval.tick().await;
+        // Bail out cleanly if the child is gone (shutdown / earlier stall).
+        {
+            let mut guard = child.lock().await;
+            let Some(c) = guard.as_mut() else {
+                return;
+            };
+            if c.try_wait().ok().flatten().is_some() {
+                return;
+            }
+        }
+        if !armed.load(Ordering::Relaxed) {
+            // Reset idle clock while disarmed so the next armed window starts
+            // from now, not from the last observed stdout byte.
+            watchdog.tick_stdout();
+            continue;
+        }
+        if !watchdog.is_stalled() {
+            continue;
+        }
+        // Send Stall before terminating so run_turn observes it ahead of the
+        // reader's Exit (mpsc preserves send order).
+        if dir_tx.send(SessionEvent::Stall).await.is_err() {
+            return;
+        }
+        let mut guard = child.lock().await;
+        if let Some(c) = guard.as_mut() {
+            crate::engine::stall::terminate_child_external(c).await;
+            *guard = None;
+        }
+        return;
+    }
+}
+
 async fn stderr_drain_task(
     mut stderr: tokio::process::ChildStderr,
     stderr_file: Arc<Mutex<Option<std::fs::File>>>,
@@ -560,6 +631,83 @@ done
         assert!(events.contains("\"thinking\""));
         assert!(events.contains("\"end\""));
         assert!(iter_dir.join("post.response.json").is_file());
+    }
+
+    #[tokio::test]
+    async fn run_turn_stalls_when_child_silent() {
+        // Fake AI that reads one stdin line then ignores SIGTERM and stays
+        // silent. The supervisor's stall task must terminate the child and
+        // run_turn must return Failure(Stall). Per fr:04 §126.
+        let script = r#"
+trap '' TERM
+read -r _line
+sleep 30
+"#;
+        let cfg = SessionConfig {
+            cli: "bash".to_string(),
+            argv: vec!["bash".to_string(), "-c".to_string(), script.to_string()],
+            default_stall_seconds: 1,
+            cwd: std::env::temp_dir(),
+            envs: Vec::new(),
+        };
+        let sup = SessionSupervisor::spawn(cfg).await.unwrap();
+        let tmp = tempfile::TempDir::new().unwrap();
+        let iter_dir = create_iter_dir(tmp.path(), "X", Uuid::nil(), 1).unwrap();
+        let started = std::time::Instant::now();
+        let outcome = sup
+            .run_turn(&iter_dir, PhaseKind::Post, b"go\n", None)
+            .await
+            .unwrap();
+        match outcome {
+            crate::engine::outcome::PhaseOutcome::Failure { kind } => {
+                assert_eq!(kind, crate::engine::outcome::FailureKind::Stall);
+            }
+            other => panic!("expected Failure(Stall), got {other:?}"),
+        }
+        // Stall window 1 s + grace 5 s — should finish well before 12 s.
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(12),
+            "stall + grace must finish within 12 s, took {:?}",
+            started.elapsed()
+        );
+        sup.shutdown(SessionShutdownReason::Failed).await;
+    }
+
+    #[tokio::test]
+    async fn run_turn_stalls_uses_per_turn_override() {
+        // default_stall_seconds=30, override=1; the override must take effect.
+        let script = r#"
+trap '' TERM
+read -r _line
+sleep 30
+"#;
+        let cfg = SessionConfig {
+            cli: "bash".to_string(),
+            argv: vec!["bash".to_string(), "-c".to_string(), script.to_string()],
+            default_stall_seconds: 30,
+            cwd: std::env::temp_dir(),
+            envs: Vec::new(),
+        };
+        let sup = SessionSupervisor::spawn(cfg).await.unwrap();
+        let tmp = tempfile::TempDir::new().unwrap();
+        let iter_dir = create_iter_dir(tmp.path(), "X", Uuid::nil(), 1).unwrap();
+        let started = std::time::Instant::now();
+        let outcome = sup
+            .run_turn(&iter_dir, PhaseKind::Post, b"go\n", Some(1))
+            .await
+            .unwrap();
+        match outcome {
+            crate::engine::outcome::PhaseOutcome::Failure { kind } => {
+                assert_eq!(kind, crate::engine::outcome::FailureKind::Stall);
+            }
+            other => panic!("expected Failure(Stall), got {other:?}"),
+        }
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(12),
+            "override stall + grace must finish within 12 s, took {:?}",
+            started.elapsed()
+        );
+        sup.shutdown(SessionShutdownReason::Failed).await;
     }
 
     #[tokio::test]

@@ -68,6 +68,17 @@ impl Watchdog {
         self.stall_seconds.store(seconds, Ordering::Relaxed);
     }
 
+    /// Returns `true` if the elapsed-since-last-byte interval exceeds the
+    /// configured stall window. Used by `SessionSupervisor`'s stall task to
+    /// poll without taking ownership of the child.
+    pub fn is_stalled(&self) -> bool {
+        let stall_ms = (self.stall_seconds.load(Ordering::Relaxed) as u64) * 1000;
+        let elapsed_ms = self.started.elapsed().as_millis() as u64;
+        let last = self.last_stdout_ms.load(Ordering::Relaxed);
+        let idle_ms = elapsed_ms.saturating_sub(last);
+        idle_ms > stall_ms
+    }
+
     /// Run the watchdog until either the child exits cleanly (`Healthy`) or
     /// the stall window elapses and the watchdog terminates the child
     /// (`StalledThenTerminated`).
