@@ -69,11 +69,17 @@ pub fn scan_directive_line(line: &str, kind: PhaseKind) -> DirectiveScan {
 
     match kind {
         PhaseKind::Pre => match PreDirective::try_from_str(directive_str) {
-            Some(d) => DirectiveScan::PreTerminal { directive: d, value },
+            Some(d) => DirectiveScan::PreTerminal {
+                directive: d,
+                value,
+            },
             None => DirectiveScan::SchemaDrift,
         },
         PhaseKind::Post => match PostDirective::try_from_str(directive_str) {
-            Some(d) => DirectiveScan::PostTerminal { directive: d, value },
+            Some(d) => DirectiveScan::PostTerminal {
+                directive: d,
+                value,
+            },
             None => DirectiveScan::SchemaDrift,
         },
         PhaseKind::Run => DirectiveScan::Advisory,
@@ -163,9 +169,18 @@ mod tests {
 
     #[test]
     fn scan_directive_line_not_json_for_garbage() {
-        assert_eq!(scan_directive_line("not json", PhaseKind::Post), DirectiveScan::NotJson);
-        assert_eq!(scan_directive_line("[1,2,3]", PhaseKind::Post), DirectiveScan::NotJson);
-        assert_eq!(scan_directive_line("\"plain string\"", PhaseKind::Post), DirectiveScan::NotJson);
+        assert_eq!(
+            scan_directive_line("not json", PhaseKind::Post),
+            DirectiveScan::NotJson
+        );
+        assert_eq!(
+            scan_directive_line("[1,2,3]", PhaseKind::Post),
+            DirectiveScan::NotJson
+        );
+        assert_eq!(
+            scan_directive_line("\"plain string\"", PhaseKind::Post),
+            DirectiveScan::NotJson
+        );
     }
 
     #[test]

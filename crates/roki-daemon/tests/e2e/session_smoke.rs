@@ -152,14 +152,22 @@ session_root = "{session_root}"
         }
     });
     let client = reqwest::Client::new();
-    let resp = client.post(&webhook_url).json(&payload).send().await.unwrap();
+    let resp = client
+        .post(&webhook_url)
+        .json(&payload)
+        .send()
+        .await
+        .unwrap();
     assert_eq!(resp.status().as_u16(), 202);
 
     let status = tokio::time::timeout(Duration::from_secs(20), child.wait())
         .await
         .expect("binary should exit within 20s")
         .expect("child wait succeeds");
-    assert!(status.success(), "binary should exit success, got {status:?}");
+    assert!(
+        status.success(),
+        "binary should exit success, got {status:?}"
+    );
 
     let ticket_dir = session_root.join("ENG-S");
     let cycle_entry = std::fs::read_dir(&ticket_dir)

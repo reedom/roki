@@ -15,8 +15,8 @@ use tokio::process::Command;
 
 use crate::error::PhaseInfraError;
 
-use super::context::{roki_env_pairs, PhaseContext};
-use super::directive::{parse_post_directive, parse_pre_directive, PostParse, PreParse};
+use super::context::{PhaseContext, roki_env_pairs};
+use super::directive::{PostParse, PreParse, parse_post_directive, parse_pre_directive};
 use super::outcome::{FailureKind, PhaseBody, PhaseKind, PhaseOutcome};
 use super::template::render_str;
 
@@ -102,50 +102,68 @@ async fn execute_at(
     cwd: &Path,
     stall_seconds: u32,
 ) -> Result<PhaseOutcome, PhaseInfraError> {
-        // 2. Build argv + stdin body.
-        let (argv_template, stdin_template_opt) = match body {
-            PhaseBody::InlineCmd { cmd } => {
-                // sh -c <rendered>
-                (format!("sh -c {}", shell_words::quote(cmd)), None)
-            }
-            PhaseBody::InlinePrompt { prompt } => {
-                (default_cli.to_string(), Some(prompt.clone()))
-            }
-            PhaseBody::Path { path, cli_override, .. } => {
-                // Read the workflow body from disk. The path was resolved at
-                // config-load time against the workflow file's parent so the
-                // executor reads the same file regardless of the daemon's
-                // working directory. Frontmatter is stripped; anything after
-                // a closing `---` (or the whole file if no frontmatter) is
-                // the rendered body. cli_override wins over default_cli.
-                let raw = match tokio::fs::read_to_string(path).await {
-                    Ok(s) => s,
-                    Err(source) => {
-                        return Err(PhaseInfraError::WorkflowBodyUnreadable {
-                            path: path.clone(),
-                            source,
-                        });
-                    }
-                };
-                let body_text = strip_frontmatter(&raw).to_string();
-                let cli = cli_override.clone().unwrap_or_else(|| default_cli.to_string());
-                (cli, Some(body_text))
-            }
-        };
+    // 2. Build argv + stdin body.
+    let (argv_template, stdin_template_opt) = match body {
+        PhaseBody::InlineCmd { cmd } => {
+            // sh -c <rendered>
+            (format!("sh -c {}", shell_words::quote(cmd)), None)
+        }
+        PhaseBody::InlinePrompt { prompt } => (default_cli.to_string(), Some(prompt.clone())),
+        PhaseBody::Path {
+            path, cli_override, ..
+        } => {
+            // Read the workflow body from disk. The path was resolved at
+            // config-load time against the workflow file's parent so the
+            // executor reads the same file regardless of the daemon's
+            // working directory. Frontmatter is stripped; anything after
+            // a closing `---` (or the whole file if no frontmatter) is
+            // the rendered body. cli_override wins over default_cli.
+            let raw = match tokio::fs::read_to_string(path).await {
+                Ok(s) => s,
+                Err(source) => {
+                    return Err(PhaseInfraError::WorkflowBodyUnreadable {
+                        path: path.clone(),
+                        source,
+                    });
+                }
+            };
+            let body_text = strip_frontmatter(&raw).to_string();
+            let cli = cli_override
+                .clone()
+                .unwrap_or_else(|| default_cli.to_string());
+            (cli, Some(body_text))
+        }
+    };
 
-        // 3. Liquid render argv + stdin. Render failures are directive-level
-        // failures routed via `FailureKind::TemplateError`; the underlying
-        // Liquid error is captured in a `tracing::warn` so the operator log
-        // identifies the failed expression and which stage (argv or stdin)
-        // tripped the renderer.
-        let argv_rendered = match render_str(&argv_template, ctx) {
-            Ok(s) => s,
+    // 3. Liquid render argv + stdin. Render failures are directive-level
+    // failures routed via `FailureKind::TemplateError`; the underlying
+    // Liquid error is captured in a `tracing::warn` so the operator log
+    // identifies the failed expression and which stage (argv or stdin)
+    // tripped the renderer.
+    let argv_rendered = match render_str(&argv_template, ctx) {
+        Ok(s) => s,
+        Err(err) => {
+            tracing::warn!(
+                phase = kind.as_str(),
+                iter = ctx.cycle.iter,
+                stage = "argv",
+                template = %argv_template,
+                error = %err,
+                "phase template render failed"
+            );
+            return Ok(PhaseOutcome::Failure {
+                kind: FailureKind::TemplateError,
+            });
+        }
+    };
+    let stdin_rendered = match stdin_template_opt {
+        Some(t) => match render_str(&t, ctx) {
+            Ok(s) => Some(s),
             Err(err) => {
                 tracing::warn!(
                     phase = kind.as_str(),
                     iter = ctx.cycle.iter,
-                    stage = "argv",
-                    template = %argv_template,
+                    stage = "stdin",
                     error = %err,
                     "phase template render failed"
                 );
@@ -153,174 +171,159 @@ async fn execute_at(
                     kind: FailureKind::TemplateError,
                 });
             }
-        };
-        let stdin_rendered = match stdin_template_opt {
-            Some(t) => match render_str(&t, ctx) {
-                Ok(s) => Some(s),
-                Err(err) => {
-                    tracing::warn!(
-                        phase = kind.as_str(),
-                        iter = ctx.cycle.iter,
-                        stage = "stdin",
-                        error = %err,
-                        "phase template render failed"
-                    );
-                    return Ok(PhaseOutcome::Failure {
-                        kind: FailureKind::TemplateError,
-                    });
-                }
-            },
-            None => None,
-        };
+        },
+        None => None,
+    };
 
-        // 4. shell-words split argv.
-        let argv = shell_words::split(&argv_rendered).map_err(|err| PhaseInfraError::Spawn {
-            cmd: argv_rendered.clone(),
-            source: std::io::Error::new(std::io::ErrorKind::InvalidInput, err.to_string()),
-        })?;
-        let Some((bin, rest)) = argv.split_first() else {
-            return Err(PhaseInfraError::Spawn {
-                cmd: argv_rendered,
-                source: std::io::Error::new(std::io::ErrorKind::InvalidInput, "empty argv"),
-            });
-        };
+    // 4. shell-words split argv.
+    let argv = shell_words::split(&argv_rendered).map_err(|err| PhaseInfraError::Spawn {
+        cmd: argv_rendered.clone(),
+        source: std::io::Error::new(std::io::ErrorKind::InvalidInput, err.to_string()),
+    })?;
+    let Some((bin, rest)) = argv.split_first() else {
+        return Err(PhaseInfraError::Spawn {
+            cmd: argv_rendered,
+            source: std::io::Error::new(std::io::ErrorKind::InvalidInput, "empty argv"),
+        });
+    };
 
-        // 5. Open the on-disk stdout/stderr files via the existing helper.
-        let (stdout_file, stderr_file) = crate::capture::open_phase_files(iter_dir, kind)?;
+    // 5. Open the on-disk stdout/stderr files via the existing helper.
+    let (stdout_file, stderr_file) = crate::capture::open_phase_files(iter_dir, kind)?;
 
-        // 6. Build the Command (piped stdio so we can tee).
-        let env_pairs = roki_env_pairs(ctx);
-        let mut cmd = Command::new(bin);
-        cmd.args(rest)
-            .current_dir(cwd)
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
-        if stdin_rendered.is_some() {
-            cmd.stdin(Stdio::piped());
-        } else {
-            cmd.stdin(Stdio::null());
+    // 6. Build the Command (piped stdio so we can tee).
+    let env_pairs = roki_env_pairs(ctx);
+    let mut cmd = Command::new(bin);
+    cmd.args(rest)
+        .current_dir(cwd)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    if stdin_rendered.is_some() {
+        cmd.stdin(Stdio::piped());
+    } else {
+        cmd.stdin(Stdio::null());
+    }
+    // env_clear so only ROKI_* + a small passthrough set is present.
+    cmd.env_clear();
+    for var in ["PATH", "HOME", "USER"] {
+        if let Ok(val) = std::env::var(var) {
+            cmd.env(var, val);
         }
-        // env_clear so only ROKI_* + a small passthrough set is present.
-        cmd.env_clear();
-        for var in ["PATH", "HOME", "USER"] {
-            if let Ok(val) = std::env::var(var) {
-                cmd.env(var, val);
-            }
-        }
-        for (k, v) in env_pairs {
-            cmd.env(k, v);
-        }
+    }
+    for (k, v) in env_pairs {
+        cmd.env(k, v);
+    }
 
-        // 7. Spawn.
-        let started = Instant::now();
-        let mut child = cmd.spawn().map_err(|source| PhaseInfraError::Spawn {
-            cmd: argv_rendered.clone(),
-            source,
-        })?;
+    // 7. Spawn.
+    let started = Instant::now();
+    let mut child = cmd.spawn().map_err(|source| PhaseInfraError::Spawn {
+        cmd: argv_rendered.clone(),
+        source,
+    })?;
 
-        // 8. Write stdin once if needed; close it.
-        if let Some(body) = stdin_rendered.as_ref() {
-            // We set `Stdio::piped()` above whenever stdin_rendered is Some,
-            // so child.stdin must be present here. If the handle is already
-            // gone, the child would receive an empty stdin and the rendered
-            // body would be silently dropped; surface that as an infra error
-            // rather than letting the AI subprocess run without its prompt.
-            let mut stdin = child.stdin.take().ok_or_else(|| PhaseInfraError::StdinUnavailable {
+    // 8. Write stdin once if needed; close it.
+    if let Some(body) = stdin_rendered.as_ref() {
+        // We set `Stdio::piped()` above whenever stdin_rendered is Some,
+        // so child.stdin must be present here. If the handle is already
+        // gone, the child would receive an empty stdin and the rendered
+        // body would be silently dropped; surface that as an infra error
+        // rather than letting the AI subprocess run without its prompt.
+        let mut stdin = child
+            .stdin
+            .take()
+            .ok_or_else(|| PhaseInfraError::StdinUnavailable {
                 cmd: argv_rendered.clone(),
             })?;
-            stdin
-                .write_all(body.as_bytes())
-                .await
-                .map_err(|source| PhaseInfraError::StdinWrite {
-                    cmd: argv_rendered.clone(),
-                    source,
-                })?;
-            drop(stdin);
-        }
+        stdin
+            .write_all(body.as_bytes())
+            .await
+            .map_err(|source| PhaseInfraError::StdinWrite {
+                cmd: argv_rendered.clone(),
+                source,
+            })?;
+        drop(stdin);
+    }
 
-        // 9. Tee stdout and drain stderr via tokio tasks while the watchdog
-        //    polls the child for stall. Per-byte `tick_stdout` keeps the
-        //    watchdog honest; the stall surfaces as `FailureKind::Stall`.
-        let stdout_pipe = child.stdout.take().expect("piped");
-        let stderr_pipe = child.stderr.take().expect("piped");
-        let watchdog = crate::engine::stall::Watchdog::new(stall_seconds);
+    // 9. Tee stdout and drain stderr via tokio tasks while the watchdog
+    //    polls the child for stall. Per-byte `tick_stdout` keeps the
+    //    watchdog honest; the stall surfaces as `FailureKind::Stall`.
+    let stdout_pipe = child.stdout.take().expect("piped");
+    let stderr_pipe = child.stderr.take().expect("piped");
+    let watchdog = crate::engine::stall::Watchdog::new(stall_seconds);
 
-        let stdout_task = {
-            let wd = watchdog.clone();
-            let raw = stdout_file;
-            let kind_for_task = kind;
-            let iter_dir_for_task = iter_dir.to_path_buf();
-            tokio::spawn(async move {
-                tee_stdout(stdout_pipe, raw, wd, kind_for_task, iter_dir_for_task).await;
+    let stdout_task = {
+        let wd = watchdog.clone();
+        let raw = stdout_file;
+        let kind_for_task = kind;
+        let iter_dir_for_task = iter_dir.to_path_buf();
+        tokio::spawn(async move {
+            tee_stdout(stdout_pipe, raw, wd, kind_for_task, iter_dir_for_task).await;
+        })
+    };
+
+    let stderr_task = {
+        let raw = stderr_file;
+        tokio::spawn(async move {
+            drain_stderr(stderr_pipe, raw).await;
+        })
+    };
+
+    // 10. Watchdog drives termination on stall. When it fires, the
+    //     child has been signalled (SIGTERM, then SIGKILL after grace),
+    //     so `child.wait()` will succeed with a signal-encoded status.
+    let stall_outcome = watchdog.run(&mut child).await;
+    let _ = stdout_task.await;
+    let _ = stderr_task.await;
+    let exit_status = child.wait().await.map_err(|source| PhaseInfraError::Wait {
+        cmd: argv_rendered.clone(),
+        source,
+    })?;
+    let duration_seconds = started.elapsed().as_secs();
+
+    if stall_outcome == crate::engine::stall::StallOutcome::StalledThenTerminated {
+        return Ok(PhaseOutcome::Failure {
+            kind: FailureKind::Stall,
+        });
+    }
+
+    // 9. Translate exit + stdout into PhaseOutcome.
+    match kind {
+        PhaseKind::Run => {
+            let exit_code = exit_status.code().unwrap_or(-1);
+            crate::capture::write_run_exit_code(iter_dir, exit_code)?;
+            Ok(PhaseOutcome::RunDone {
+                exit_code,
+                duration_seconds,
             })
-        };
-
-        let stderr_task = {
-            let raw = stderr_file;
-            tokio::spawn(async move {
-                drain_stderr(stderr_pipe, raw).await;
-            })
-        };
-
-        // 10. Watchdog drives termination on stall. When it fires, the
-        //     child has been signalled (SIGTERM, then SIGKILL after grace),
-        //     so `child.wait()` will succeed with a signal-encoded status.
-        let stall_outcome = watchdog.run(&mut child).await;
-        let _ = stdout_task.await;
-        let _ = stderr_task.await;
-        let exit_status = child.wait().await.map_err(|source| PhaseInfraError::Wait {
-            cmd: argv_rendered.clone(),
-            source,
-        })?;
-        let duration_seconds = started.elapsed().as_secs();
-
-        if stall_outcome == crate::engine::stall::StallOutcome::StalledThenTerminated {
-            return Ok(PhaseOutcome::Failure {
-                kind: FailureKind::Stall,
-            });
         }
-
-        // 9. Translate exit + stdout into PhaseOutcome.
-        match kind {
-            PhaseKind::Run => {
-                let exit_code = exit_status.code().unwrap_or(-1);
-                crate::capture::write_run_exit_code(iter_dir, exit_code)?;
-                Ok(PhaseOutcome::RunDone {
-                    exit_code,
-                    duration_seconds,
-                })
-            }
-            PhaseKind::Pre => {
-                let stdout_path = iter_dir.join(format!("{}.stdout", kind.as_str()));
-                let bytes = std::fs::read(&stdout_path)
-                    .map_err(|source| PhaseInfraError::Spawn {
-                        cmd: argv_rendered.clone(),
-                        source,
-                    })?;
-                match parse_pre_directive(&bytes, exit_status.success()) {
-                    PreParse::Ok { directive, payload } => {
-                        crate::capture::write_response_json(iter_dir, kind, &payload)?;
-                        Ok(PhaseOutcome::PreDirective { directive, payload })
-                    }
-                    PreParse::Failed(kind) => Ok(PhaseOutcome::Failure { kind }),
+        PhaseKind::Pre => {
+            let stdout_path = iter_dir.join(format!("{}.stdout", kind.as_str()));
+            let bytes = std::fs::read(&stdout_path).map_err(|source| PhaseInfraError::Spawn {
+                cmd: argv_rendered.clone(),
+                source,
+            })?;
+            match parse_pre_directive(&bytes, exit_status.success()) {
+                PreParse::Ok { directive, payload } => {
+                    crate::capture::write_response_json(iter_dir, kind, &payload)?;
+                    Ok(PhaseOutcome::PreDirective { directive, payload })
                 }
-            }
-            PhaseKind::Post => {
-                let stdout_path = iter_dir.join(format!("{}.stdout", kind.as_str()));
-                let bytes = std::fs::read(&stdout_path)
-                    .map_err(|source| PhaseInfraError::Spawn {
-                        cmd: argv_rendered.clone(),
-                        source,
-                    })?;
-                match parse_post_directive(&bytes, exit_status.success()) {
-                    PostParse::Ok { directive, payload } => {
-                        crate::capture::write_response_json(iter_dir, kind, &payload)?;
-                        Ok(PhaseOutcome::PostDirective { directive, payload })
-                    }
-                    PostParse::Failed(kind) => Ok(PhaseOutcome::Failure { kind }),
-                }
+                PreParse::Failed(kind) => Ok(PhaseOutcome::Failure { kind }),
             }
         }
+        PhaseKind::Post => {
+            let stdout_path = iter_dir.join(format!("{}.stdout", kind.as_str()));
+            let bytes = std::fs::read(&stdout_path).map_err(|source| PhaseInfraError::Spawn {
+                cmd: argv_rendered.clone(),
+                source,
+            })?;
+            match parse_post_directive(&bytes, exit_status.success()) {
+                PostParse::Ok { directive, payload } => {
+                    crate::capture::write_response_json(iter_dir, kind, &payload)?;
+                    Ok(PhaseOutcome::PostDirective { directive, payload })
+                }
+                PostParse::Failed(kind) => Ok(PhaseOutcome::Failure { kind }),
+            }
+        }
+    }
 }
 
 /// Strip optional YAML frontmatter (`---` … `---` at file start) and return
@@ -400,7 +403,7 @@ async fn tee_stdout(
     kind: crate::engine::outcome::PhaseKind,
     iter_dir: std::path::PathBuf,
 ) {
-    use crate::engine::stream::{scan_run_terminal_line, LineSplitter};
+    use crate::engine::stream::{LineSplitter, scan_run_terminal_line};
     use std::io::Write;
 
     let mut splitter = LineSplitter::new(stdout_pipe);
@@ -432,10 +435,7 @@ async fn tee_stdout(
 
 /// Drain stderr to the on-disk capture file. We don't tick the watchdog on
 /// stderr — only stdout silence counts as a stall per fr:04.
-async fn drain_stderr(
-    mut stderr_pipe: tokio::process::ChildStderr,
-    mut raw_writer: std::fs::File,
-) {
+async fn drain_stderr(mut stderr_pipe: tokio::process::ChildStderr, mut raw_writer: std::fs::File) {
     use std::io::Write;
     use tokio::io::AsyncReadExt;
     let mut buf = [0u8; 4096];
@@ -476,11 +476,23 @@ mod tests {
 
     fn cfg() -> RokiConfig {
         RokiConfig {
-            linear: LinearSection { token: "x".to_string() },
-            linear_webhook: LinearWebhookSection { bind: "127.0.0.1".to_string(), port: 8000, secret: None },
-            default_ai_command: DefaultAiCommandSection { cli: "echo".to_string(), stall_seconds: 300 },
+            linear: LinearSection {
+                token: "x".to_string(),
+            },
+            linear_webhook: LinearWebhookSection {
+                bind: "127.0.0.1".to_string(),
+                port: 8000,
+                secret: None,
+            },
+            default_ai_command: DefaultAiCommandSection {
+                cli: "echo".to_string(),
+                stall_seconds: 300,
+            },
             engine: EngineSection { max_iterations: 10 },
-            paths: PathsSection { workflow: PathBuf::from("/tmp"), session_root: PathBuf::from("/tmp") },
+            paths: PathsSection {
+                workflow: PathBuf::from("/tmp"),
+                session_root: PathBuf::from("/tmp"),
+            },
             log: LogSection::default(),
             default_ai_session: None,
         }
@@ -505,8 +517,8 @@ mod tests {
                 PhaseBody::InlineCmd { cmd } => format!("sh -c {}", shell_words::quote(cmd)),
                 _ => panic!("DirectExec only supports InlineCmd"),
             };
-            let argv_rendered = render_str(&argv_template, ctx)
-                .map_err(|_| PhaseInfraError::Spawn {
+            let argv_rendered =
+                render_str(&argv_template, ctx).map_err(|_| PhaseInfraError::Spawn {
                     cmd: argv_template.clone(),
                     source: std::io::Error::new(std::io::ErrorKind::InvalidInput, "render failed"),
                 })?;
@@ -534,7 +546,10 @@ mod tests {
                 PhaseKind::Run => {
                     let exit_code = exit_status.code().unwrap_or(-1);
                     crate::capture::write_run_exit_code(iter_dir, exit_code)?;
-                    Ok(PhaseOutcome::RunDone { exit_code, duration_seconds })
+                    Ok(PhaseOutcome::RunDone {
+                        exit_code,
+                        duration_seconds,
+                    })
                 }
                 PhaseKind::Pre => {
                     let bytes = std::fs::read(iter_dir.join("pre.stdout")).unwrap();
@@ -563,16 +578,22 @@ mod tests {
     #[tokio::test]
     async fn run_phase_writes_exit_code_and_stdout() {
         let tmp = tempfile::tempdir().unwrap();
-        let iter_dir = crate::capture::create_iter_dir(tmp.path(), "ENG-9", Uuid::nil(), 1).unwrap();
+        let iter_dir =
+            crate::capture::create_iter_dir(tmp.path(), "ENG-9", Uuid::nil(), 1).unwrap();
         let exec = DirectExec {
             default_cli: "echo".to_string(),
             cwd: tmp.path().to_path_buf(),
         };
         let mut ctx = PhaseContext::new(&admitted(), Uuid::nil(), &cfg(), CycleKind::Rule);
         ctx.set_iter(1);
-        let body = PhaseBody::InlineCmd { cmd: "printf hello; printf err 1>&2; exit 5".into() };
+        let body = PhaseBody::InlineCmd {
+            cmd: "printf hello; printf err 1>&2; exit 5".into(),
+        };
 
-        let out = exec.execute(PhaseKind::Run, &body, &ctx, &iter_dir).await.unwrap();
+        let out = exec
+            .execute(PhaseKind::Run, &body, &ctx, &iter_dir)
+            .await
+            .unwrap();
         match out {
             PhaseOutcome::RunDone { exit_code, .. } => assert_eq!(exit_code, 5),
             other => panic!("unexpected outcome: {other:?}"),
@@ -588,7 +609,8 @@ mod tests {
     #[tokio::test]
     async fn pre_phase_parses_directive_and_writes_response_json() {
         let tmp = tempfile::tempdir().unwrap();
-        let iter_dir = crate::capture::create_iter_dir(tmp.path(), "ENG-9", Uuid::nil(), 1).unwrap();
+        let iter_dir =
+            crate::capture::create_iter_dir(tmp.path(), "ENG-9", Uuid::nil(), 1).unwrap();
         let exec = DirectExec {
             default_cli: "echo".to_string(),
             cwd: tmp.path().to_path_buf(),
@@ -598,7 +620,10 @@ mod tests {
             cmd: r#"printf '{"directive":"run","outcome":"ok"}'"#.to_string(),
         };
 
-        let out = exec.execute(PhaseKind::Pre, &body, &ctx, &iter_dir).await.unwrap();
+        let out = exec
+            .execute(PhaseKind::Pre, &body, &ctx, &iter_dir)
+            .await
+            .unwrap();
         match out {
             PhaseOutcome::PreDirective { directive, payload } => {
                 assert_eq!(directive, PreDirective::Run);
@@ -614,17 +639,25 @@ mod tests {
     #[tokio::test]
     async fn pre_phase_unparseable_yields_failure() {
         let tmp = tempfile::tempdir().unwrap();
-        let iter_dir = crate::capture::create_iter_dir(tmp.path(), "ENG-9", Uuid::nil(), 1).unwrap();
+        let iter_dir =
+            crate::capture::create_iter_dir(tmp.path(), "ENG-9", Uuid::nil(), 1).unwrap();
         let exec = DirectExec {
             default_cli: "echo".to_string(),
             cwd: tmp.path().to_path_buf(),
         };
         let ctx = PhaseContext::new(&admitted(), Uuid::nil(), &cfg(), CycleKind::Rule);
-        let body = PhaseBody::InlineCmd { cmd: r#"printf 'not json'"#.to_string() };
+        let body = PhaseBody::InlineCmd {
+            cmd: r#"printf 'not json'"#.to_string(),
+        };
 
-        let out = exec.execute(PhaseKind::Pre, &body, &ctx, &iter_dir).await.unwrap();
+        let out = exec
+            .execute(PhaseKind::Pre, &body, &ctx, &iter_dir)
+            .await
+            .unwrap();
         match out {
-            PhaseOutcome::Failure { kind: FailureKind::Unparseable } => {}
+            PhaseOutcome::Failure {
+                kind: FailureKind::Unparseable,
+            } => {}
             other => panic!("expected Unparseable failure, got {other:?}"),
         }
     }
@@ -635,7 +668,8 @@ mod tests {
         // intact in the child process. Use the production execute_at path so
         // the env_clear + roki_env_pairs + Command::env loop are exercised.
         let tmp = tempfile::tempdir().unwrap();
-        let iter_dir = crate::capture::create_iter_dir(tmp.path(), "ENG-9", Uuid::nil(), 1).unwrap();
+        let iter_dir =
+            crate::capture::create_iter_dir(tmp.path(), "ENG-9", Uuid::nil(), 1).unwrap();
         let mut ctx = PhaseContext::new(&admitted(), Uuid::nil(), &cfg(), CycleKind::Rule);
         ctx.set_iter(1);
         let body = PhaseBody::InlineCmd {
@@ -666,7 +700,8 @@ mod tests {
         // written to the child's stdin. Use `cat` as default_cli so stdout
         // mirrors stdin and we can assert the directive JSON parses through.
         let tmp = tempfile::tempdir().unwrap();
-        let iter_dir = crate::capture::create_iter_dir(tmp.path(), "ENG-9", Uuid::nil(), 1).unwrap();
+        let iter_dir =
+            crate::capture::create_iter_dir(tmp.path(), "ENG-9", Uuid::nil(), 1).unwrap();
         let ctx = PhaseContext::new(&admitted(), Uuid::nil(), &cfg(), CycleKind::Rule);
         let body = PhaseBody::InlinePrompt {
             prompt: r#"{"directive":"run","outcome":"piped"}"#.to_string(),
@@ -690,9 +725,9 @@ mod tests {
     #[tokio::test]
     async fn pre_phase_path_body_reads_file_strips_frontmatter_and_honors_cli_override() {
         let tmp = tempfile::tempdir().unwrap();
-        let iter_dir = crate::capture::create_iter_dir(tmp.path(), "ENG-9", Uuid::nil(), 1).unwrap();
-        let workflow_body =
-            "---\ncli: ignored-by-frontmatter-not-implemented\n---\n{\"directive\":\"end\",\"outcome\":\"path-ok\"}";
+        let iter_dir =
+            crate::capture::create_iter_dir(tmp.path(), "ENG-9", Uuid::nil(), 1).unwrap();
+        let workflow_body = "---\ncli: ignored-by-frontmatter-not-implemented\n---\n{\"directive\":\"end\",\"outcome\":\"path-ok\"}";
         let body_path = tmp.path().join("phase.md");
         std::fs::write(&body_path, workflow_body).unwrap();
 
@@ -729,7 +764,8 @@ mod tests {
     #[tokio::test]
     async fn path_body_missing_file_returns_workflow_body_unreadable() {
         let tmp = tempfile::tempdir().unwrap();
-        let iter_dir = crate::capture::create_iter_dir(tmp.path(), "ENG-9", Uuid::nil(), 1).unwrap();
+        let iter_dir =
+            crate::capture::create_iter_dir(tmp.path(), "ENG-9", Uuid::nil(), 1).unwrap();
         let missing = tmp.path().join("does-not-exist.md");
         let ctx = PhaseContext::new(&admitted(), Uuid::nil(), &cfg(), CycleKind::Rule);
         let body = PhaseBody::Path {
@@ -764,13 +800,8 @@ mod tests {
     #[tokio::test]
     async fn run_phase_extracts_terminal_result_event() {
         let tmp = tempfile::TempDir::new().unwrap();
-        let iter_dir = crate::capture::create_iter_dir(
-            tmp.path(),
-            "ENG-1",
-            uuid::Uuid::nil(),
-            1,
-        )
-        .unwrap();
+        let iter_dir =
+            crate::capture::create_iter_dir(tmp.path(), "ENG-1", uuid::Uuid::nil(), 1).unwrap();
         let body = crate::engine::outcome::PhaseBody::InlineCmd {
             cmd: r#"printf '%s\n' '{"type":"thinking"}' '{"type":"result","is_error":false,"result":"ok"}'"#
                 .to_string(),
@@ -802,13 +833,8 @@ mod tests {
     #[tokio::test]
     async fn run_phase_omits_terminal_when_no_result_event() {
         let tmp = tempfile::TempDir::new().unwrap();
-        let iter_dir = crate::capture::create_iter_dir(
-            tmp.path(),
-            "ENG-1",
-            uuid::Uuid::nil(),
-            1,
-        )
-        .unwrap();
+        let iter_dir =
+            crate::capture::create_iter_dir(tmp.path(), "ENG-1", uuid::Uuid::nil(), 1).unwrap();
         let body = crate::engine::outcome::PhaseBody::InlineCmd {
             cmd: "echo plain".to_string(),
         };
@@ -833,13 +859,8 @@ mod tests {
         // Idle stdout for longer than the stall window must surface as
         // FailureKind::Stall via the watchdog-driven termination path.
         let tmp = tempfile::TempDir::new().unwrap();
-        let iter_dir = crate::capture::create_iter_dir(
-            tmp.path(),
-            "ENG-1",
-            Uuid::nil(),
-            1,
-        )
-        .unwrap();
+        let iter_dir =
+            crate::capture::create_iter_dir(tmp.path(), "ENG-1", Uuid::nil(), 1).unwrap();
         let body = PhaseBody::InlineCmd {
             cmd: "sleep 30".to_string(),
         };
@@ -857,7 +878,9 @@ mod tests {
         .await
         .unwrap();
         match outcome {
-            PhaseOutcome::Failure { kind: FailureKind::Stall } => {}
+            PhaseOutcome::Failure {
+                kind: FailureKind::Stall,
+            } => {}
             other => panic!("expected Failure(Stall), got {other:?}"),
         }
     }

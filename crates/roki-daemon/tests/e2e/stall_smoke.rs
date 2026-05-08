@@ -118,7 +118,12 @@ session_root = "{session_root}"
         }
     });
     let client = reqwest::Client::new();
-    let resp = client.post(&webhook_url).json(&payload).send().await.unwrap();
+    let resp = client
+        .post(&webhook_url)
+        .json(&payload)
+        .send()
+        .await
+        .unwrap();
     assert_eq!(resp.status().as_u16(), 202);
 
     let status = tokio::time::timeout(Duration::from_secs(15), child.wait())
@@ -141,7 +146,10 @@ session_root = "{session_root}"
         .expect("cycle-<uuid> dir present");
     let cycle_path = cycle_entry.path();
     let iter_dir = cycle_path.join("iter-1");
-    assert!(iter_dir.join("run.stdout").is_file(), "run.stdout preserved");
+    assert!(
+        iter_dir.join("run.stdout").is_file(),
+        "run.stdout preserved"
+    );
     assert!(
         !iter_dir.join("run.terminal.json").exists(),
         "run.terminal.json must not exist (no result event emitted)"

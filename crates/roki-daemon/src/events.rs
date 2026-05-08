@@ -80,7 +80,13 @@ pub fn events_path(session_root: &Path, ticket_id: &str) -> PathBuf {
 /// `capture::sanitize` so the events file's stem matches the ticket dir name.
 fn sanitize_ticket(id: &str) -> String {
     id.chars()
-        .map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' { c } else { '_' })
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
         .collect()
 }
 
@@ -95,10 +101,7 @@ impl EventWriter {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        let file = OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&path)?;
+        let file = OpenOptions::new().create(true).append(true).open(&path)?;
         Ok(Self {
             file: BufWriter::new(file),
             path,
@@ -106,8 +109,7 @@ impl EventWriter {
     }
 
     pub fn emit(&mut self, event: &Event) -> std::io::Result<()> {
-        serde_json::to_writer(&mut self.file, event)
-            .map_err(std::io::Error::other)?;
+        serde_json::to_writer(&mut self.file, event).map_err(std::io::Error::other)?;
         self.file.write_all(b"\n")?;
         self.file.flush()?;
         Ok(())

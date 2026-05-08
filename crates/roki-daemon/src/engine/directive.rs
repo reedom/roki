@@ -204,7 +204,11 @@ mod tests {
 
     #[test]
     fn parse_post_pre_run_end_all_legal() {
-        let cases = [("pre", PostDirective::Pre), ("run", PostDirective::Run), ("end", PostDirective::End)];
+        let cases = [
+            ("pre", PostDirective::Pre),
+            ("run", PostDirective::Run),
+            ("end", PostDirective::End),
+        ];
         for (s, expected) in cases {
             let body = format!(r#"{{"directive":"{}"}}"#, s);
             match parse_post_directive(body.as_bytes(), true) {

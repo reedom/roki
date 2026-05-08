@@ -40,7 +40,10 @@ async fn fs_poison_routes_through_on_failure() {
     // Both fail because session_root is a file, not a directory.
     let session_root = work.path().join("sessions");
     std::fs::write(&session_root, b"not a dir").unwrap();
-    assert!(session_root.is_file(), "pre-condition: sessions must be a file");
+    assert!(
+        session_root.is_file(),
+        "pre-condition: sessions must be a file"
+    );
 
     let ticket_id = "ENG-500";
 
@@ -126,7 +129,12 @@ session_root = "{session_root}"
         }
     });
     let client = reqwest::Client::new();
-    let resp = client.post(&webhook_url).json(&payload).send().await.unwrap();
+    let resp = client
+        .post(&webhook_url)
+        .json(&payload)
+        .send()
+        .await
+        .unwrap();
     assert_eq!(resp.status().as_u16(), 202);
 
     let status = tokio::time::timeout(Duration::from_secs(15), child.wait())

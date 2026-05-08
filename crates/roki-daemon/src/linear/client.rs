@@ -148,15 +148,13 @@ mod tests {
             .await;
         let url = format!("{}/graphql", server.uri());
 
-        let me = temp_env::async_with_vars(
-            [("ROKI_LINEAR_GRAPHQL_URL", Some(url.as_str()))],
-            async {
+        let me =
+            temp_env::async_with_vars([("ROKI_LINEAR_GRAPHQL_URL", Some(url.as_str()))], async {
                 let client = LinearClient::new("token-abc".into());
                 client.resolve_viewer().await
-            },
-        )
-        .await
-        .expect("resolve_viewer should succeed against the stub");
+            })
+            .await
+            .expect("resolve_viewer should succeed against the stub");
 
         assert_eq!(me, MeId("u1".into()));
     }
@@ -170,14 +168,12 @@ mod tests {
             .await;
         let url = format!("{}/graphql", server.uri());
 
-        let result = temp_env::async_with_vars(
-            [("ROKI_LINEAR_GRAPHQL_URL", Some(url.as_str()))],
-            async {
+        let result =
+            temp_env::async_with_vars([("ROKI_LINEAR_GRAPHQL_URL", Some(url.as_str()))], async {
                 let client = LinearClient::new("t".into());
                 client.resolve_viewer().await
-            },
-        )
-        .await;
+            })
+            .await;
 
         match result {
             Err(LinearClientError::ViewerResolveFailed { endpoint, reason }) => {
@@ -202,19 +198,16 @@ mod tests {
             .mount(&server)
             .await;
         let url = format!("{}/graphql", server.uri());
-        temp_env::async_with_vars(
-            [("ROKI_LINEAR_GRAPHQL_URL", Some(url.as_str()))],
-            async {
-                let client = LinearClient::new("token-abc".into());
-                match client.resolve_viewer().await {
-                    Err(LinearClientError::ViewerResolveFailed { endpoint, reason }) => {
-                        assert!(endpoint.contains("/graphql"));
-                        assert!(reason.starts_with("malformed body"));
-                    }
-                    other => panic!("expected ViewerResolveFailed, got {other:?}"),
+        temp_env::async_with_vars([("ROKI_LINEAR_GRAPHQL_URL", Some(url.as_str()))], async {
+            let client = LinearClient::new("token-abc".into());
+            match client.resolve_viewer().await {
+                Err(LinearClientError::ViewerResolveFailed { endpoint, reason }) => {
+                    assert!(endpoint.contains("/graphql"));
+                    assert!(reason.starts_with("malformed body"));
                 }
-            },
-        )
+                other => panic!("expected ViewerResolveFailed, got {other:?}"),
+            }
+        })
         .await;
     }
 
@@ -223,21 +216,18 @@ mod tests {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .respond_with(
-                ResponseTemplate::new(200)
-                    .set_body_json(serde_json::json!({"data":{"viewer":{}}})),
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({"data":{"viewer":{}}})),
             )
             .mount(&server)
             .await;
         let url = format!("{}/graphql", server.uri());
 
-        let result = temp_env::async_with_vars(
-            [("ROKI_LINEAR_GRAPHQL_URL", Some(url.as_str()))],
-            async {
+        let result =
+            temp_env::async_with_vars([("ROKI_LINEAR_GRAPHQL_URL", Some(url.as_str()))], async {
                 let client = LinearClient::new("t".into());
                 client.resolve_viewer().await
-            },
-        )
-        .await;
+            })
+            .await;
 
         match result {
             Err(LinearClientError::ViewerResolveFailed { endpoint, reason }) => {

@@ -120,7 +120,9 @@ pub enum WorkflowError {
         path: std::path::PathBuf,
         index: usize,
     },
-    #[error("[[on_failure]][{index}] sets multiple of when.kind / when.kind.in / when.kind.not; in {path}")]
+    #[error(
+        "[[on_failure]][{index}] sets multiple of when.kind / when.kind.in / when.kind.not; in {path}"
+    )]
     OnFailureKindMatcherConflict {
         path: std::path::PathBuf,
         index: usize,
@@ -189,9 +191,7 @@ pub enum WebhookError {
 /// config load time.
 #[derive(Debug, Error)]
 pub enum AdmissionError {
-    #[error(
-        "ticket {ticket_id} assignee mismatch: expected {expected}, got {got:?}"
-    )]
+    #[error("ticket {ticket_id} assignee mismatch: expected {expected}, got {got:?}")]
     AssigneeMismatch {
         ticket_id: String,
         expected: String,
@@ -274,10 +274,7 @@ pub enum PhaseInfraError {
     RepoNotFound { ghq: String },
 
     #[error("cycle failed: {} at iter {iter}", kind.as_str())]
-    CycleFailed {
-        kind: FailureKind,
-        iter: u32,
-    },
+    CycleFailed { kind: FailureKind, iter: u32 },
 
     #[error("phase executor returned unexpected outcome variant '{got_variant}' for phase {} at iter {iter}", phase.as_str())]
     ExecutorContract {

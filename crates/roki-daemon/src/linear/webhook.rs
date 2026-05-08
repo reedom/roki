@@ -118,7 +118,8 @@ fn service_unavailable(reason: &'static str) -> Response {
 /// Missing or wrong-typed fields surface as `Err(reason)`; the caller maps
 /// that to HTTP 400 with an `error_id` log key.
 fn parse_ticket(body: &[u8]) -> Result<NormalizedTicket, String> {
-    let value: Value = serde_json::from_slice(body).map_err(|err| format!("invalid json: {err}"))?;
+    let value: Value =
+        serde_json::from_slice(body).map_err(|err| format!("invalid json: {err}"))?;
 
     let id = value
         .pointer("/data/id")

@@ -111,11 +111,9 @@ impl WorkflowConfig {
             }
         };
 
-        let root: Value = toml::from_str(&raw).map_err(|source| {
-            WorkflowError::Parse {
-                path: path.to_path_buf(),
-                source,
-            }
+        let root: Value = toml::from_str(&raw).map_err(|source| WorkflowError::Parse {
+            path: path.to_path_buf(),
+            source,
         })?;
 
         let admission = parse_admission(path, &root)?;
@@ -124,7 +122,10 @@ impl WorkflowConfig {
         // relative `path = "..."` phase bodies. Falling back to "." keeps
         // operator paths interpretable when the workflow file path itself
         // has no parent (e.g. a bare filename).
-        let workflow_dir = path.parent().map(Path::to_path_buf).unwrap_or_else(|| PathBuf::from("."));
+        let workflow_dir = path
+            .parent()
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| PathBuf::from("."));
         let rules = parse_rules(path, &workflow_dir, &root)?;
         let cleanups = parse_cleanups(path, &workflow_dir, &root)?;
         let on_failures = parse_on_failures(path, &workflow_dir, &root)?;
@@ -141,10 +142,7 @@ impl WorkflowConfig {
 
 // ---------- Validators ----------
 
-fn parse_admission(
-    path: &Path,
-    root: &Value,
-) -> Result<AdmissionSection, WorkflowError> {
+fn parse_admission(path: &Path, root: &Value) -> Result<AdmissionSection, WorkflowError> {
     let admission_table = root
         .get("admission")
         .and_then(Value::as_table)
@@ -169,10 +167,7 @@ fn parse_admission(
 /// Take the first `[[admission.repos]]` entry's `ghq`. Tolerates absence
 /// of the array (returns `None`) and ignores per-entry `when.*` and
 /// `workflow` override fields per Req 2.5.
-fn parse_first_repo(
-    path: &Path,
-    root: &Value,
-) -> Result<Option<AdmissionRepo>, WorkflowError> {
+fn parse_first_repo(path: &Path, root: &Value) -> Result<Option<AdmissionRepo>, WorkflowError> {
     // `[[admission.repos]]` is parsed as `admission.repos = [..]`.
     let Some(repos_value) = root
         .get("admission")
@@ -182,23 +177,23 @@ fn parse_first_repo(
         return Ok(None);
     };
 
-    let repos = repos_value.as_array().ok_or_else(|| {
-        WorkflowError::MissingField {
+    let repos = repos_value
+        .as_array()
+        .ok_or_else(|| WorkflowError::MissingField {
             path: path.to_path_buf(),
             key: "admission.repos".to_string(),
-        }
-    })?;
+        })?;
 
     let Some(first) = repos.first() else {
         return Ok(None);
     };
 
-    let table = first.as_table().ok_or_else(|| {
-        WorkflowError::MissingField {
+    let table = first
+        .as_table()
+        .ok_or_else(|| WorkflowError::MissingField {
             path: path.to_path_buf(),
             key: "admission.repos[0]".to_string(),
-        }
-    })?;
+        })?;
 
     let ghq = table
         .get("ghq")
@@ -213,23 +208,19 @@ fn parse_first_repo(
     Ok(Some(AdmissionRepo { ghq }))
 }
 
-fn parse_rules(
-    path: &Path,
-    workflow_dir: &Path,
-    root: &Value,
-) -> Result<Vec<Rule>, WorkflowError> {
+fn parse_rules(path: &Path, workflow_dir: &Path, root: &Value) -> Result<Vec<Rule>, WorkflowError> {
     let Some(rule_value) = root.get("rule") else {
         // No rules is not a load-time error; rule no-match is a runtime
         // info-log per Req 5.4.
         return Ok(Vec::new());
     };
 
-    let raw_rules = rule_value.as_array().ok_or_else(|| {
-        WorkflowError::MissingField {
+    let raw_rules = rule_value
+        .as_array()
+        .ok_or_else(|| WorkflowError::MissingField {
             path: path.to_path_buf(),
             key: "rule".to_string(),
-        }
-    })?;
+        })?;
 
     let mut rules = Vec::with_capacity(raw_rules.len());
     for (idx, entry) in raw_rules.iter().enumerate() {
@@ -244,12 +235,12 @@ fn parse_rule_entry(
     idx: usize,
     entry: &Value,
 ) -> Result<Rule, WorkflowError> {
-    let table = entry.as_table().ok_or_else(|| {
-        WorkflowError::UnsupportedRunForm {
+    let table = entry
+        .as_table()
+        .ok_or_else(|| WorkflowError::UnsupportedRunForm {
             path: path.to_path_buf(),
             key: format!("rule[{idx}]"),
-        }
-    })?;
+        })?;
 
     let when = parse_when(path, idx, table)?;
 
@@ -272,11 +263,21 @@ fn parse_rule_entry(
     }
 
     let pre = match table.get("pre") {
-        Some(val) => Some(parse_phase_body(path, workflow_dir, &format!("rule[{idx}].pre"), val)?),
+        Some(val) => Some(parse_phase_body(
+            path,
+            workflow_dir,
+            &format!("rule[{idx}].pre"),
+            val,
+        )?),
         None => None,
     };
     let post = match table.get("post") {
-        Some(val) => Some(parse_phase_body(path, workflow_dir, &format!("rule[{idx}].post"), val)?),
+        Some(val) => Some(parse_phase_body(
+            path,
+            workflow_dir,
+            &format!("rule[{idx}].post"),
+            val,
+        )?),
         None => None,
     };
 
@@ -299,18 +300,18 @@ fn parse_when(
     idx: usize,
     rule_table: &toml::map::Map<String, Value>,
 ) -> Result<WhenClause, WorkflowError> {
-    let when_value = rule_table.get("when").ok_or_else(|| {
-        WorkflowError::MissingField {
+    let when_value = rule_table
+        .get("when")
+        .ok_or_else(|| WorkflowError::MissingField {
             path: path.to_path_buf(),
             key: format!("rule[{idx}].when"),
-        }
-    })?;
-    let when_table = when_value.as_table().ok_or_else(|| {
-        WorkflowError::UnsupportedWhen {
+        })?;
+    let when_table = when_value
+        .as_table()
+        .ok_or_else(|| WorkflowError::UnsupportedWhen {
             path: path.to_path_buf(),
             key: format!("rule[{idx}].when"),
-        }
-    })?;
+        })?;
 
     // Strict allow-list: only `status` and `labels` keys are permitted.
     // `labels` may carry only `has_all` per Req 5.2 / 5.3.
@@ -352,19 +353,18 @@ fn parse_when_labels(
     idx: usize,
     when_table: &toml::map::Map<String, Value>,
 ) -> Result<Vec<String>, WorkflowError> {
-    let labels_value =
-        when_table
-            .get("labels")
-            .ok_or_else(|| WorkflowError::MissingField {
-                path: path.to_path_buf(),
-                key: format!("rule[{idx}].when.labels.has_all"),
-            })?;
-    let labels_table = labels_value.as_table().ok_or_else(|| {
-        WorkflowError::UnsupportedWhen {
+    let labels_value = when_table
+        .get("labels")
+        .ok_or_else(|| WorkflowError::MissingField {
+            path: path.to_path_buf(),
+            key: format!("rule[{idx}].when.labels.has_all"),
+        })?;
+    let labels_table = labels_value
+        .as_table()
+        .ok_or_else(|| WorkflowError::UnsupportedWhen {
             path: path.to_path_buf(),
             key: format!("rule[{idx}].when.labels"),
-        }
-    })?;
+        })?;
 
     // Strict allow-list inside `when.labels`: only `has_all` is supported.
     for key in labels_table.keys() {
@@ -376,27 +376,27 @@ fn parse_when_labels(
         }
     }
 
-    let has_all_value = labels_table.get("has_all").ok_or_else(|| {
-        WorkflowError::MissingField {
+    let has_all_value = labels_table
+        .get("has_all")
+        .ok_or_else(|| WorkflowError::MissingField {
             path: path.to_path_buf(),
             key: format!("rule[{idx}].when.labels.has_all"),
-        }
-    })?;
-    let arr = has_all_value.as_array().ok_or_else(|| {
-        WorkflowError::UnsupportedWhen {
+        })?;
+    let arr = has_all_value
+        .as_array()
+        .ok_or_else(|| WorkflowError::UnsupportedWhen {
             path: path.to_path_buf(),
             key: format!("rule[{idx}].when.labels.has_all"),
-        }
-    })?;
+        })?;
 
     let mut labels = Vec::with_capacity(arr.len());
     for (label_idx, item) in arr.iter().enumerate() {
-        let s = item.as_str().ok_or_else(|| {
-            WorkflowError::UnsupportedWhen {
+        let s = item
+            .as_str()
+            .ok_or_else(|| WorkflowError::UnsupportedWhen {
                 path: path.to_path_buf(),
                 key: format!("rule[{idx}].when.labels.has_all[{label_idx}]"),
-            }
-        })?;
+            })?;
         labels.push(s.to_string());
     }
     Ok(labels)
@@ -408,12 +408,12 @@ fn parse_phase_body(
     key_prefix: &str,
     value: &Value,
 ) -> Result<crate::engine::outcome::PhaseBody, WorkflowError> {
-    let table = value.as_table().ok_or_else(|| {
-        WorkflowError::UnsupportedRunForm {
+    let table = value
+        .as_table()
+        .ok_or_else(|| WorkflowError::UnsupportedRunForm {
             path: path.to_path_buf(),
             key: key_prefix.to_string(),
-        }
-    })?;
+        })?;
 
     let inline_session_field = table.get("session");
 
@@ -510,16 +510,13 @@ fn parse_phase_body(
             .map(str::to_string);
 
         // Slice-2: workflow .md frontmatter resolves shape + stall_seconds + cli.
-        let body_text = std::fs::read_to_string(&resolved).map_err(|source| {
-            WorkflowError::Unreadable {
+        let body_text =
+            std::fs::read_to_string(&resolved).map_err(|source| WorkflowError::Unreadable {
                 path: resolved.clone(),
                 source,
-            }
-        })?;
-        let (header, _post) = crate::config::workflow_md::parse_workflow_md_frontmatter(
-            &resolved,
-            &body_text,
-        )?;
+            })?;
+        let (header, _post) =
+            crate::config::workflow_md::parse_workflow_md_frontmatter(&resolved, &body_text)?;
 
         let cli_override = toml_cli_override.or(header.cli);
 
@@ -543,10 +540,12 @@ fn parse_cleanups(
 
     let mut out = Vec::with_capacity(arr.len());
     for (idx, entry) in arr.iter().enumerate() {
-        let table = entry.as_table().ok_or_else(|| WorkflowError::MissingField {
-            path: path.to_path_buf(),
-            key: format!("cleanup[{idx}]"),
-        })?;
+        let table = entry
+            .as_table()
+            .ok_or_else(|| WorkflowError::MissingField {
+                path: path.to_path_buf(),
+                key: format!("cleanup[{idx}]"),
+            })?;
 
         let when = table.get("when").and_then(Value::as_table);
         let when_status = when
@@ -645,10 +644,12 @@ fn parse_on_failures(
 
     let mut out = Vec::with_capacity(arr.len());
     for (idx, entry) in arr.iter().enumerate() {
-        let table = entry.as_table().ok_or_else(|| WorkflowError::MissingField {
-            path: path.to_path_buf(),
-            key: format!("on_failure[{idx}]"),
-        })?;
+        let table = entry
+            .as_table()
+            .ok_or_else(|| WorkflowError::MissingField {
+                path: path.to_path_buf(),
+                key: format!("on_failure[{idx}]"),
+            })?;
 
         let when = table.get("when").and_then(Value::as_table);
         // when.kind can be a string OR a table. If string: KindMatcher::Eq.
@@ -670,10 +671,14 @@ fn parse_on_failures(
             }
         };
 
-        let forms_set = [kind_eq_str.is_some(), kind_in_arr.is_some(), kind_not_str.is_some()]
-            .iter()
-            .filter(|b| **b)
-            .count();
+        let forms_set = [
+            kind_eq_str.is_some(),
+            kind_in_arr.is_some(),
+            kind_not_str.is_some(),
+        ]
+        .iter()
+        .filter(|b| **b)
+        .count();
         if forms_set == 0 {
             return Err(WorkflowError::OnFailureMissingKind {
                 path: path.to_path_buf(),
@@ -698,11 +703,13 @@ fn parse_on_failures(
             }
             let mut ks = Vec::with_capacity(arr.len());
             for v in arr {
-                let s = v.as_str().ok_or_else(|| WorkflowError::OnFailureUnknownKind {
-                    path: path.to_path_buf(),
-                    index: idx,
-                    value: format!("{v:?}"),
-                })?;
+                let s = v
+                    .as_str()
+                    .ok_or_else(|| WorkflowError::OnFailureUnknownKind {
+                        path: path.to_path_buf(),
+                        index: idx,
+                        value: format!("{v:?}"),
+                    })?;
                 ks.push(parse_failure_kind(s, path, idx)?);
             }
             KindMatcher::In(ks)
@@ -878,8 +885,7 @@ cmd = "echo hi"
 "#;
         let path = write_toml(&dir, body);
 
-        let err = WorkflowConfig::load(&path)
-            .expect_err("when.assignee must be rejected");
+        let err = WorkflowConfig::load(&path).expect_err("when.assignee must be rejected");
         match err {
             WorkflowError::UnsupportedWhen { key, .. } => {
                 assert!(
@@ -910,8 +916,7 @@ has_all = []
 "#;
         let path = write_toml(&dir, body);
 
-        let err = WorkflowConfig::load(&path)
-            .expect_err("missing run table must be rejected");
+        let err = WorkflowConfig::load(&path).expect_err("missing run table must be rejected");
         match err {
             WorkflowError::UnsupportedRunForm { key, .. } => {
                 assert!(key.contains("run"), "key path: {key}");
@@ -944,8 +949,7 @@ cmd = "git status"
 "#;
         let path = write_toml(&dir, body);
 
-        let cfg = WorkflowConfig::load(&path)
-            .expect("cleanup presence must be tolerated");
+        let cfg = WorkflowConfig::load(&path).expect("cleanup presence must be tolerated");
         assert_eq!(cfg.rules.len(), 1);
     }
 
@@ -995,8 +999,7 @@ cmd = "echo hi"
 "#;
         let path = write_toml(&dir, body);
 
-        let cfg = WorkflowConfig::load(&path)
-            .expect("per-repo overrides must be tolerated");
+        let cfg = WorkflowConfig::load(&path).expect("per-repo overrides must be tolerated");
         let repo = cfg.repo.as_ref().expect("first repo present");
         assert_eq!(repo.ghq, "github.com/acme/widget");
     }
@@ -1022,8 +1025,7 @@ cmd = "echo hi"
 "#;
         let path = write_toml(&dir, body);
 
-        let err = WorkflowConfig::load(&path)
-            .expect_err("has_any must be rejected");
+        let err = WorkflowConfig::load(&path).expect_err("has_any must be rejected");
         match err {
             WorkflowError::UnsupportedWhen { key, .. } => {
                 assert!(
@@ -1092,7 +1094,9 @@ cmd = "echo post"
         let cfg = WorkflowConfig::load(&path).expect("loads ok");
         let rule = &cfg.rules[0];
         match &rule.pre {
-            Some(crate::engine::outcome::PhaseBody::InlineCmd { cmd }) => assert_eq!(cmd, "echo pre"),
+            Some(crate::engine::outcome::PhaseBody::InlineCmd { cmd }) => {
+                assert_eq!(cmd, "echo pre")
+            }
             other => panic!("expected pre InlineCmd, got {other:?}"),
         }
         match &rule.run {
@@ -1100,7 +1104,9 @@ cmd = "echo post"
             other => panic!("expected run InlineCmd, got {other:?}"),
         }
         match &rule.post {
-            Some(crate::engine::outcome::PhaseBody::InlineCmd { cmd }) => assert_eq!(cmd, "echo post"),
+            Some(crate::engine::outcome::PhaseBody::InlineCmd { cmd }) => {
+                assert_eq!(cmd, "echo post")
+            }
             other => panic!("expected post InlineCmd, got {other:?}"),
         }
     }
@@ -1208,8 +1214,7 @@ ghq = "github.com/acme/widget"
 "#;
         let path = write_toml(&dir, body);
 
-        let err = WorkflowConfig::load(&path)
-            .expect_err("missing admission.assignee fails");
+        let err = WorkflowConfig::load(&path).expect_err("missing admission.assignee fails");
         match err {
             WorkflowError::MissingField { key, .. } => {
                 assert_eq!(key, "admission.assignee");
@@ -1257,7 +1262,10 @@ cli = "claude"
                 shape,
                 stall_seconds,
             } => {
-                assert_eq!(path, &expected, "relative path must be joined to workflow_dir");
+                assert_eq!(
+                    path, &expected,
+                    "relative path must be joined to workflow_dir"
+                );
                 assert_eq!(cli_override.as_deref(), Some("claude"));
                 assert_eq!(*shape, crate::engine::outcome::PhaseShape::Command);
                 assert!(stall_seconds.is_none());
@@ -1336,8 +1344,8 @@ cmd = "echo run"
 cli = "claude"
 "#;
         let toml_path = write_toml(&dir, body);
-        let err = WorkflowConfig::load(&toml_path)
-            .expect_err("cli paired with cmd must be rejected");
+        let err =
+            WorkflowConfig::load(&toml_path).expect_err("cli paired with cmd must be rejected");
         match err {
             WorkflowError::UnsupportedRunForm { key, .. } => {
                 assert!(key.contains("cli"), "key path must mention cli: {key}");
@@ -1366,8 +1374,8 @@ prompt = "do x"
 cli = "claude"
 "#;
         let toml_path = write_toml(&dir, body);
-        let err = WorkflowConfig::load(&toml_path)
-            .expect_err("cli paired with prompt must be rejected");
+        let err =
+            WorkflowConfig::load(&toml_path).expect_err("cli paired with prompt must be rejected");
         match err {
             WorkflowError::UnsupportedRunForm { key, .. } => {
                 assert!(key.contains("cli"), "key path must mention cli: {key}");
@@ -1380,8 +1388,7 @@ cli = "claude"
     fn missing_file_returns_missing_file_error() {
         let dir = tempfile::tempdir().unwrap();
         let missing = dir.path().join("does-not-exist.toml");
-        let err = WorkflowConfig::load(&missing)
-            .expect_err("missing file fails");
+        let err = WorkflowConfig::load(&missing).expect_err("missing file fails");
         match err {
             WorkflowError::MissingFile { path } => {
                 assert_eq!(path, missing);
@@ -1439,11 +1446,7 @@ path = "foo.md"
     fn run_phase_session_shape_is_rejected() {
         let dir = tempfile::TempDir::new().unwrap();
         let workflow_md = dir.path().join("foo.md");
-        std::fs::write(
-            &workflow_md,
-            "---\nsession: \"session\"\n---\nbody\n",
-        )
-        .unwrap();
+        std::fs::write(&workflow_md, "---\nsession: \"session\"\n---\nbody\n").unwrap();
         let workflow_toml = dir.path().join("WORKFLOW.toml");
         std::fs::write(
             &workflow_toml,
@@ -1673,7 +1676,10 @@ run.cmd = "true"
             }
             _ => panic!("expected In"),
         }
-        assert_eq!(cfg.on_failures[0].when_phase, Some(crate::engine::outcome::PhaseKind::Post));
+        assert_eq!(
+            cfg.on_failures[0].when_phase,
+            Some(crate::engine::outcome::PhaseKind::Post)
+        );
     }
 
     #[test]
@@ -1698,7 +1704,10 @@ run.cmd = "true"
 "#;
         let path = write_tmp(toml);
         let err = WorkflowConfig::load(&path).unwrap_err();
-        assert!(matches!(err, WorkflowError::OnFailureKindMatcherConflict { .. }));
+        assert!(matches!(
+            err,
+            WorkflowError::OnFailureKindMatcherConflict { .. }
+        ));
     }
 
     #[test]

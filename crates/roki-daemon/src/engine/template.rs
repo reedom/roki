@@ -8,7 +8,7 @@
 use liquid::model::{DisplayCow, KStringCow, ObjectView, State, Value, ValueView};
 use thiserror::Error;
 
-use super::context::{to_liquid_object, PhaseContext};
+use super::context::{PhaseContext, to_liquid_object};
 
 /// Render error wrapper. The engine maps this to `FailureKind::TemplateError`
 /// when surfacing it through `PhaseOutcome`.
@@ -243,13 +243,18 @@ mod tests {
 
     fn cfg() -> RokiConfig {
         RokiConfig {
-            linear: LinearSection { token: "x".to_string() },
+            linear: LinearSection {
+                token: "x".to_string(),
+            },
             linear_webhook: LinearWebhookSection {
                 bind: "127.0.0.1".to_string(),
                 port: 8000,
                 secret: None,
             },
-            default_ai_command: DefaultAiCommandSection { cli: "echo".to_string(), stall_seconds: 300 },
+            default_ai_command: DefaultAiCommandSection {
+                cli: "echo".to_string(),
+                stall_seconds: 300,
+            },
             engine: EngineSection { max_iterations: 10 },
             paths: PathsSection {
                 workflow: PathBuf::from("/tmp/w"),
@@ -299,7 +304,11 @@ mod tests {
     fn renders_run_exit_code_when_set() {
         let mut ctx = super::PhaseContext::new(&admitted(), Uuid::nil(), &cfg(), CycleKind::Rule);
         ctx.set_run(5, 12, None);
-        let out = render_str("exit={{ run.exit_code }} dur={{ run.duration_seconds }}", &ctx).unwrap();
+        let out = render_str(
+            "exit={{ run.exit_code }} dur={{ run.duration_seconds }}",
+            &ctx,
+        )
+        .unwrap();
         assert_eq!(out, "exit=5 dur=12");
     }
 }

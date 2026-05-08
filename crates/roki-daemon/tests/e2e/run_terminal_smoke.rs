@@ -122,14 +122,22 @@ session_root = "{session_root}"
         }
     });
     let client = reqwest::Client::new();
-    let resp = client.post(&webhook_url).json(&payload).send().await.unwrap();
+    let resp = client
+        .post(&webhook_url)
+        .json(&payload)
+        .send()
+        .await
+        .unwrap();
     assert_eq!(resp.status().as_u16(), 202);
 
     let status = tokio::time::timeout(Duration::from_secs(15), child.wait())
         .await
         .expect("binary should exit within 15s")
         .expect("child wait succeeds");
-    assert!(status.success(), "binary should exit success, got {status:?}");
+    assert!(
+        status.success(),
+        "binary should exit success, got {status:?}"
+    );
 
     let cycle_root = session_root.join("ENG-RT");
     let cycle_entry = std::fs::read_dir(&cycle_root)
@@ -153,8 +161,8 @@ session_root = "{session_root}"
     );
 
     // Post stderr proves the Liquid round-trip rendered the value.
-    let post_stderr = std::fs::read_to_string(iter_dir.join("post.stderr"))
-        .expect("post.stderr must exist");
+    let post_stderr =
+        std::fs::read_to_string(iter_dir.join("post.stderr")).expect("post.stderr must exist");
     assert!(
         post_stderr.contains("terminal_is_error=false"),
         "post.stderr should contain rendered is_error=false: {post_stderr}"

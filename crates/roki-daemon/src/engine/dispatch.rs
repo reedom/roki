@@ -69,7 +69,9 @@ mod tests {
 
     fn workflow_with(rules: Vec<Rule>, cleanups: Vec<Cleanup>) -> WorkflowConfig {
         WorkflowConfig {
-            admission: crate::config::workflow::AdmissionSection { assignee: "me".into() },
+            admission: crate::config::workflow::AdmissionSection {
+                assignee: "me".into(),
+            },
             repo: None,
             rules,
             cleanups,
@@ -115,7 +117,10 @@ mod tests {
         );
         let a = crate::rule::admitted_with("InProgress", vec![]);
         match evaluate(&a, &wf, DispatchMode::Default) {
-            DispatchTarget::Cycle { kind: CycleKind::Cleanup, .. } => {}
+            DispatchTarget::Cycle {
+                kind: CycleKind::Cleanup,
+                ..
+            } => {}
             other => panic!("expected Cleanup cycle, got {other:?}"),
         }
     }
@@ -132,17 +137,26 @@ mod tests {
 
     #[test]
     fn rule_dispatch_when_no_cleanup_match() {
-        let wf = workflow_with(vec![rule_for("InProgress")], vec![cleanup_for(Some("Done"))]);
+        let wf = workflow_with(
+            vec![rule_for("InProgress")],
+            vec![cleanup_for(Some("Done"))],
+        );
         let a = crate::rule::admitted_with("InProgress", vec![]);
         match evaluate(&a, &wf, DispatchMode::Default) {
-            DispatchTarget::Cycle { kind: CycleKind::Rule, .. } => {}
+            DispatchTarget::Cycle {
+                kind: CycleKind::Rule,
+                ..
+            } => {}
             other => panic!("expected Rule cycle, got {other:?}"),
         }
     }
 
     #[test]
     fn no_match_when_neither_list_hits() {
-        let wf = workflow_with(vec![rule_for("InProgress")], vec![cleanup_for(Some("Done"))]);
+        let wf = workflow_with(
+            vec![rule_for("InProgress")],
+            vec![cleanup_for(Some("Done"))],
+        );
         let a = crate::rule::admitted_with("Triage", vec![]);
         match evaluate(&a, &wf, DispatchMode::Default) {
             DispatchTarget::NoMatch => {}
@@ -152,7 +166,10 @@ mod tests {
 
     #[test]
     fn cleanup_only_mode_ignores_rule_list() {
-        let wf = workflow_with(vec![rule_for("InProgress")], vec![cleanup_for(Some("Done"))]);
+        let wf = workflow_with(
+            vec![rule_for("InProgress")],
+            vec![cleanup_for(Some("Done"))],
+        );
         let a = crate::rule::admitted_with("InProgress", vec![]);
         match evaluate(&a, &wf, DispatchMode::CleanupOnly) {
             DispatchTarget::NoMatch => {}

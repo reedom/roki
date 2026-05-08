@@ -189,10 +189,7 @@ pub fn roki_env_pairs(ctx: &PhaseContext) -> Vec<(String, String)> {
         push_payload_scalars(&mut pairs, "ROKI_POST_", payload);
     }
     if let Some(run) = ctx.run.as_ref() {
-        pairs.push((
-            "ROKI_RUN_EXIT_CODE".to_string(),
-            run.exit_code.to_string(),
-        ));
+        pairs.push(("ROKI_RUN_EXIT_CODE".to_string(), run.exit_code.to_string()));
         pairs.push((
             "ROKI_RUN_DURATION_SECONDS".to_string(),
             run.duration_seconds.to_string(),
@@ -207,7 +204,10 @@ pub fn roki_env_pairs(ctx: &PhaseContext) -> Vec<(String, String)> {
             pairs.push(("ROKI_FAILURE_EXIT_CODE".to_string(), ec.to_string()));
         }
         pairs.push(("ROKI_FAILURE_ERROR_TEXT".to_string(), f.error_text.clone()));
-        pairs.push(("ROKI_FAILURE_FAILED_CYCLE_ID".to_string(), f.failed_cycle_id.clone()));
+        pairs.push((
+            "ROKI_FAILURE_FAILED_CYCLE_ID".to_string(),
+            f.failed_cycle_id.clone(),
+        ));
     }
 
     pairs
@@ -316,20 +316,54 @@ mod tests {
 
     #[test]
     fn env_pairs_include_ticket_repo_cycle_config_at_iter_zero() {
-        let ctx = PhaseContext::new(&admitted(), Uuid::nil(), &cfg(7), crate::engine::outcome::CycleKind::Rule);
+        let ctx = PhaseContext::new(
+            &admitted(),
+            Uuid::nil(),
+            &cfg(7),
+            crate::engine::outcome::CycleKind::Rule,
+        );
         let pairs = roki_env_pairs(&ctx);
-        assert!(pairs.iter().any(|(k, v)| k == "ROKI_TICKET_ID" && v == "ENG-1"));
-        assert!(pairs.iter().any(|(k, v)| k == "ROKI_REPO" && v == "github.com/acme/widget"));
+        assert!(
+            pairs
+                .iter()
+                .any(|(k, v)| k == "ROKI_TICKET_ID" && v == "ENG-1")
+        );
+        assert!(
+            pairs
+                .iter()
+                .any(|(k, v)| k == "ROKI_REPO" && v == "github.com/acme/widget")
+        );
         assert!(pairs.iter().any(|(k, _v)| k == "ROKI_CYCLE_ID"));
-        assert!(pairs.iter().any(|(k, v)| k == "ROKI_CYCLE_KIND" && v == "rule"));
-        assert!(pairs.iter().any(|(k, v)| k == "ROKI_CYCLE_TRIGGER" && v == "runtime"));
-        assert!(pairs.iter().any(|(k, v)| k == "ROKI_CYCLE_ITER" && v == "0"));
-        assert!(pairs.iter().any(|(k, v)| k == "ROKI_CONFIG_MAX_ITERATIONS" && v == "7"));
+        assert!(
+            pairs
+                .iter()
+                .any(|(k, v)| k == "ROKI_CYCLE_KIND" && v == "rule")
+        );
+        assert!(
+            pairs
+                .iter()
+                .any(|(k, v)| k == "ROKI_CYCLE_TRIGGER" && v == "runtime")
+        );
+        assert!(
+            pairs
+                .iter()
+                .any(|(k, v)| k == "ROKI_CYCLE_ITER" && v == "0")
+        );
+        assert!(
+            pairs
+                .iter()
+                .any(|(k, v)| k == "ROKI_CONFIG_MAX_ITERATIONS" && v == "7")
+        );
     }
 
     #[test]
     fn env_pairs_export_pre_top_level_scalars_only() {
-        let mut ctx = PhaseContext::new(&admitted(), Uuid::nil(), &cfg(10), crate::engine::outcome::CycleKind::Rule);
+        let mut ctx = PhaseContext::new(
+            &admitted(),
+            Uuid::nil(),
+            &cfg(10),
+            crate::engine::outcome::CycleKind::Rule,
+        );
         ctx.set_pre(serde_json::json!({
             "directive": "run",
             "outcome": "success",
@@ -351,7 +385,12 @@ mod tests {
 
     #[test]
     fn env_pairs_skip_keys_with_non_ascii_chars() {
-        let mut ctx = PhaseContext::new(&admitted(), Uuid::nil(), &cfg(10), crate::engine::outcome::CycleKind::Rule);
+        let mut ctx = PhaseContext::new(
+            &admitted(),
+            Uuid::nil(),
+            &cfg(10),
+            crate::engine::outcome::CycleKind::Rule,
+        );
         ctx.set_pre(serde_json::json!({
             "directive": "run",
             "my-field": "x", // hyphen — uppercase is "MY-FIELD", '-' is not legal.
@@ -364,16 +403,34 @@ mod tests {
 
     #[test]
     fn env_pairs_export_run_exit_code_and_duration() {
-        let mut ctx = PhaseContext::new(&admitted(), Uuid::nil(), &cfg(10), crate::engine::outcome::CycleKind::Rule);
+        let mut ctx = PhaseContext::new(
+            &admitted(),
+            Uuid::nil(),
+            &cfg(10),
+            crate::engine::outcome::CycleKind::Rule,
+        );
         ctx.set_run(7, 42, None);
         let pairs = roki_env_pairs(&ctx);
-        assert!(pairs.iter().any(|(k, v)| k == "ROKI_RUN_EXIT_CODE" && v == "7"));
-        assert!(pairs.iter().any(|(k, v)| k == "ROKI_RUN_DURATION_SECONDS" && v == "42"));
+        assert!(
+            pairs
+                .iter()
+                .any(|(k, v)| k == "ROKI_RUN_EXIT_CODE" && v == "7")
+        );
+        assert!(
+            pairs
+                .iter()
+                .any(|(k, v)| k == "ROKI_RUN_DURATION_SECONDS" && v == "42")
+        );
     }
 
     #[test]
     fn run_terminal_exposed_via_liquid() {
-        let mut ctx = PhaseContext::new(&admitted(), Uuid::nil(), &cfg(10), crate::engine::outcome::CycleKind::Rule);
+        let mut ctx = PhaseContext::new(
+            &admitted(),
+            Uuid::nil(),
+            &cfg(10),
+            crate::engine::outcome::CycleKind::Rule,
+        );
         let terminal = serde_json::json!({"is_error": false, "result": "ok"});
         ctx.set_run(0, 12, Some(terminal));
         let rendered = crate::engine::template::render_str(
@@ -386,7 +443,12 @@ mod tests {
 
     #[test]
     fn run_terminal_clears_between_iters() {
-        let mut ctx = PhaseContext::new(&admitted(), Uuid::nil(), &cfg(10), crate::engine::outcome::CycleKind::Rule);
+        let mut ctx = PhaseContext::new(
+            &admitted(),
+            Uuid::nil(),
+            &cfg(10),
+            crate::engine::outcome::CycleKind::Rule,
+        );
         ctx.set_run(0, 1, Some(serde_json::json!({"is_error": false})));
         ctx.set_iter(2);
         let rendered =
@@ -396,7 +458,12 @@ mod tests {
 
     #[test]
     fn liquid_object_carries_ticket_repo_and_cycle_iter() {
-        let mut ctx = PhaseContext::new(&admitted(), Uuid::nil(), &cfg(10), crate::engine::outcome::CycleKind::Rule);
+        let mut ctx = PhaseContext::new(
+            &admitted(),
+            Uuid::nil(),
+            &cfg(10),
+            crate::engine::outcome::CycleKind::Rule,
+        );
         ctx.set_iter(3);
         let obj = to_liquid_object(&ctx);
         // Values are nested liquid Objects; project to JSON for cheap assertions.
@@ -414,7 +481,10 @@ mod tests {
         assert_eq!(ctx.cycle.kind, "failure");
 
         let env: Vec<(String, String)> = roki_env_pairs(&ctx).into_iter().collect();
-        assert!(env.iter().any(|(k, v)| k == "ROKI_CYCLE_KIND" && v == "failure"));
+        assert!(
+            env.iter()
+                .any(|(k, v)| k == "ROKI_CYCLE_KIND" && v == "failure")
+        );
     }
 
     #[test]
@@ -429,23 +499,32 @@ mod tests {
             exit_code: Some(0),
             error_text: "no JSON object on stdout".into(),
         };
-        let mut ctx = PhaseContext::new(&admitted(), uuid::Uuid::nil(), &cfg(5), CycleKind::Failure);
+        let mut ctx =
+            PhaseContext::new(&admitted(), uuid::Uuid::nil(), &cfg(5), CycleKind::Failure);
         ctx.set_failure(meta);
 
-        let env: std::collections::HashMap<String, String> = roki_env_pairs(&ctx).into_iter().collect();
+        let env: std::collections::HashMap<String, String> =
+            roki_env_pairs(&ctx).into_iter().collect();
         assert_eq!(env.get("ROKI_FAILURE_KIND").unwrap(), "unparseable");
         assert_eq!(env.get("ROKI_FAILURE_PHASE").unwrap(), "post");
         assert_eq!(env.get("ROKI_FAILURE_ITER").unwrap(), "3");
         assert_eq!(env.get("ROKI_FAILURE_EXIT_CODE").unwrap(), "0");
-        assert_eq!(env.get("ROKI_FAILURE_ERROR_TEXT").unwrap(), "no JSON object on stdout");
-        assert_eq!(env.get("ROKI_FAILURE_FAILED_CYCLE_ID").unwrap(), &failed_cycle_id.to_string());
+        assert_eq!(
+            env.get("ROKI_FAILURE_ERROR_TEXT").unwrap(),
+            "no JSON object on stdout"
+        );
+        assert_eq!(
+            env.get("ROKI_FAILURE_FAILED_CYCLE_ID").unwrap(),
+            &failed_cycle_id.to_string()
+        );
     }
 
     #[test]
     fn phase_context_failure_absent_for_rule_cycle() {
         use crate::engine::outcome::CycleKind;
         let ctx = PhaseContext::new(&admitted(), uuid::Uuid::nil(), &cfg(5), CycleKind::Rule);
-        let env: std::collections::HashMap<String, String> = roki_env_pairs(&ctx).into_iter().collect();
+        let env: std::collections::HashMap<String, String> =
+            roki_env_pairs(&ctx).into_iter().collect();
         assert!(!env.contains_key("ROKI_FAILURE_KIND"));
     }
 
@@ -460,9 +539,11 @@ mod tests {
             exit_code: None,
             error_text: "stall".into(),
         };
-        let mut ctx = PhaseContext::new(&admitted(), uuid::Uuid::nil(), &cfg(5), CycleKind::Failure);
+        let mut ctx =
+            PhaseContext::new(&admitted(), uuid::Uuid::nil(), &cfg(5), CycleKind::Failure);
         ctx.set_failure(meta);
-        let env: std::collections::HashMap<String, String> = roki_env_pairs(&ctx).into_iter().collect();
+        let env: std::collections::HashMap<String, String> =
+            roki_env_pairs(&ctx).into_iter().collect();
         assert!(!env.contains_key("ROKI_FAILURE_EXIT_CODE"));
     }
 }

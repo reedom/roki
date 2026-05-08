@@ -54,7 +54,10 @@ pub fn parse_workflow_md_frontmatter<'a>(
     path: &Path,
     body: &'a str,
 ) -> Result<(WorkflowMdHeader, &'a str), WorkflowError> {
-    let Some(rest) = body.strip_prefix("---\n").or_else(|| body.strip_prefix("---\r\n")) else {
+    let Some(rest) = body
+        .strip_prefix("---\n")
+        .or_else(|| body.strip_prefix("---\r\n"))
+    else {
         return Ok((WorkflowMdHeader::default(), body));
     };
 
@@ -66,12 +69,11 @@ pub fn parse_workflow_md_frontmatter<'a>(
     };
 
     let yaml = &rest[..end.start];
-    let raw: RawHeader = serde_yaml_ng::from_str(yaml).map_err(|err| {
-        WorkflowError::WorkflowMdFrontmatter {
+    let raw: RawHeader =
+        serde_yaml_ng::from_str(yaml).map_err(|err| WorkflowError::WorkflowMdFrontmatter {
             path: path.to_path_buf(),
             reason: format!("yaml parse error: {err}"),
-        }
-    })?;
+        })?;
 
     let shape = match raw.session.as_deref() {
         None | Some("session") => PhaseShape::Session,

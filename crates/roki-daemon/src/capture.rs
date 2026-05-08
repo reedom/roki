@@ -49,10 +49,7 @@ pub fn create_iter_dir(
 
 /// Open `<phase>.stdout` and `<phase>.stderr` inside `iter_dir`. Returns the
 /// pair `(stdout, stderr)` ready for `Stdio::from(File)` redirection.
-pub fn open_phase_files(
-    iter_dir: &Path,
-    phase: PhaseKind,
-) -> Result<(File, File), CaptureError> {
+pub fn open_phase_files(iter_dir: &Path, phase: PhaseKind) -> Result<(File, File), CaptureError> {
     let stdout_path = iter_dir.join(format!("{}.stdout", phase.as_str()));
     let stderr_path = iter_dir.join(format!("{}.stderr", phase.as_str()));
     let stdout = File::create(&stdout_path).map_err(|source| CaptureError::OpenFile {
@@ -82,10 +79,8 @@ pub fn write_response_json(
         path: path.clone(),
         source,
     })?;
-    file.write_all(&pretty).map_err(|source| CaptureError::Write {
-        path,
-        source,
-    })
+    file.write_all(&pretty)
+        .map_err(|source| CaptureError::Write { path, source })
 }
 
 /// Write `run.exit_code` inside `iter_dir`. The text contents are
@@ -97,10 +92,8 @@ pub fn write_run_exit_code(iter_dir: &Path, exit_code: i32) -> Result<(), Captur
         source,
     })?;
     let body = format!("{exit_code}\n");
-    file.write_all(body.as_bytes()).map_err(|source| CaptureError::Write {
-        path,
-        source,
-    })
+    file.write_all(body.as_bytes())
+        .map_err(|source| CaptureError::Write { path, source })
 }
 
 /// Files opened for one session-shape phase turn. The supervisor opens these
@@ -160,10 +153,8 @@ pub fn write_run_terminal_json(
         path: path.clone(),
         source,
     })?;
-    file.write_all(&pretty).map_err(|source| CaptureError::Write {
-        path,
-        source,
-    })
+    file.write_all(&pretty)
+        .map_err(|source| CaptureError::Write { path, source })
 }
 
 #[cfg(test)]

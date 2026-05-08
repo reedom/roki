@@ -166,12 +166,11 @@ impl RokiConfig {
         // fields as `Option`, then validate each one with a key-path-bearing
         // error per design `config::roki` invariant. Unknown keys are
         // tolerated because we omit `deny_unknown_fields` everywhere.
-        let raw_cfg: RawRokiConfig = toml::from_str(&raw).map_err(|source| {
-            RokiConfigError::Parse {
+        let raw_cfg: RawRokiConfig =
+            toml::from_str(&raw).map_err(|source| RokiConfigError::Parse {
                 path: path.to_path_buf(),
                 source,
-            }
-        })?;
+            })?;
 
         raw_cfg.validate(path)
     }
@@ -282,11 +281,7 @@ impl RawRokiConfig {
             300,
         )?;
         let default_ai_command = DefaultAiCommandSection {
-            cli: required_string(
-                path,
-                "default.ai.command.cli",
-                raw_default_command.cli,
-            )?,
+            cli: required_string(path, "default.ai.command.cli", raw_default_command.cli)?,
             stall_seconds: cmd_stall,
         };
 
@@ -308,11 +303,7 @@ impl RawRokiConfig {
 
         let paths_section = PathsSection {
             workflow: required_field(path, "paths.workflow", raw_paths.workflow)?,
-            session_root: required_field(
-                path,
-                "paths.session_root",
-                raw_paths.session_root,
-            )?,
+            session_root: required_field(path, "paths.session_root", raw_paths.session_root)?,
         };
 
         let engine = parse_engine(path, raw_engine)?;
@@ -526,13 +517,10 @@ session_root = "/var/roki/sessions"
     #[test]
     fn unknown_top_level_key_is_silently_retained() {
         let dir = tempfile::tempdir().unwrap();
-        let body = format!(
-            "{HAPPY_PATH_TOML}\n[unknown]\nfoo = \"bar\"\nbaz = 42\n"
-        );
+        let body = format!("{HAPPY_PATH_TOML}\n[unknown]\nfoo = \"bar\"\nbaz = 42\n");
         let path = write_toml(&dir, &body);
 
-        let cfg = RokiConfig::load(&path)
-            .expect("unknown sections must not fail loading");
+        let cfg = RokiConfig::load(&path).expect("unknown sections must not fail loading");
         // Required fields still populated.
         assert_eq!(cfg.linear.token, "lin_api_secret_value");
     }
@@ -651,10 +639,7 @@ session_root = "./.roki/sessions"
         std::fs::write(&path, toml).unwrap();
         let cfg = RokiConfig::load(&path).unwrap();
         assert_eq!(cfg.default_ai_command.stall_seconds, 300);
-        let session = cfg
-            .default_ai_session
-            .as_ref()
-            .expect("session present");
+        let session = cfg.default_ai_session.as_ref().expect("session present");
         assert_eq!(session.stall_seconds, 600);
     }
 

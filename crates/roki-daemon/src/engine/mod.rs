@@ -21,7 +21,7 @@ pub mod stall;
 pub mod stream;
 pub mod template;
 
-pub use cycle::{run_cycle, CycleOutcome};
+pub use cycle::{CycleOutcome, run_cycle};
 pub use phase::CommandPhaseExecutor;
 #[allow(unused_imports)]
 pub use session::{SessionConfig, SessionSupervisor};

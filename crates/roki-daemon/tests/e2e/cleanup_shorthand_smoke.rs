@@ -36,7 +36,10 @@ async fn cleanup_shorthand_deletes_ticket_dir() {
     let ticket_dir = session_root.join(ticket_id);
     std::fs::create_dir_all(&ticket_dir).unwrap();
     std::fs::write(ticket_dir.join("stale.txt"), "leftover").unwrap();
-    assert!(ticket_dir.exists(), "pre-condition: ticket dir must exist before daemon runs");
+    assert!(
+        ticket_dir.exists(),
+        "pre-condition: ticket dir must exist before daemon runs"
+    );
 
     let workflow_path = work.path().join("WORKFLOW.toml");
     let workflow_body = format!(
@@ -119,7 +122,12 @@ session_root = "{session_root}"
         }
     });
     let client = reqwest::Client::new();
-    let resp = client.post(&webhook_url).json(&payload).send().await.unwrap();
+    let resp = client
+        .post(&webhook_url)
+        .json(&payload)
+        .send()
+        .await
+        .unwrap();
     assert_eq!(resp.status().as_u16(), 202);
 
     let status = tokio::time::timeout(Duration::from_secs(15), child.wait())
@@ -142,23 +150,28 @@ session_root = "{session_root}"
     assert_eq!(lines.len(), 2, "expected exactly 2 events; got:\n{body}");
     assert!(
         lines[0].contains("\"event\":\"cycle_completed\""),
-        "line 0 must be cycle_completed: {}", lines[0]
+        "line 0 must be cycle_completed: {}",
+        lines[0]
     );
     assert!(
         lines[0].contains("\"cycle_kind\":\"cleanup\""),
-        "line 0 must have cycle_kind=cleanup: {}", lines[0]
+        "line 0 must have cycle_kind=cleanup: {}",
+        lines[0]
     );
     assert!(
         lines[0].contains("\"iters\":0"),
-        "line 0 must have iters=0: {}", lines[0]
+        "line 0 must have iters=0: {}",
+        lines[0]
     );
     assert!(
         lines[1].contains("\"event\":\"worktree_delete_requested\""),
-        "line 1 must be worktree_delete_requested: {}", lines[1]
+        "line 1 must be worktree_delete_requested: {}",
+        lines[1]
     );
     assert!(
         lines[1].contains("\"reason\":\"cleanup_shorthand\""),
-        "line 1 must have reason=cleanup_shorthand: {}", lines[1]
+        "line 1 must have reason=cleanup_shorthand: {}",
+        lines[1]
     );
 }
 

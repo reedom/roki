@@ -124,14 +124,22 @@ session_root = "{session_root}"
         }
     });
     let client = reqwest::Client::new();
-    let resp = client.post(&webhook_url).json(&payload).send().await.unwrap();
+    let resp = client
+        .post(&webhook_url)
+        .json(&payload)
+        .send()
+        .await
+        .unwrap();
     assert_eq!(resp.status().as_u16(), 202);
 
     let status = tokio::time::timeout(Duration::from_secs(15), child.wait())
         .await
         .expect("binary should exit within 15s")
         .expect("child wait succeeds");
-    assert!(status.success(), "binary should exit 0 when handler succeeds; got {status:?}");
+    assert!(
+        status.success(),
+        "binary should exit 0 when handler succeeds; got {status:?}"
+    );
 
     // Events file: exactly one cycle_completed with cycle_kind=failure;
     // zero failure_unhandled events.
@@ -163,7 +171,10 @@ session_root = "{session_root}"
     // Both the failed rule cycle's iter dir and the handler cycle's iter dir
     // must exist. Look for two distinct cycle-<uuid> dirs under the ticket dir.
     let ticket_dir = session_root.join(ticket_id);
-    assert!(ticket_dir.exists(), "ticket dir must exist at {ticket_dir:?}");
+    assert!(
+        ticket_dir.exists(),
+        "ticket dir must exist at {ticket_dir:?}"
+    );
 
     let cycle_dirs: Vec<_> = std::fs::read_dir(&ticket_dir)
         .expect("ticket dir readable")

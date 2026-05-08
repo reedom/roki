@@ -21,7 +21,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use serde_json::Value;
 use tokio::process::{Child, ChildStdin};
-use tokio::sync::{mpsc, watch, Mutex};
+use tokio::sync::{Mutex, mpsc, watch};
 
 use crate::capture::open_session_phase_files;
 use crate::engine::outcome::PhaseKind;
@@ -52,7 +52,9 @@ pub struct SessionConfig {
 /// One event the reader task or stall task pushes onto the directive channel.
 #[derive(Debug)]
 pub enum SessionEvent {
-    Directive { value: Value },
+    Directive {
+        value: Value,
+    },
     SchemaDrift,
     Exit,
     /// Stall watchdog fired: idle exceeded `stall_seconds`. The stall task
@@ -412,7 +414,7 @@ async fn reader_task(
     turn_rx: watch::Receiver<TurnState>,
     dir_tx: mpsc::Sender<SessionEvent>,
 ) {
-    use crate::engine::stream::{scan_directive_line, DirectiveScan, LineSplitter};
+    use crate::engine::stream::{DirectiveScan, LineSplitter, scan_directive_line};
     use std::io::Write;
 
     let mut splitter = LineSplitter::new(stdout);
@@ -451,7 +453,11 @@ async fn reader_task(
                                 let mut sf = stderr_file.lock().await;
                                 *sf = None;
                             }
-                            if dir_tx.send(SessionEvent::Directive { value }).await.is_err() {
+                            if dir_tx
+                                .send(SessionEvent::Directive { value })
+                                .await
+                                .is_err()
+                            {
                                 break;
                             }
                             last_emitted_generation = state.generation;

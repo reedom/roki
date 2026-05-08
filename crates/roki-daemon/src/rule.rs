@@ -33,12 +33,8 @@ use crate::config::workflow::{Cleanup, Rule};
 /// Rules are scanned in declared order; iteration short-circuits on the first
 /// hit so later entries are never reached when an earlier rule matches
 /// (Req 5.1).
-pub fn first_match<'a>(
-    admitted: &AdmittedTicket,
-    rules: &'a [Rule],
-) -> Option<&'a Rule> {
-    let labels: HashSet<&str> =
-        admitted.ticket.labels.iter().map(String::as_str).collect();
+pub fn first_match<'a>(admitted: &AdmittedTicket, rules: &'a [Rule]) -> Option<&'a Rule> {
+    let labels: HashSet<&str> = admitted.ticket.labels.iter().map(String::as_str).collect();
     rules.iter().find(|rule| matches(admitted, &labels, rule))
 }
 
@@ -67,11 +63,7 @@ pub fn first_cleanup_match<'a>(
 /// `when.labels.has_all` against the ticket's labels (Req 5.2). An empty
 /// `has_all` trivially matches because every element of the empty set is
 /// already contained in any superset.
-fn matches(
-    admitted: &AdmittedTicket,
-    ticket_labels: &HashSet<&str>,
-    rule: &Rule,
-) -> bool {
+fn matches(admitted: &AdmittedTicket, ticket_labels: &HashSet<&str>, rule: &Rule) -> bool {
     if admitted.ticket.status != rule.when_status {
         return false;
     }
@@ -170,7 +162,9 @@ mod tests {
             when_status: status.to_string(),
             when_labels_has_all: has_all.iter().map(|s| s.to_string()).collect(),
             pre: None,
-            run: crate::engine::outcome::PhaseBody::InlineCmd { cmd: cmd.to_string() },
+            run: crate::engine::outcome::PhaseBody::InlineCmd {
+                cmd: cmd.to_string(),
+            },
             post: None,
         }
     }
@@ -180,8 +174,7 @@ mod tests {
         let t = admitted("In Progress", &["bug", "p0"]);
         let rules = vec![rule("In Progress", &["bug"], "echo a")];
 
-        let hit = first_match(&t, &rules)
-            .expect("rule must match on status + has_all containment");
+        let hit = first_match(&t, &rules).expect("rule must match on status + has_all containment");
         match &hit.run {
             crate::engine::outcome::PhaseBody::InlineCmd { cmd } => assert_eq!(cmd, "echo a"),
             other => panic!("expected InlineCmd, got {other:?}"),

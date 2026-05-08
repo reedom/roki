@@ -136,12 +136,20 @@ pub(crate) async fn run_inner(config_path: &Path, mode: DispatchMode) -> Result<
         let me_ref = me.clone().unwrap_or_else(|| MeId(String::new()));
         match admission::accept(&ticket, &workflow, &me_ref) {
             Ok(admitted) => {
-                use crate::engine::dispatch::{evaluate, DispatchTarget};
+                use crate::engine::dispatch::{DispatchTarget, evaluate};
                 match evaluate(&admitted, &workflow, mode) {
-                    DispatchTarget::Cycle { kind, rule: Some(r), .. } => {
+                    DispatchTarget::Cycle {
+                        kind,
+                        rule: Some(r),
+                        ..
+                    } => {
                         break (admitted, kind, DispatchedEntry::Rule(r.clone()));
                     }
-                    DispatchTarget::Cycle { kind, cleanup: Some(c), .. } => {
+                    DispatchTarget::Cycle {
+                        kind,
+                        cleanup: Some(c),
+                        ..
+                    } => {
                         break (admitted, kind, DispatchedEntry::Cleanup(c.clone()));
                     }
                     DispatchTarget::CleanupShorthand => {
@@ -158,7 +166,11 @@ pub(crate) async fn run_inner(config_path: &Path, mode: DispatchMode) -> Result<
                         );
                         continue;
                     }
-                    DispatchTarget::Cycle { rule: None, cleanup: None, .. } => unreachable!(
+                    DispatchTarget::Cycle {
+                        rule: None,
+                        cleanup: None,
+                        ..
+                    } => unreachable!(
                         "dispatch::evaluate returned Cycle with neither rule nor cleanup"
                     ),
                 }
@@ -302,14 +314,12 @@ pub(crate) async fn run_inner(config_path: &Path, mode: DispatchMode) -> Result<
                 .await;
                 match decision {
                     FailureDecision::HandlerSucceeded => Ok(()),
-                    FailureDecision::Unhandled => {
-                        Err(SkeletonError::PhaseInfra(
-                            crate::error::PhaseInfraError::CycleFailed {
-                                kind: meta.kind,
-                                iter: meta.iter,
-                            },
-                        ))
-                    }
+                    FailureDecision::Unhandled => Err(SkeletonError::PhaseInfra(
+                        crate::error::PhaseInfraError::CycleFailed {
+                            kind: meta.kind,
+                            iter: meta.iter,
+                        },
+                    )),
                 }
             }
         },
@@ -439,9 +449,7 @@ async fn handle_failed_cycle(
     }
 }
 
-fn on_failure_to_rule(
-    h: &crate::engine::on_failure::OnFailure,
-) -> crate::config::workflow::Rule {
+fn on_failure_to_rule(h: &crate::engine::on_failure::OnFailure) -> crate::config::workflow::Rule {
     crate::config::workflow::Rule {
         when_status: String::new(),
         when_labels_has_all: vec![],

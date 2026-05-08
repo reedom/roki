@@ -213,10 +213,8 @@ session_root = "{session_root}"
     let iter1 = cycle_entry.path().join("iter-1");
     assert!(iter1.is_dir(), "iter-1 dir must exist at {iter1:?}");
 
-    let stdout_bytes = std::fs::read_to_string(iter1.join("run.stdout"))
-        .expect("read run.stdout");
-    let stderr_bytes = std::fs::read_to_string(iter1.join("run.stderr"))
-        .expect("read run.stderr");
+    let stdout_bytes = std::fs::read_to_string(iter1.join("run.stdout")).expect("read run.stdout");
+    let stderr_bytes = std::fs::read_to_string(iter1.join("run.stderr")).expect("read run.stderr");
     assert!(
         stdout_bytes.contains("out"),
         "Req 7.2: run.stdout must contain `out`, got {stdout_bytes:?}"
@@ -226,8 +224,8 @@ session_root = "{session_root}"
         "Req 7.2: run.stderr must contain `err`, got {stderr_bytes:?}"
     );
 
-    let exit_code_text = std::fs::read_to_string(iter1.join("run.exit_code"))
-        .expect("read run.exit_code");
+    let exit_code_text =
+        std::fs::read_to_string(iter1.join("run.exit_code")).expect("read run.exit_code");
     assert_eq!(
         exit_code_text.trim(),
         "0",

@@ -88,9 +88,7 @@ mod tests {
             admission: AdmissionSection {
                 assignee: assignee.to_string(),
             },
-            repo: repo.map(|g| AdmissionRepo {
-                ghq: g.to_string(),
-            }),
+            repo: repo.map(|g| AdmissionRepo { ghq: g.to_string() }),
             rules: Vec::new(),
             cleanups: Vec::new(),
             on_failures: Vec::new(),

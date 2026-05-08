@@ -111,17 +111,13 @@ pub async fn run_cycle(
     let cycle_outcome: Result<CycleOutcome, PhaseInfraError> = 'cycle: {
         for iter in 1..=max_iter {
             ctx.set_iter(iter);
-            let iter_dir = match crate::capture::create_iter_dir(
-                session_root,
-                &ticket_id,
-                cycle_id,
-                iter,
-            ) {
-                Ok(d) => d,
-                Err(err) => {
-                    break 'cycle Ok(fs_poison_outcome(err, cycle_id, PhaseKind::Pre, iter));
-                }
-            };
+            let iter_dir =
+                match crate::capture::create_iter_dir(session_root, &ticket_id, cycle_id, iter) {
+                    Ok(d) => d,
+                    Err(err) => {
+                        break 'cycle Ok(fs_poison_outcome(err, cycle_id, PhaseKind::Pre, iter));
+                    }
+                };
 
             // Pre.
             if let Some(pre_body) = rule.pre.as_ref() {
@@ -138,18 +134,14 @@ pub async fn run_cycle(
                     {
                         Ok(o) => o,
                         Err(PhaseInfraError::Capture(e)) => {
-                            break 'cycle Ok(fs_poison_outcome(
-                                e, cycle_id, PhaseKind::Pre, iter,
-                            ));
+                            break 'cycle Ok(fs_poison_outcome(e, cycle_id, PhaseKind::Pre, iter));
                         }
                         Err(err) => break 'cycle Err(err),
                     };
                     match outcome {
                         PhaseOutcome::Failure { kind } => {
-                            let stderr_text = std::fs::read_to_string(
-                                iter_dir.join("pre.stderr"),
-                            )
-                            .unwrap_or_default();
+                            let stderr_text = std::fs::read_to_string(iter_dir.join("pre.stderr"))
+                                .unwrap_or_default();
                             break 'cycle Ok(CycleOutcome::Failed {
                                 meta: FailureMeta {
                                     failed_cycle_id: cycle_id,
@@ -166,7 +158,10 @@ pub async fn run_cycle(
                             payload,
                         } => {
                             ctx.set_pre(payload);
-                            break 'cycle Ok(CycleOutcome::Completed { iters: iter, cycle_id });
+                            break 'cycle Ok(CycleOutcome::Completed {
+                                iters: iter,
+                                cycle_id,
+                            });
                         }
                         PhaseOutcome::PreDirective {
                             directive: PreDirective::Run,
@@ -194,22 +189,20 @@ pub async fn run_cycle(
 
             // Run. Always command-shape per slice-2 invariant — call the
             // executor directly rather than through the dispatch helper.
-            let run_outcome =
-                match executor.execute(PhaseKind::Run, &rule.run, &ctx, &iter_dir).await {
-                    Ok(o) => o,
-                    Err(PhaseInfraError::Capture(e)) => {
-                        break 'cycle Ok(fs_poison_outcome(
-                            e, cycle_id, PhaseKind::Run, iter,
-                        ));
-                    }
-                    Err(err) => break 'cycle Err(err),
-                };
+            let run_outcome = match executor
+                .execute(PhaseKind::Run, &rule.run, &ctx, &iter_dir)
+                .await
+            {
+                Ok(o) => o,
+                Err(PhaseInfraError::Capture(e)) => {
+                    break 'cycle Ok(fs_poison_outcome(e, cycle_id, PhaseKind::Run, iter));
+                }
+                Err(err) => break 'cycle Err(err),
+            };
             match run_outcome {
                 PhaseOutcome::Failure { kind } => {
-                    let stderr_text = std::fs::read_to_string(
-                        iter_dir.join("run.stderr"),
-                    )
-                    .unwrap_or_default();
+                    let stderr_text =
+                        std::fs::read_to_string(iter_dir.join("run.stderr")).unwrap_or_default();
                     break 'cycle Ok(CycleOutcome::Failed {
                         meta: FailureMeta {
                             failed_cycle_id: cycle_id,
@@ -265,18 +258,14 @@ pub async fn run_cycle(
                 {
                     Ok(o) => o,
                     Err(PhaseInfraError::Capture(e)) => {
-                        break 'cycle Ok(fs_poison_outcome(
-                            e, cycle_id, PhaseKind::Post, iter,
-                        ));
+                        break 'cycle Ok(fs_poison_outcome(e, cycle_id, PhaseKind::Post, iter));
                     }
                     Err(err) => break 'cycle Err(err),
                 };
                 match outcome {
                     PhaseOutcome::Failure { kind } => {
-                        let stderr_text = std::fs::read_to_string(
-                            iter_dir.join("post.stderr"),
-                        )
-                        .unwrap_or_default();
+                        let stderr_text = std::fs::read_to_string(iter_dir.join("post.stderr"))
+                            .unwrap_or_default();
                         break 'cycle Ok(CycleOutcome::Failed {
                             meta: FailureMeta {
                                 failed_cycle_id: cycle_id,
@@ -313,7 +302,10 @@ pub async fn run_cycle(
 
             match next {
                 PostDirective::End => {
-                    break 'cycle Ok(CycleOutcome::Completed { iters: iter, cycle_id });
+                    break 'cycle Ok(CycleOutcome::Completed {
+                        iters: iter,
+                        cycle_id,
+                    });
                 }
                 PostDirective::Pre => {
                     if iter == max_iter {
@@ -361,9 +353,7 @@ pub async fn run_cycle(
                 phase: PhaseKind::Post,
                 iter: max_iter,
                 exit_code: None,
-                error_text: format!(
-                    "iter {max_iter} exceeded max_iterations {max_iter}"
-                ),
+                error_text: format!("iter {max_iter} exceeded max_iterations {max_iter}"),
             },
         })
     };
@@ -373,9 +363,7 @@ pub async fn run_cycle(
     if let Some(sup) = supervisor.as_ref() {
         let reason = match &cycle_outcome {
             Ok(CycleOutcome::Completed { .. }) => SessionShutdownReason::Completed,
-            Ok(CycleOutcome::Failed { meta })
-                if meta.kind == FailureKind::IterExhausted =>
-            {
+            Ok(CycleOutcome::Failed { meta }) if meta.kind == FailureKind::IterExhausted => {
                 SessionShutdownReason::IterExhausted
             }
             _ => SessionShutdownReason::Failed,
@@ -429,13 +417,12 @@ fn render_session_phase_body(
         PhaseBody::InlineCmd { .. } => unreachable!("inline cmd is command-shape"),
         PhaseBody::InlinePrompt { prompt } => prompt.clone(),
         PhaseBody::Path { path, .. } => {
-            let raw =
-                std::fs::read_to_string(path).map_err(|source| {
-                    PhaseInfraError::WorkflowBodyUnreadable {
-                        path: path.clone(),
-                        source,
-                    }
-                })?;
+            let raw = std::fs::read_to_string(path).map_err(|source| {
+                PhaseInfraError::WorkflowBodyUnreadable {
+                    path: path.clone(),
+                    source,
+                }
+            })?;
             crate::engine::phase::strip_frontmatter(&raw).to_string()
         }
     };
@@ -474,8 +461,7 @@ fn build_session_config(
         .ok_or(PhaseInfraError::SessionCliMissing)?;
     let rendered_cli =
         render_str(cli_template, ctx).map_err(|_| PhaseInfraError::SessionCliMissing)?;
-    let argv =
-        shell_words::split(&rendered_cli).map_err(|_| PhaseInfraError::SessionCliMissing)?;
+    let argv = shell_words::split(&rendered_cli).map_err(|_| PhaseInfraError::SessionCliMissing)?;
     if argv.is_empty() {
         return Err(PhaseInfraError::SessionCliMissing);
     }
@@ -524,14 +510,21 @@ mod tests {
 
     fn cfg(max_iter: u32) -> RokiConfig {
         RokiConfig {
-            linear: LinearSection { token: "x".to_string() },
+            linear: LinearSection {
+                token: "x".to_string(),
+            },
             linear_webhook: LinearWebhookSection {
                 bind: "127.0.0.1".to_string(),
                 port: 8000,
                 secret: None,
             },
-            default_ai_command: DefaultAiCommandSection { cli: "echo".to_string(), stall_seconds: 300 },
-            engine: EngineSection { max_iterations: max_iter },
+            default_ai_command: DefaultAiCommandSection {
+                cli: "echo".to_string(),
+                stall_seconds: 300,
+            },
+            engine: EngineSection {
+                max_iterations: max_iter,
+            },
             paths: PathsSection {
                 workflow: PathBuf::from("/tmp/w"),
                 session_root: PathBuf::from("/tmp/s"),
@@ -546,7 +539,9 @@ mod tests {
             when_status: "in_progress".to_string(),
             when_labels_has_all: vec![],
             pre,
-            run: PhaseBody::InlineCmd { cmd: "true".to_string() },
+            run: PhaseBody::InlineCmd {
+                cmd: "true".to_string(),
+            },
             post,
         }
     }
@@ -580,7 +575,9 @@ mod tests {
             let pos = scripted
                 .iter()
                 .position(|(i, k, _)| *i == ctx.cycle.iter && *k == kind)
-                .unwrap_or_else(|| panic!("no scripted outcome for ({}, {:?})", ctx.cycle.iter, kind));
+                .unwrap_or_else(|| {
+                    panic!("no scripted outcome for ({}, {:?})", ctx.cycle.iter, kind)
+                });
             let (_, _, out) = scripted.remove(pos);
             Ok(out)
         }
@@ -598,8 +595,17 @@ mod tests {
             },
         )]);
         let r = rule(Some(PhaseBody::InlineCmd { cmd: "true".into() }), None);
-        let outcome =
-            run_cycle(&exec, &admitted(), &r, tmp.path(), &cfg(10), CycleKind::Rule, None).await.unwrap();
+        let outcome = run_cycle(
+            &exec,
+            &admitted(),
+            &r,
+            tmp.path(),
+            &cfg(10),
+            CycleKind::Rule,
+            None,
+        )
+        .await
+        .unwrap();
         assert!(matches!(outcome, CycleOutcome::Completed { iters: 1, .. }));
         let calls = exec.calls.lock().unwrap().clone();
         assert_eq!(calls, vec![(1, PhaseKind::Pre)]);
@@ -620,7 +626,10 @@ mod tests {
             (
                 1,
                 PhaseKind::Run,
-                PhaseOutcome::RunDone { exit_code: 0, duration_seconds: 1 },
+                PhaseOutcome::RunDone {
+                    exit_code: 0,
+                    duration_seconds: 1,
+                },
             ),
             (
                 1,
@@ -635,8 +644,17 @@ mod tests {
             Some(PhaseBody::InlineCmd { cmd: "true".into() }),
             Some(PhaseBody::InlineCmd { cmd: "true".into() }),
         );
-        let outcome =
-            run_cycle(&exec, &admitted(), &r, tmp.path(), &cfg(10), CycleKind::Rule, None).await.unwrap();
+        let outcome = run_cycle(
+            &exec,
+            &admitted(),
+            &r,
+            tmp.path(),
+            &cfg(10),
+            CycleKind::Rule,
+            None,
+        )
+        .await
+        .unwrap();
         assert!(matches!(outcome, CycleOutcome::Completed { iters: 1, .. }));
     }
 
@@ -644,51 +662,120 @@ mod tests {
     async fn post_run_skips_pre_in_next_iteration() {
         let tmp = tempfile::tempdir().unwrap();
         let exec = FakeExec::new(vec![
-            (1, PhaseKind::Pre, PhaseOutcome::PreDirective {
-                directive: PreDirective::Run,
-                payload: serde_json::json!({}),
-            }),
-            (1, PhaseKind::Run, PhaseOutcome::RunDone { exit_code: 0, duration_seconds: 0 }),
-            (1, PhaseKind::Post, PhaseOutcome::PostDirective {
-                directive: PostDirective::Run,
-                payload: serde_json::json!({}),
-            }),
-            (2, PhaseKind::Run, PhaseOutcome::RunDone { exit_code: 0, duration_seconds: 0 }),
-            (2, PhaseKind::Post, PhaseOutcome::PostDirective {
-                directive: PostDirective::End,
-                payload: serde_json::json!({}),
-            }),
+            (
+                1,
+                PhaseKind::Pre,
+                PhaseOutcome::PreDirective {
+                    directive: PreDirective::Run,
+                    payload: serde_json::json!({}),
+                },
+            ),
+            (
+                1,
+                PhaseKind::Run,
+                PhaseOutcome::RunDone {
+                    exit_code: 0,
+                    duration_seconds: 0,
+                },
+            ),
+            (
+                1,
+                PhaseKind::Post,
+                PhaseOutcome::PostDirective {
+                    directive: PostDirective::Run,
+                    payload: serde_json::json!({}),
+                },
+            ),
+            (
+                2,
+                PhaseKind::Run,
+                PhaseOutcome::RunDone {
+                    exit_code: 0,
+                    duration_seconds: 0,
+                },
+            ),
+            (
+                2,
+                PhaseKind::Post,
+                PhaseOutcome::PostDirective {
+                    directive: PostDirective::End,
+                    payload: serde_json::json!({}),
+                },
+            ),
         ]);
         let r = rule(
             Some(PhaseBody::InlineCmd { cmd: "true".into() }),
             Some(PhaseBody::InlineCmd { cmd: "true".into() }),
         );
-        let outcome =
-            run_cycle(&exec, &admitted(), &r, tmp.path(), &cfg(10), CycleKind::Rule, None).await.unwrap();
+        let outcome = run_cycle(
+            &exec,
+            &admitted(),
+            &r,
+            tmp.path(),
+            &cfg(10),
+            CycleKind::Rule,
+            None,
+        )
+        .await
+        .unwrap();
         assert!(matches!(outcome, CycleOutcome::Completed { iters: 2, .. }));
         let calls = exec.calls.lock().unwrap().clone();
         let pre_iter2 = calls.iter().find(|(i, k)| *i == 2 && *k == PhaseKind::Pre);
-        assert!(pre_iter2.is_none(), "iter 2 pre must be skipped, calls: {calls:?}");
+        assert!(
+            pre_iter2.is_none(),
+            "iter 2 pre must be skipped, calls: {calls:?}"
+        );
     }
 
     #[tokio::test]
     async fn iter_cap_with_post_run_yields_iter_exhausted() {
         let tmp = tempfile::tempdir().unwrap();
         let exec = FakeExec::new(vec![
-            (1, PhaseKind::Run, PhaseOutcome::RunDone { exit_code: 0, duration_seconds: 0 }),
-            (1, PhaseKind::Post, PhaseOutcome::PostDirective {
-                directive: PostDirective::Run,
-                payload: serde_json::json!({}),
-            }),
-            (2, PhaseKind::Run, PhaseOutcome::RunDone { exit_code: 0, duration_seconds: 0 }),
-            (2, PhaseKind::Post, PhaseOutcome::PostDirective {
-                directive: PostDirective::Run,
-                payload: serde_json::json!({}),
-            }),
+            (
+                1,
+                PhaseKind::Run,
+                PhaseOutcome::RunDone {
+                    exit_code: 0,
+                    duration_seconds: 0,
+                },
+            ),
+            (
+                1,
+                PhaseKind::Post,
+                PhaseOutcome::PostDirective {
+                    directive: PostDirective::Run,
+                    payload: serde_json::json!({}),
+                },
+            ),
+            (
+                2,
+                PhaseKind::Run,
+                PhaseOutcome::RunDone {
+                    exit_code: 0,
+                    duration_seconds: 0,
+                },
+            ),
+            (
+                2,
+                PhaseKind::Post,
+                PhaseOutcome::PostDirective {
+                    directive: PostDirective::Run,
+                    payload: serde_json::json!({}),
+                },
+            ),
         ]);
         let r = rule(None, Some(PhaseBody::InlineCmd { cmd: "true".into() }));
-        let outcome =
-            run_cycle(&exec, &admitted(), &r, tmp.path(), &cfg(2), CycleKind::Rule, None).await.unwrap();
+        let outcome = run_cycle(
+            &exec,
+            &admitted(),
+            &r,
+            tmp.path(),
+            &cfg(2),
+            CycleKind::Rule,
+            None,
+        )
+        .await
+        .unwrap();
         match outcome {
             CycleOutcome::Failed { meta } => {
                 assert_eq!(meta.kind, FailureKind::IterExhausted);
@@ -704,11 +791,23 @@ mod tests {
         let exec = FakeExec::new(vec![(
             1,
             PhaseKind::Run,
-            PhaseOutcome::RunDone { exit_code: 0, duration_seconds: 0 },
+            PhaseOutcome::RunDone {
+                exit_code: 0,
+                duration_seconds: 0,
+            },
         )]);
         let r = rule(None, None);
-        let outcome =
-            run_cycle(&exec, &admitted(), &r, tmp.path(), &cfg(10), CycleKind::Rule, None).await.unwrap();
+        let outcome = run_cycle(
+            &exec,
+            &admitted(),
+            &r,
+            tmp.path(),
+            &cfg(10),
+            CycleKind::Rule,
+            None,
+        )
+        .await
+        .unwrap();
         assert!(matches!(outcome, CycleOutcome::Completed { iters: 1, .. }));
     }
 
@@ -716,15 +815,35 @@ mod tests {
     async fn pre_absent_starts_at_run() {
         let tmp = tempfile::tempdir().unwrap();
         let exec = FakeExec::new(vec![
-            (1, PhaseKind::Run, PhaseOutcome::RunDone { exit_code: 0, duration_seconds: 0 }),
-            (1, PhaseKind::Post, PhaseOutcome::PostDirective {
-                directive: PostDirective::End,
-                payload: serde_json::json!({}),
-            }),
+            (
+                1,
+                PhaseKind::Run,
+                PhaseOutcome::RunDone {
+                    exit_code: 0,
+                    duration_seconds: 0,
+                },
+            ),
+            (
+                1,
+                PhaseKind::Post,
+                PhaseOutcome::PostDirective {
+                    directive: PostDirective::End,
+                    payload: serde_json::json!({}),
+                },
+            ),
         ]);
         let r = rule(None, Some(PhaseBody::InlineCmd { cmd: "true".into() }));
-        let outcome =
-            run_cycle(&exec, &admitted(), &r, tmp.path(), &cfg(10), CycleKind::Rule, None).await.unwrap();
+        let outcome = run_cycle(
+            &exec,
+            &admitted(),
+            &r,
+            tmp.path(),
+            &cfg(10),
+            CycleKind::Rule,
+            None,
+        )
+        .await
+        .unwrap();
         assert!(matches!(outcome, CycleOutcome::Completed { iters: 1, .. }));
     }
 
@@ -738,14 +857,29 @@ mod tests {
         let exec = FakeExec::new(vec![(
             1,
             PhaseKind::Pre,
-            PhaseOutcome::RunDone { exit_code: 0, duration_seconds: 0 },
+            PhaseOutcome::RunDone {
+                exit_code: 0,
+                duration_seconds: 0,
+            },
         )]);
         let r = rule(Some(PhaseBody::InlineCmd { cmd: "true".into() }), None);
-        let err = run_cycle(&exec, &admitted(), &r, tmp.path(), &cfg(10), CycleKind::Rule, None)
-            .await
-            .expect_err("wrong variant must surface as Err");
+        let err = run_cycle(
+            &exec,
+            &admitted(),
+            &r,
+            tmp.path(),
+            &cfg(10),
+            CycleKind::Rule,
+            None,
+        )
+        .await
+        .expect_err("wrong variant must surface as Err");
         match err {
-            PhaseInfraError::ExecutorContract { phase, got_variant, iter } => {
+            PhaseInfraError::ExecutorContract {
+                phase,
+                got_variant,
+                iter,
+            } => {
                 assert_eq!(phase, PhaseKind::Pre);
                 assert_eq!(got_variant, "RunDone");
                 assert_eq!(iter, 1);
@@ -760,35 +894,77 @@ mod tests {
         // phase. Symmetrical to the post-Run test above.
         let tmp = tempfile::tempdir().unwrap();
         let exec = FakeExec::new(vec![
-            (1, PhaseKind::Pre, PhaseOutcome::PreDirective {
-                directive: PreDirective::Run,
-                payload: serde_json::json!({}),
-            }),
-            (1, PhaseKind::Run, PhaseOutcome::RunDone { exit_code: 0, duration_seconds: 0 }),
-            (1, PhaseKind::Post, PhaseOutcome::PostDirective {
-                directive: PostDirective::Pre,
-                payload: serde_json::json!({}),
-            }),
-            (2, PhaseKind::Pre, PhaseOutcome::PreDirective {
-                directive: PreDirective::Run,
-                payload: serde_json::json!({}),
-            }),
-            (2, PhaseKind::Run, PhaseOutcome::RunDone { exit_code: 0, duration_seconds: 0 }),
-            (2, PhaseKind::Post, PhaseOutcome::PostDirective {
-                directive: PostDirective::End,
-                payload: serde_json::json!({}),
-            }),
+            (
+                1,
+                PhaseKind::Pre,
+                PhaseOutcome::PreDirective {
+                    directive: PreDirective::Run,
+                    payload: serde_json::json!({}),
+                },
+            ),
+            (
+                1,
+                PhaseKind::Run,
+                PhaseOutcome::RunDone {
+                    exit_code: 0,
+                    duration_seconds: 0,
+                },
+            ),
+            (
+                1,
+                PhaseKind::Post,
+                PhaseOutcome::PostDirective {
+                    directive: PostDirective::Pre,
+                    payload: serde_json::json!({}),
+                },
+            ),
+            (
+                2,
+                PhaseKind::Pre,
+                PhaseOutcome::PreDirective {
+                    directive: PreDirective::Run,
+                    payload: serde_json::json!({}),
+                },
+            ),
+            (
+                2,
+                PhaseKind::Run,
+                PhaseOutcome::RunDone {
+                    exit_code: 0,
+                    duration_seconds: 0,
+                },
+            ),
+            (
+                2,
+                PhaseKind::Post,
+                PhaseOutcome::PostDirective {
+                    directive: PostDirective::End,
+                    payload: serde_json::json!({}),
+                },
+            ),
         ]);
         let r = rule(
             Some(PhaseBody::InlineCmd { cmd: "true".into() }),
             Some(PhaseBody::InlineCmd { cmd: "true".into() }),
         );
-        let outcome =
-            run_cycle(&exec, &admitted(), &r, tmp.path(), &cfg(10), CycleKind::Rule, None).await.unwrap();
+        let outcome = run_cycle(
+            &exec,
+            &admitted(),
+            &r,
+            tmp.path(),
+            &cfg(10),
+            CycleKind::Rule,
+            None,
+        )
+        .await
+        .unwrap();
         assert!(matches!(outcome, CycleOutcome::Completed { iters: 2, .. }));
         let calls = exec.calls.lock().unwrap().clone();
         let pre_iter2 = calls.iter().find(|(i, k)| *i == 2 && *k == PhaseKind::Pre);
-        assert!(pre_iter2.is_some(), "iter 2 pre must run after PostDirective::Pre, calls: {calls:?}");
+        assert!(
+            pre_iter2.is_some(),
+            "iter 2 pre must run after PostDirective::Pre, calls: {calls:?}"
+        );
     }
 
     #[tokio::test]
@@ -797,11 +973,22 @@ mod tests {
         let exec = FakeExec::new(vec![(
             1,
             PhaseKind::Pre,
-            PhaseOutcome::Failure { kind: FailureKind::Unparseable },
+            PhaseOutcome::Failure {
+                kind: FailureKind::Unparseable,
+            },
         )]);
         let r = rule(Some(PhaseBody::InlineCmd { cmd: "true".into() }), None);
-        let outcome =
-            run_cycle(&exec, &admitted(), &r, tmp.path(), &cfg(10), CycleKind::Rule, None).await.unwrap();
+        let outcome = run_cycle(
+            &exec,
+            &admitted(),
+            &r,
+            tmp.path(),
+            &cfg(10),
+            CycleKind::Rule,
+            None,
+        )
+        .await
+        .unwrap();
         match outcome {
             CycleOutcome::Failed { meta } => {
                 assert_eq!(meta.kind, FailureKind::Unparseable);
@@ -853,9 +1040,17 @@ mod tests {
         let bad_root = blocker.as_path();
         let exec = FakeExec::new(vec![]);
         let r = rule(None, None);
-        let outcome = run_cycle(&exec, &admitted(), &r, bad_root, &cfg(10), CycleKind::Rule, None)
-            .await
-            .unwrap();
+        let outcome = run_cycle(
+            &exec,
+            &admitted(),
+            &r,
+            bad_root,
+            &cfg(10),
+            CycleKind::Rule,
+            None,
+        )
+        .await
+        .unwrap();
         match outcome {
             CycleOutcome::Failed { meta } => {
                 assert_eq!(meta.kind, FailureKind::FsPoison);
@@ -883,13 +1078,12 @@ mod tests {
                 _ctx: &PhaseContext,
                 _iter_dir: &Path,
             ) -> Result<PhaseOutcome, PhaseInfraError> {
-                Err(PhaseInfraError::Capture(crate::error::CaptureError::OpenFile {
-                    path: PathBuf::from("/tmp/fake/pre.stdout"),
-                    source: std::io::Error::new(
-                        std::io::ErrorKind::PermissionDenied,
-                        "denied",
-                    ),
-                }))
+                Err(PhaseInfraError::Capture(
+                    crate::error::CaptureError::OpenFile {
+                        path: PathBuf::from("/tmp/fake/pre.stdout"),
+                        source: std::io::Error::new(std::io::ErrorKind::PermissionDenied, "denied"),
+                    },
+                ))
             }
         }
 
@@ -897,9 +1091,17 @@ mod tests {
         let exec = FailingCaptureExec;
         let r = rule(Some(PhaseBody::InlineCmd { cmd: "true".into() }), None);
 
-        let outcome = run_cycle(&exec, &admitted(), &r, tmp.path(), &cfg(10), CycleKind::Rule, None)
-            .await
-            .unwrap();
+        let outcome = run_cycle(
+            &exec,
+            &admitted(),
+            &r,
+            tmp.path(),
+            &cfg(10),
+            CycleKind::Rule,
+            None,
+        )
+        .await
+        .unwrap();
 
         match outcome {
             CycleOutcome::Failed { meta } => {
@@ -971,7 +1173,7 @@ mod tests {
         // The new code should find the next char boundary and succeed.
         assert!(truncated.starts_with("..."));
         // Result should be valid UTF-8.
-        let _ = truncated.chars().count();  // This would panic if invalid UTF-8
+        let _ = truncated.chars().count(); // This would panic if invalid UTF-8
     }
 
     #[test]
@@ -984,6 +1186,6 @@ mod tests {
         let s = "x".repeat(50);
         let out = super::truncate_tail(&s, 10);
         assert!(out.starts_with("..."));
-        assert_eq!(out.len(), 10 + 3);  // last 10 chars + "..." prefix
+        assert_eq!(out.len(), 10 + 3); // last 10 chars + "..." prefix
     }
 }
