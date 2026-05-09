@@ -52,21 +52,23 @@ Attached to every event via tracing spans (when in scope).
 | `worktree_created` | Worktree materialized on first `pre.directive: "run"` | `repo`, branch name, worktree path |
 | `worktree_deleted` | Worktree removed (cleanup-cycle completion / orphan reconcile). Admission-revoke does not delete worktrees | `repo`, branch name, `reason` ∈ `cleanup` / `orphan` |
 | `session_tempdir_created` | Session tempdir created at admission | `ticket.id`, path |
-| `session_tempdir_deleted` | Session tempdir removed | `ticket.id`, path, `reason` |
+| `session_tempdir_deleted` | Session tempdir removed | `ticket.id`, path, `reason` ∈ `cleanup` / `orphan` |
 
 ## Cold start
 
 | Event | When | Carries |
 |---|---|---|
-| `cold_start_began` | Daemon process start, after config validation | `roki.toml` path, WORKFLOW.toml path |
-| `cold_start_completed` | Cold-start enumeration + reconciliation finished | Total tickets enumerated, cycles spawned, orphans deleted |
+| `cold_start_began` | Daemon process start, after config validation | `roki_toml_path`, `workflow_toml_path` |
+| `cold_start_completed` | Cold-start enumeration + reconciliation finished | `enumerated`, `admitted`, `cycles_spawned`, `orphans_deleted`, `enum_partial`; on partial: `partial_reason`, `partial_error_text` |
+| `orphan_reconcile_skipped` | Orphan reconciliation skipped (e.g. enumeration partial) | `reason` |
+| `status_filter_dropped` | Cold-start `[linear].status` entry rejected pre-enumeration | `entry`, `reason` |
 
 ## Linear admission
 
 | Event | When | Carries |
 |---|---|---|
 | `webhook_received` | Linear webhook arrives | Verified flag, payload kind |
-| `webhook_skipped` | Admission failed or no diff | `reason` ∈ `signature_invalid` / `assignee_mismatch` / `repo_unresolvable` / `no_diff` |
+| `webhook_skipped` | Admission failed or no diff | `reason` ∈ `signature_invalid` / `assignee_mismatch` / `repo_unresolvable` / `no_diff`; optional `source` ∈ `webhook` (default; omitted) / `cold_start` |
 | `polling_started` | Outage-driven polling cycle started | `reason` ∈ `webhook_outage` (only outage-driven; nudge-driven uses `refresh_received`) |
 | `polling_completed` | Polling pass finished | Tickets fetched, diffs detected |
 | `refresh_received` | `POST /api/refresh` arrived | Client address, coalescing decision (`fired` / `coalesced` / `dropped_during_backoff`) |

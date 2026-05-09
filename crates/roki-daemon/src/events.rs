@@ -41,6 +41,20 @@ pub enum ShutdownSignal {
     Sigterm,
 }
 
+#[derive(Debug, Serialize, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum WebhookSkipSource {
+    Webhook,
+    ColdStart,
+}
+
+#[derive(Debug, Serialize, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum SessionTempdirDeleteReason {
+    Cleanup,
+    Orphan,
+}
+
 #[derive(Debug, Serialize)]
 pub struct FailureMetaSer {
     pub kind: String,
@@ -114,6 +128,44 @@ pub enum Event {
         ts: String,
         ticket_id: String,
         reason: WebhookSkipReason,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        source: Option<WebhookSkipSource>,
+    },
+    ColdStartBegan {
+        ts: String,
+        roki_toml_path: String,
+        workflow_toml_path: String,
+    },
+    ColdStartCompleted {
+        ts: String,
+        enumerated: usize,
+        admitted: usize,
+        cycles_spawned: usize,
+        orphans_deleted: usize,
+        enum_partial: bool,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        partial_reason: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        partial_error_text: Option<String>,
+    },
+    OrphanReconcileSkipped {
+        ts: String,
+        reason: String,
+    },
+    StatusFilterDropped {
+        ts: String,
+        entry: String,
+        reason: String,
+    },
+    LinearBackoffApplied {
+        ts: String,
+        backoff_seconds: u64,
+    },
+    SessionTempdirDeleted {
+        ts: String,
+        ticket_id: String,
+        path: String,
+        reason: SessionTempdirDeleteReason,
     },
 }
 
@@ -251,11 +303,70 @@ mod tests {
             ts: "2026-05-08T00:00:00Z".into(),
             ticket_id: "ENG-1".into(),
             reason: WebhookSkipReason::NoDiff,
+            source: None,
         };
         let v: Value = serde_json::to_value(&ev).unwrap();
         assert_eq!(v["event"], "webhook_skipped");
         assert_eq!(v["reason"], "no_diff");
         assert_eq!(v["ticket_id"], "ENG-1");
+    }
+
+    #[test]
+    fn cold_start_completed_serializes_partial_fields_when_present() {
+        let e = Event::ColdStartCompleted {
+            ts: "2026-05-09T00:00:00Z".into(),
+            enumerated: 5,
+            admitted: 3,
+            cycles_spawned: 3,
+            orphans_deleted: 0,
+            enum_partial: true,
+            partial_reason: Some("linear_unreachable".into()),
+            partial_error_text: Some("timeout".into()),
+        };
+        let v = serde_json::to_value(&e).unwrap();
+        assert_eq!(v["event"], "cold_start_completed");
+        assert_eq!(v["enum_partial"], true);
+        assert_eq!(v["partial_reason"], "linear_unreachable");
+    }
+
+    #[test]
+    fn cold_start_completed_omits_partial_fields_on_success() {
+        let e = Event::ColdStartCompleted {
+            ts: "2026-05-09T00:00:00Z".into(),
+            enumerated: 5,
+            admitted: 5,
+            cycles_spawned: 5,
+            orphans_deleted: 2,
+            enum_partial: false,
+            partial_reason: None,
+            partial_error_text: None,
+        };
+        let v = serde_json::to_value(&e).unwrap();
+        assert!(v.get("partial_reason").is_none());
+    }
+
+    #[test]
+    fn webhook_skipped_omits_source_when_none() {
+        let e = Event::WebhookSkipped {
+            ts: "2026-05-09T00:00:00Z".into(),
+            ticket_id: "t1".into(),
+            reason: WebhookSkipReason::AssigneeMismatch,
+            source: None,
+        };
+        let v = serde_json::to_value(&e).unwrap();
+        assert!(v.get("source").is_none());
+    }
+
+    #[test]
+    fn webhook_skipped_with_cold_start_source_serializes_field() {
+        let e = Event::WebhookSkipped {
+            ts: "2026-05-09T00:00:00Z".into(),
+            ticket_id: "t1".into(),
+            reason: WebhookSkipReason::AssigneeMismatch,
+            source: Some(WebhookSkipSource::ColdStart),
+        };
+        let v = serde_json::to_value(&e).unwrap();
+        assert_eq!(v["source"], "cold_start");
     }
 
     #[test]

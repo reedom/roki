@@ -185,6 +185,7 @@ impl<R: CycleRunner + 'static> Dispatcher<R> {
                 ts: now_rfc3339(),
                 ticket_id: ticket_id.to_string(),
                 reason,
+                source: None,
             });
     }
 }
