@@ -12,6 +12,7 @@ pub mod events;
 mod linear;
 mod rule;
 mod runtime;
+mod workflow;
 
 #[tokio::main]
 async fn main() -> ExitCode {
