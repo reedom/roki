@@ -30,6 +30,7 @@ impl CycleRunner for RealCycleRunner {
         admitted: &AdmittedTicket,
         target: DispatchTarget<'_>,
         _cycle_id: Uuid,
+        cycle_trigger: CycleTrigger,
     ) -> CycleResult {
         let mut events = match EventWriter::open(&self.cfg.paths.session_root, &admitted.ticket.id)
         {
@@ -87,7 +88,7 @@ impl CycleRunner for RealCycleRunner {
             &self.cfg.paths.session_root,
             self.cfg.as_ref(),
             kind,
-            CycleTrigger::Runtime,
+            cycle_trigger,
             None,
         )
         .await
@@ -131,6 +132,7 @@ impl CycleRunner for RealCycleRunner {
                     admitted,
                     self.cfg.as_ref(),
                     &mut events,
+                    cycle_trigger,
                 )
                 .await;
                 match decision {
@@ -171,6 +173,7 @@ fn cleanup_to_rule(c: &Cleanup) -> Rule {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn handle_failed_cycle(
     meta: &FailureMeta,
     failed_kind: CycleKind,
@@ -179,6 +182,7 @@ async fn handle_failed_cycle(
     admitted: &AdmittedTicket,
     cfg: &RokiConfig,
     events: &mut EventWriter,
+    cycle_trigger: CycleTrigger,
 ) -> HandlerDecision {
     // Recursion bound: a failure cycle that itself fails must not recurse.
     if failed_kind == CycleKind::Failure {
@@ -212,7 +216,7 @@ async fn handle_failed_cycle(
         &cfg.paths.session_root,
         cfg,
         CycleKind::Failure,
-        CycleTrigger::Runtime,
+        cycle_trigger,
         Some(meta.clone()),
     )
     .await

@@ -18,6 +18,7 @@ use crate::admission::AdmittedTicket;
 use crate::config::roki::RokiConfig;
 use crate::config::workflow::WorkflowConfig;
 use crate::daemon::cache::DiffCache;
+use crate::engine::context::CycleTrigger;
 use crate::engine::dispatch::{DispatchMode, DispatchTarget, evaluate_from_cache};
 use crate::engine::outcome::CycleKind;
 
@@ -25,6 +26,10 @@ use crate::engine::outcome::CycleKind;
 #[derive(Debug)]
 pub enum DispatchMsg {
     Webhook(AdmittedTicket),
+    /// Cold-start admission seed. The first cycle for the ticket runs
+    /// with `CycleTrigger::ColdStart`; subsequent webhook-driven cycles
+    /// fall back to `CycleTrigger::Runtime` via the `Webhook` variant.
+    ColdStartCycle(AdmittedTicket),
     Shutdown,
 }
 
@@ -49,6 +54,7 @@ pub trait CycleRunner: Send + Sync {
         admitted: &AdmittedTicket,
         target: DispatchTarget<'_>,
         cycle_id: Uuid,
+        cycle_trigger: CycleTrigger,
     ) -> CycleResult;
 }
 
@@ -95,6 +101,22 @@ pub async fn run_ticket_task<R: CycleRunner>(
                     runner.clone(),
                     &inbox_self,
                     &session_root,
+                    CycleTrigger::Runtime,
+                )
+                .await
+            }
+            DispatchMsg::ColdStartCycle(admitted) => {
+                step_once(
+                    &ticket_id,
+                    admitted,
+                    cache.clone(),
+                    workflow.clone(),
+                    cfg.clone(),
+                    mode,
+                    runner.clone(),
+                    &inbox_self,
+                    &session_root,
+                    CycleTrigger::ColdStart,
                 )
                 .await
             }
@@ -122,6 +144,7 @@ pub async fn step_once<R: CycleRunner>(
     runner: Arc<R>,
     inbox_self: &mpsc::Sender<DispatchMsg>,
     _session_root: &std::path::Path,
+    cycle_trigger: CycleTrigger,
 ) -> StepOutcome {
     // The dispatcher already updated the cache via `cache.observe`. We
     // re-snapshot here because additional webhooks may have arrived
@@ -152,7 +175,9 @@ pub async fn step_once<R: CycleRunner>(
     let synthetic = synthesize_admitted(ticket_id, &snapshot);
     let cycle_id = Uuid::new_v4();
     cache.set_cycle_id(ticket_id, cycle_id).await;
-    let result = runner.run_cycle(&synthetic, target_owned, cycle_id).await;
+    let result = runner
+        .run_cycle(&synthetic, target_owned, cycle_id, cycle_trigger)
+        .await;
     cache.clear_cycle_id(ticket_id).await;
 
     let evicted = matches!(
@@ -214,6 +239,17 @@ mod tests {
     struct MockCycleRunner {
         next: StdMutex<Vec<CycleResult>>,
         invocations: StdMutex<u32>,
+        triggers: StdMutex<Vec<CycleTrigger>>,
+    }
+
+    impl MockCycleRunner {
+        fn new(next: Vec<CycleResult>) -> Self {
+            Self {
+                next: StdMutex::new(next),
+                invocations: StdMutex::new(0),
+                triggers: StdMutex::new(vec![]),
+            }
+        }
     }
 
     #[async_trait::async_trait]
@@ -223,8 +259,10 @@ mod tests {
             _a: &AdmittedTicket,
             _t: DispatchTarget<'_>,
             _id: Uuid,
+            trigger: CycleTrigger,
         ) -> CycleResult {
             *self.invocations.lock().unwrap() += 1;
+            self.triggers.lock().unwrap().push(trigger);
             self.next
                 .lock()
                 .unwrap()
@@ -299,13 +337,10 @@ mod tests {
         let work = TempDir::new().unwrap();
         let cache = Arc::new(DiffCache::new());
         let wf = Arc::new(workflow_with_rule("InProgress"));
-        let runner = Arc::new(MockCycleRunner {
-            next: StdMutex::new(vec![CycleResult::Completed {
-                kind: CycleKind::Rule,
-                iters: 1,
-            }]),
-            invocations: StdMutex::new(0),
-        });
+        let runner = Arc::new(MockCycleRunner::new(vec![CycleResult::Completed {
+            kind: CycleKind::Rule,
+            iters: 1,
+        }]));
 
         let a = admitted("t1", "InProgress");
         cache.observe(&a).await;
@@ -321,6 +356,7 @@ mod tests {
             runner.clone(),
             &tx,
             work.path(),
+            CycleTrigger::Runtime,
         )
         .await;
 
@@ -332,6 +368,51 @@ mod tests {
             }
         ));
         assert_eq!(*runner.invocations.lock().unwrap(), 1);
+        assert_eq!(
+            runner.triggers.lock().unwrap().as_slice(),
+            &[CycleTrigger::Runtime]
+        );
+    }
+
+    #[tokio::test]
+    async fn step_once_with_cold_start_trigger_forwards_to_runner() {
+        let work = TempDir::new().unwrap();
+        let cache = Arc::new(DiffCache::new());
+        let wf = Arc::new(workflow_with_rule("InProgress"));
+        let runner = Arc::new(MockCycleRunner::new(vec![CycleResult::Completed {
+            kind: CycleKind::Rule,
+            iters: 1,
+        }]));
+
+        let a = admitted("t1", "InProgress");
+        cache.observe(&a).await;
+
+        let (tx, _rx) = mpsc::channel(1);
+        let outcome = step_once(
+            "t1",
+            a,
+            cache.clone(),
+            wf,
+            cfg_for(work.path()),
+            DispatchMode::Default,
+            runner.clone(),
+            &tx,
+            work.path(),
+            CycleTrigger::ColdStart,
+        )
+        .await;
+
+        assert!(matches!(
+            outcome,
+            StepOutcome::Dispatched {
+                kind: CycleKind::Rule,
+                evicted: false
+            }
+        ));
+        assert_eq!(
+            runner.triggers.lock().unwrap().as_slice(),
+            &[CycleTrigger::ColdStart]
+        );
     }
 
     #[tokio::test]
@@ -339,13 +420,10 @@ mod tests {
         let work = TempDir::new().unwrap();
         let cache = Arc::new(DiffCache::new());
         let wf = Arc::new(workflow_with_cleanup("Done"));
-        let runner = Arc::new(MockCycleRunner {
-            next: StdMutex::new(vec![CycleResult::Completed {
-                kind: CycleKind::Cleanup,
-                iters: 1,
-            }]),
-            invocations: StdMutex::new(0),
-        });
+        let runner = Arc::new(MockCycleRunner::new(vec![CycleResult::Completed {
+            kind: CycleKind::Cleanup,
+            iters: 1,
+        }]));
 
         let a = admitted("t1", "Done");
         cache.observe(&a).await;
@@ -361,6 +439,7 @@ mod tests {
             runner,
             &tx,
             work.path(),
+            CycleTrigger::Runtime,
         )
         .await;
 
@@ -379,13 +458,10 @@ mod tests {
         let work = TempDir::new().unwrap();
         let cache = Arc::new(DiffCache::new());
         let wf = Arc::new(workflow_with_rule("InProgress"));
-        let runner = Arc::new(MockCycleRunner {
-            next: StdMutex::new(vec![CycleResult::Completed {
-                kind: CycleKind::Rule,
-                iters: 1,
-            }]),
-            invocations: StdMutex::new(0),
-        });
+        let runner = Arc::new(MockCycleRunner::new(vec![CycleResult::Completed {
+            kind: CycleKind::Rule,
+            iters: 1,
+        }]));
 
         let a = admitted("t1", "InProgress");
         cache.observe(&a).await;
@@ -402,6 +478,7 @@ mod tests {
             runner,
             &tx,
             work.path(),
+            CycleTrigger::Runtime,
         )
         .await;
 
@@ -416,10 +493,7 @@ mod tests {
         let work = TempDir::new().unwrap();
         let cache = Arc::new(DiffCache::new());
         let wf = Arc::new(workflow_with_rule("InProgress"));
-        let runner = Arc::new(MockCycleRunner {
-            next: StdMutex::new(vec![]),
-            invocations: StdMutex::new(0),
-        });
+        let runner = Arc::new(MockCycleRunner::new(vec![]));
 
         let a = admitted("t1", "Triage");
         cache.observe(&a).await;
@@ -435,6 +509,7 @@ mod tests {
             runner.clone(),
             &tx,
             work.path(),
+            CycleTrigger::Runtime,
         )
         .await;
 
