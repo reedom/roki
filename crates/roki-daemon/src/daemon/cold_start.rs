@@ -183,6 +183,9 @@ impl<R: CycleRunner + 'static> ColdStart<R> {
                     )
                     .await;
             }
+            for ticket_id in &orphan_report.deleted {
+                self.escalation.evict_ticket(ticket_id).await;
+            }
         }
 
         report

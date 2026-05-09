@@ -116,12 +116,14 @@ impl<R: CycleRunner + 'static> Dispatcher<R> {
                 // via cold-start orphan reconcile.
                 if self.cache.snapshot(&ticket_id).await.is_some() {
                     self.cache.set_pending_evict(&ticket_id).await;
+                    self.escalation.evict_ticket(&ticket_id).await;
                     let map = self.tickets.lock().await;
                     if !map.contains_key(&ticket_id) {
                         // No in-flight ticket task to drain the flag —
                         // reclaim cache immediately.
                         drop(map);
                         self.cache.evict(&ticket_id).await;
+                        self.escalation.evict_ticket(&ticket_id).await;
                     }
                 }
                 return DispatchAction::AdmissionRejected;
