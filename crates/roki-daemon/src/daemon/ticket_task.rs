@@ -196,6 +196,21 @@ pub async fn step_once<R: CycleRunner>(
         };
     }
 
+    // Admission-revoke (slice 6 fr:01/fr:03/fr:05): if the dispatcher
+    // marked this ticket for eviction while the cycle was running, drain
+    // the flag and reclaim the cache entry. Worktree + session_tempdir
+    // are intentionally retained — reclamation happens via a future
+    // cleanup-cycle on terminal-state re-admission or via cold-start
+    // orphan reconcile. `pending_evict` takes precedence over
+    // `pending_recheck`.
+    if cache.take_pending_evict(ticket_id).await {
+        cache.evict(ticket_id).await;
+        return StepOutcome::Dispatched {
+            kind,
+            evicted: true,
+        };
+    }
+
     if cache.take_pending_recheck(ticket_id).await {
         if let Some(snap2) = cache.snapshot(ticket_id).await {
             let refreshed = synthesize_admitted(ticket_id, &snap2);
@@ -486,6 +501,95 @@ mod tests {
         let queued = rx.try_recv().expect("loop-back msg present");
         assert!(matches!(queued, DispatchMsg::Webhook(_)));
         assert!(!cache.snapshot("t1").await.unwrap().pending_recheck);
+    }
+
+    #[tokio::test]
+    async fn pending_evict_after_cycle_evicts_cache_no_disk_delete() {
+        let work = TempDir::new().unwrap();
+        let cache = Arc::new(DiffCache::new());
+        let wf = Arc::new(workflow_with_rule("InProgress"));
+        // Rule cycle (NOT cleanup): the only path to eviction is via
+        // pending_evict. ShorthandDeleted / Cleanup-completed paths are
+        // explicitly ruled out so we know the disk-delete path was NOT
+        // taken.
+        let runner = Arc::new(MockCycleRunner::new(vec![CycleResult::Completed {
+            kind: CycleKind::Rule,
+            iters: 1,
+        }]));
+
+        let a = admitted("t1", "InProgress");
+        cache.observe(&a).await;
+        cache.set_pending_evict("t1").await;
+
+        let (tx, _rx) = mpsc::channel(1);
+        let outcome = step_once(
+            "t1",
+            a,
+            cache.clone(),
+            wf,
+            cfg_for(work.path()),
+            DispatchMode::Default,
+            runner.clone(),
+            &tx,
+            work.path(),
+            CycleTrigger::Runtime,
+        )
+        .await;
+
+        // Rule-kind cycle that nevertheless evicts the cache because of
+        // pending_evict. The Dispatched.kind reflects the cycle that
+        // just ran, not the cleanup path.
+        assert!(matches!(
+            outcome,
+            StepOutcome::Dispatched {
+                kind: CycleKind::Rule,
+                evicted: true
+            }
+        ));
+        assert!(cache.snapshot("t1").await.is_none());
+        assert_eq!(*runner.invocations.lock().unwrap(), 1);
+    }
+
+    #[tokio::test]
+    async fn pending_evict_takes_precedence_over_pending_recheck() {
+        let work = TempDir::new().unwrap();
+        let cache = Arc::new(DiffCache::new());
+        let wf = Arc::new(workflow_with_rule("InProgress"));
+        let runner = Arc::new(MockCycleRunner::new(vec![CycleResult::Completed {
+            kind: CycleKind::Rule,
+            iters: 1,
+        }]));
+
+        let a = admitted("t1", "InProgress");
+        cache.observe(&a).await;
+        cache.set_pending_evict("t1").await;
+        cache.set_pending_recheck("t1").await;
+
+        let (tx, mut rx) = mpsc::channel(1);
+        let outcome = step_once(
+            "t1",
+            a,
+            cache.clone(),
+            wf,
+            cfg_for(work.path()),
+            DispatchMode::Default,
+            runner,
+            &tx,
+            work.path(),
+            CycleTrigger::Runtime,
+        )
+        .await;
+
+        assert!(matches!(
+            outcome,
+            StepOutcome::Dispatched {
+                kind: CycleKind::Rule,
+                evicted: true
+            }
+        ));
+        // No loop-back webhook should have been queued.
+        assert!(rx.try_recv().is_err());
+        assert!(cache.snapshot("t1").await.is_none());
     }
 
     #[tokio::test]

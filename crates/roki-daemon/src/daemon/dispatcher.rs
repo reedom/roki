@@ -104,9 +104,33 @@ impl<R: CycleRunner + 'static> Dispatcher<R> {
                     crate::error::AdmissionError::NoRepos => WebhookSkipReason::RepoUnresolvable,
                 };
                 self.emit_skip(&ticket_id, reason).await;
+                // Admission-revoke (slice 6 fr:01/fr:03/fr:05): if the
+                // rejected ticket was previously cached, mark it for
+                // cache-only eviction. Worktree + session_tempdir are
+                // intentionally retained — reclamation happens via a
+                // future cleanup-cycle on terminal-state re-admission or
+                // via cold-start orphan reconcile.
+                if self.cache.snapshot(&ticket_id).await.is_some() {
+                    self.cache.set_pending_evict(&ticket_id).await;
+                    let map = self.tickets.lock().await;
+                    if !map.contains_key(&ticket_id) {
+                        // No in-flight ticket task to drain the flag —
+                        // reclaim cache immediately.
+                        drop(map);
+                        self.cache.evict(&ticket_id).await;
+                    }
+                }
                 return DispatchAction::AdmissionRejected;
             }
         };
+
+        // Re-admission cancels any pending eviction set by a previous
+        // admission-revoking webhook so the entry stays alive.
+        if let Some(snap) = self.cache.snapshot(&admitted.ticket.id).await {
+            if snap.pending_evict {
+                self.cache.clear_pending_evict(&admitted.ticket.id).await;
+            }
+        }
 
         let outcome = self.cache.observe(&admitted).await;
         if matches!(outcome, DiffOutcome::Unchanged) {
@@ -436,6 +460,85 @@ mod tests {
             ),
             ghq: "github.com/example/repo".into(),
         }
+    }
+
+    #[tokio::test]
+    async fn admission_rejection_on_cached_ticket_evicts_cache_when_no_task() {
+        let work = TempDir::new().unwrap();
+        let count = Arc::new(StdMutex::new(0u32));
+        let d = dispatcher_with(Arc::new(CountingRunner::new(count.clone())), work.path());
+
+        // Pre-populate the cache without spawning a ticket task.
+        let admitted = admitted_for("t1", "InProgress");
+        d.cache.observe(&admitted).await;
+        assert!(d.cache.snapshot("t1").await.is_some());
+
+        // Webhook with mismatched assignee — admission rejects.
+        let bad = NormalizedTicket::new(
+            "t1".into(),
+            Some("intruder".into()),
+            "InProgress".into(),
+            vec![],
+            String::new(),
+            String::new(),
+        );
+        let action = d.on_webhook(bad).await;
+        assert_eq!(action, DispatchAction::AdmissionRejected);
+
+        // No ticket task was running, so the dispatcher should have
+        // reclaimed the cache immediately.
+        assert!(d.cache.snapshot("t1").await.is_none());
+    }
+
+    #[tokio::test]
+    async fn admission_rejection_on_cached_ticket_with_task_marks_pending_evict() {
+        let work = TempDir::new().unwrap();
+        let count = Arc::new(StdMutex::new(0u32));
+        let d = dispatcher_with(Arc::new(CountingRunner::new(count.clone())), work.path());
+
+        // First webhook spawns a ticket task and seeds the cache.
+        let action = d.on_webhook(ticket("t1", "InProgress")).await;
+        assert_eq!(action, DispatchAction::Spawned);
+
+        // Second webhook with bad assignee — admission rejects.
+        let bad = NormalizedTicket::new(
+            "t1".into(),
+            Some("intruder".into()),
+            "InProgress".into(),
+            vec![],
+            String::new(),
+            String::new(),
+        );
+        let action = d.on_webhook(bad).await;
+        assert_eq!(action, DispatchAction::AdmissionRejected);
+
+        // A ticket task is in-flight, so the dispatcher must NOT evict
+        // the cache directly. Instead it sets pending_evict, which the
+        // ticket task will drain post-cycle.
+        let snap = d.cache.snapshot("t1").await;
+        // The ticket task may or may not have evicted by the time we
+        // observe — accept either pending_evict=true (task still running)
+        // or absent (task drained the flag and evicted).
+        if let Some(snap) = snap {
+            assert!(snap.pending_evict, "expected pending_evict to be set");
+        }
+    }
+
+    #[tokio::test]
+    async fn re_admission_clears_pending_evict() {
+        let work = TempDir::new().unwrap();
+        let count = Arc::new(StdMutex::new(0u32));
+        let d = dispatcher_with(Arc::new(CountingRunner::new(count.clone())), work.path());
+
+        let admitted = admitted_for("t1", "InProgress");
+        d.cache.observe(&admitted).await;
+        d.cache.set_pending_evict("t1").await;
+
+        // Re-admit via the on_webhook path with a passing assignee.
+        let _ = d.on_webhook(ticket("t1", "InProgress")).await;
+
+        let snap = d.cache.snapshot("t1").await.expect("cache entry present");
+        assert!(!snap.pending_evict, "re-admit should clear pending_evict");
     }
 
     #[tokio::test]

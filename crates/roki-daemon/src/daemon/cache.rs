@@ -33,6 +33,7 @@ pub struct CacheEntry {
     pub assignee: String,
     pub cycle_id: Option<Uuid>,
     pub pending_recheck: bool,
+    pub pending_evict: bool,
     pub last_event_at: OffsetDateTime,
 }
 
@@ -106,6 +107,7 @@ impl DiffCache {
                         assignee: triple_now.2,
                         cycle_id: None,
                         pending_recheck: false,
+                        pending_evict: false,
                         last_event_at: OffsetDateTime::now_utc(),
                     },
                 );
@@ -140,6 +142,28 @@ impl DiffCache {
         if let Some(e) = self.inner.write().await.get_mut(ticket_id) {
             let prior = e.pending_recheck;
             e.pending_recheck = false;
+            prior
+        } else {
+            false
+        }
+    }
+
+    pub async fn set_pending_evict(&self, ticket_id: &str) {
+        if let Some(e) = self.inner.write().await.get_mut(ticket_id) {
+            e.pending_evict = true;
+        }
+    }
+
+    pub async fn clear_pending_evict(&self, ticket_id: &str) {
+        if let Some(e) = self.inner.write().await.get_mut(ticket_id) {
+            e.pending_evict = false;
+        }
+    }
+
+    pub async fn take_pending_evict(&self, ticket_id: &str) -> bool {
+        if let Some(e) = self.inner.write().await.get_mut(ticket_id) {
+            let prior = e.pending_evict;
+            e.pending_evict = false;
             prior
         } else {
             false
@@ -269,5 +293,31 @@ mod tests {
     async fn missing_ticket_take_pending_returns_false() {
         let c = DiffCache::new();
         assert!(!c.take_pending_recheck("missing").await);
+    }
+
+    #[tokio::test]
+    async fn set_then_take_pending_evict_clears_flag() {
+        let c = DiffCache::new();
+        c.observe(&admitted("t1", "Todo", &[], Some("u1"))).await;
+        assert!(!c.take_pending_evict("t1").await);
+        c.set_pending_evict("t1").await;
+        assert!(c.take_pending_evict("t1").await);
+        assert!(!c.take_pending_evict("t1").await);
+    }
+
+    #[tokio::test]
+    async fn clear_pending_evict_resets_without_taking() {
+        let c = DiffCache::new();
+        c.observe(&admitted("t1", "Todo", &[], Some("u1"))).await;
+        c.set_pending_evict("t1").await;
+        c.clear_pending_evict("t1").await;
+        assert!(!c.take_pending_evict("t1").await);
+    }
+
+    #[tokio::test]
+    async fn pending_evict_on_missing_ticket_is_noop() {
+        let c = DiffCache::new();
+        c.set_pending_evict("missing").await;
+        assert!(!c.take_pending_evict("missing").await);
     }
 }

@@ -219,6 +219,7 @@ mod tests {
             assignee: "u1".into(),
             cycle_id: None,
             pending_recheck: false,
+            pending_evict: false,
             last_event_at: OffsetDateTime::now_utc(),
         }
     }
