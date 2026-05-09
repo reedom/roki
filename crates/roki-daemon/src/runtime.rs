@@ -98,6 +98,13 @@ pub(crate) async fn run_inner(config_path: &Path, mode: DispatchMode) -> Result<
         })?;
     let daemon_events = Arc::new(Mutex::new(daemon_events_writer));
 
+    // 4b. Build escalation queue (fr:06 §Escalation queue) — wired before
+    //     DaemonStarted so any startup-bound failure has a receiver.
+    let escalation = crate::escalation::EscalationQueue::new(
+        cfg.escalation.queue_size as usize,
+        daemon_events.clone(),
+    );
+
     // 5. Emit DaemonStarted.
     {
         let mut w = daemon_events.lock().await;
@@ -153,6 +160,7 @@ pub(crate) async fn run_inner(config_path: &Path, mode: DispatchMode) -> Result<
         workflow: workflow.clone(),
         cfg: cfg.clone(),
         executor,
+        escalation: escalation.clone(),
     });
 
     // 9. Build cache + dispatcher.
@@ -166,6 +174,7 @@ pub(crate) async fn run_inner(config_path: &Path, mode: DispatchMode) -> Result<
         shutdown.clone(),
         runner,
         daemon_events.clone(),
+        escalation.clone(),
     ));
 
     // 10. Cold start (fr:07): paginated GraphQL enumerate -> cache
@@ -196,6 +205,7 @@ pub(crate) async fn run_inner(config_path: &Path, mode: DispatchMode) -> Result<
         dispatcher: dispatcher.clone(),
         graphql,
         mode,
+        escalation: escalation.clone(),
     };
     // Pass the shared writer Arc directly so cold_start (and the
     // GraphQL client it drives) can take and drop the lock around each

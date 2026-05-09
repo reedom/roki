@@ -86,6 +86,7 @@ pub async fn run_ticket_task<R: CycleRunner>(
     mut inbox: mpsc::Receiver<DispatchMsg>,
     inbox_self: mpsc::Sender<DispatchMsg>,
     session_root: PathBuf,
+    _escalation: Arc<crate::escalation::EscalationQueue>,
 ) {
     while let Some(msg) = inbox.recv().await {
         let outcome = match msg {

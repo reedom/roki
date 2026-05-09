@@ -7,6 +7,8 @@ use std::sync::Arc;
 
 use uuid::Uuid;
 
+use crate::escalation::EscalationQueue;
+
 use crate::admission::AdmittedTicket;
 use crate::config::roki::RokiConfig;
 use crate::config::workflow::{Cleanup, Rule, WorkflowConfig};
@@ -21,6 +23,7 @@ pub struct RealCycleRunner {
     pub workflow: Arc<WorkflowConfig>,
     pub cfg: Arc<RokiConfig>,
     pub executor: Arc<CommandPhaseExecutor>,
+    pub escalation: Arc<EscalationQueue>,
 }
 
 #[async_trait::async_trait]

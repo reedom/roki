@@ -48,6 +48,7 @@ pub struct ColdStart<R: CycleRunner + 'static> {
     pub dispatcher: Arc<Dispatcher<R>>,
     pub graphql: Arc<LinearGraphqlClient>,
     pub mode: DispatchMode,
+    pub escalation: Arc<crate::escalation::EscalationQueue>,
 }
 
 /// Compute the status-union narrowing for the GraphQL filter.
