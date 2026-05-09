@@ -8,6 +8,9 @@
 
 use std::collections::HashSet;
 use std::path::Path;
+use std::sync::Arc;
+
+use tokio::sync::Mutex;
 
 use crate::events::{Event, EventWriter, SessionTempdirDeleteReason, now_rfc3339};
 
@@ -22,7 +25,7 @@ pub struct OrphanReport {
     pub fs_errors: Vec<(String, std::io::Error)>,
 }
 
-pub async fn reconcile(scan: OrphanScan<'_>, writer: &mut EventWriter) -> OrphanReport {
+pub async fn reconcile(scan: OrphanScan<'_>, writer: Arc<Mutex<EventWriter>>) -> OrphanReport {
     let mut report = OrphanReport::default();
 
     let read_dir = match tokio::fs::read_dir(scan.session_root).await {
@@ -61,12 +64,15 @@ pub async fn reconcile(scan: OrphanScan<'_>, writer: &mut EventWriter) -> Orphan
         let path = entry.path();
         match tokio::fs::remove_dir_all(&path).await {
             Ok(()) => {
-                let _ = writer.emit(&Event::SessionTempdirDeleted {
-                    ts: now_rfc3339(),
-                    ticket_id: name.clone(),
-                    path: path.display().to_string(),
-                    reason: SessionTempdirDeleteReason::Orphan,
-                });
+                {
+                    let mut w = writer.lock().await;
+                    let _ = w.emit(&Event::SessionTempdirDeleted {
+                        ts: now_rfc3339(),
+                        ticket_id: name.clone(),
+                        path: path.display().to_string(),
+                        reason: SessionTempdirDeleteReason::Orphan,
+                    });
+                }
                 report.deleted.push(name);
             }
             Err(e) => {
@@ -92,16 +98,20 @@ mod tests {
         ids.iter().map(|s| s.to_string()).collect()
     }
 
+    fn arc_writer(root: &Path) -> Arc<Mutex<EventWriter>> {
+        Arc::new(Mutex::new(writer_in(root)))
+    }
+
     #[tokio::test]
     async fn empty_session_root_is_noop() {
         let tmp = TempDir::new().unwrap();
-        let mut w = writer_in(tmp.path());
+        let w = arc_writer(tmp.path());
         let report = reconcile(
             OrphanScan {
                 session_root: tmp.path(),
                 keep_ids: &keep(&[]),
             },
-            &mut w,
+            w,
         )
         .await;
         assert!(report.deleted.is_empty());
@@ -113,14 +123,14 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         fs::create_dir_all(tmp.path().join("ticket-keep")).unwrap();
         fs::create_dir_all(tmp.path().join("ticket-orphan")).unwrap();
-        let mut w = writer_in(tmp.path());
+        let w = arc_writer(tmp.path());
 
         let report = reconcile(
             OrphanScan {
                 session_root: tmp.path(),
                 keep_ids: &keep(&["ticket-keep"]),
             },
-            &mut w,
+            w,
         )
         .await;
 
@@ -133,14 +143,14 @@ mod tests {
     async fn daemon_directory_is_skipped() {
         let tmp = TempDir::new().unwrap();
         fs::create_dir_all(tmp.path().join("_daemon")).unwrap();
-        let mut w = writer_in(tmp.path());
+        let w = arc_writer(tmp.path());
 
         let report = reconcile(
             OrphanScan {
                 session_root: tmp.path(),
                 keep_ids: &keep(&[]),
             },
-            &mut w,
+            w,
         )
         .await;
         assert!(report.deleted.is_empty());
@@ -151,14 +161,14 @@ mod tests {
     async fn non_directory_entries_are_skipped() {
         let tmp = TempDir::new().unwrap();
         fs::write(tmp.path().join("loose.jsonl"), b"").unwrap();
-        let mut w = writer_in(tmp.path());
+        let w = arc_writer(tmp.path());
 
         let report = reconcile(
             OrphanScan {
                 session_root: tmp.path(),
                 keep_ids: &keep(&[]),
             },
-            &mut w,
+            w,
         )
         .await;
         assert!(report.deleted.is_empty());

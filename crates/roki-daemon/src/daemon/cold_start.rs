@@ -12,6 +12,8 @@
 use std::collections::{BTreeSet, HashSet};
 use std::sync::Arc;
 
+use tokio::sync::Mutex;
+
 use crate::admission;
 use crate::config::roki::RokiConfig;
 use crate::config::workflow::WorkflowConfig;
@@ -80,14 +82,15 @@ pub fn compute_status_union(workflow: &WorkflowConfig) -> (BTreeSet<String>, Opt
 }
 
 impl<R: CycleRunner + 'static> ColdStart<R> {
-    pub async fn run(&self, writer: &mut EventWriter) -> ColdStartReport {
+    pub async fn run(&self, writer: Arc<Mutex<EventWriter>>) -> ColdStartReport {
         let mut report = ColdStartReport::default();
 
         let assignee_id = self.resolve_assignee_id_string();
         let (status_set, dropped_entry) = compute_status_union(&self.workflow);
 
         if let Some(name) = dropped_entry {
-            let _ = writer.emit(&Event::StatusFilterDropped {
+            let mut w = writer.lock().await;
+            let _ = w.emit(&Event::StatusFilterDropped {
                 ts: now_rfc3339(),
                 entry: name,
                 reason: "any-state-rule".into(),
@@ -146,7 +149,8 @@ impl<R: CycleRunner + 'static> ColdStart<R> {
                     }
                 }
                 Err(err) => {
-                    let _ = writer.emit(&Event::WebhookSkipped {
+                    let mut w = writer.lock().await;
+                    let _ = w.emit(&Event::WebhookSkipped {
                         ts: now_rfc3339(),
                         ticket_id: et.id.clone(),
                         reason: classify_webhook_skip_reason(&err),
@@ -158,7 +162,8 @@ impl<R: CycleRunner + 'static> ColdStart<R> {
 
         // Orphan reconcile (skip on partial enum per §4.6).
         if report.enum_partial {
-            let _ = writer.emit(&Event::OrphanReconcileSkipped {
+            let mut w = writer.lock().await;
+            let _ = w.emit(&Event::OrphanReconcileSkipped {
                 ts: now_rfc3339(),
                 reason: "cold_start_partial".into(),
             });
@@ -167,7 +172,7 @@ impl<R: CycleRunner + 'static> ColdStart<R> {
                 session_root: &self.cfg.paths.session_root,
                 keep_ids: &keep_ids,
             };
-            let orphan_report = orphan::reconcile(scan, writer).await;
+            let orphan_report = orphan::reconcile(scan, writer.clone()).await;
             report.orphans_deleted = orphan_report.deleted.len();
         }
 

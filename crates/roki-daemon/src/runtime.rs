@@ -197,14 +197,12 @@ pub(crate) async fn run_inner(config_path: &Path, mode: DispatchMode) -> Result<
         graphql,
         mode,
     };
-    // Hold the writer lock across `cold_start.run` so its internal
-    // `writer.emit(...)` calls (status_filter_dropped, webhook_skipped,
-    // orphan_reconcile_*, session_tempdir_deleted) do not race with the
-    // event-writer's own consistency.
-    let report = {
-        let mut w = daemon_events.lock().await;
-        cold_start.run(&mut w).await
-    };
+    // Pass the shared writer Arc directly so cold_start (and the
+    // GraphQL client it drives) can take and drop the lock around each
+    // emit individually. Holding the lock across `cold_start.run` would
+    // deadlock with `LinearGraphqlClient::enumerate`'s 429 path, which
+    // re-locks the same writer to emit `linear_backoff_applied`.
+    let report = cold_start.run(daemon_events.clone()).await;
 
     {
         let mut w = daemon_events.lock().await;
