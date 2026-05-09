@@ -12,6 +12,7 @@ use crate::config::roki::RokiConfig;
 use crate::config::workflow::{Cleanup, Rule, WorkflowConfig};
 use crate::daemon::ticket_task::{CycleResult, CycleRunner};
 use crate::engine::CommandPhaseExecutor;
+use crate::engine::context::CycleTrigger;
 use crate::engine::dispatch::DispatchTarget;
 use crate::engine::outcome::{CycleKind, FailureKind, FailureMeta, PhaseKind};
 use crate::events::{Event, EventWriter, FailureMarker, FailureMetaSer, now_rfc3339};
@@ -86,6 +87,7 @@ impl CycleRunner for RealCycleRunner {
             &self.cfg.paths.session_root,
             self.cfg.as_ref(),
             kind,
+            CycleTrigger::Runtime,
             None,
         )
         .await
@@ -210,6 +212,7 @@ async fn handle_failed_cycle(
         &cfg.paths.session_root,
         cfg,
         CycleKind::Failure,
+        CycleTrigger::Runtime,
         Some(meta.clone()),
     )
     .await
