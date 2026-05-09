@@ -118,6 +118,28 @@ pub enum EdgeTarget {
     Terminal(StateId),
 }
 
+/// Built-in directive names with their default edge targets.
+///
+/// Spec §4.3: `end` → `__success__`, `skip` → `__no_action__`,
+/// `retry` → self, `fail` → `__failure__`, `cancel` → `__cancelled__`.
+///
+/// Resolves a directive name received at runtime against the state's explicit
+/// `directives:` map first, then the built-in defaults. Returns `None` when
+/// the name is not in either — the caller emits `schema_drift`.
+pub fn resolve_directive(name: &str, state: &State) -> Option<EdgeTarget> {
+    if let Some(target) = state.directives.get(name) {
+        return Some(target.clone());
+    }
+    match name {
+        "end" => Some(EdgeTarget::Terminal("__success__".into())),
+        "skip" => Some(EdgeTarget::Terminal("__no_action__".into())),
+        "fail" => Some(EdgeTarget::Terminal("__failure__".into())),
+        "cancel" => Some(EdgeTarget::Terminal("__cancelled__".into())),
+        "retry" => Some(EdgeTarget::State(state.id.clone())),
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 pub mod test_helpers {
     use super::*;
