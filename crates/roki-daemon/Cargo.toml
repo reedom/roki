@@ -131,6 +131,10 @@ path = "tests/e2e/eviction_readmit_cancels_smoke.rs"
 name = "eviction_readmit_reuse_smoke"
 path = "tests/e2e/eviction_readmit_reuse_smoke.rs"
 
+[[test]]
+name = "cold_start_listener_parked_smoke"
+path = "tests/e2e/cold_start_listener_parked_smoke.rs"
+
 [features]
 # Test-only seam: gates the `ROKI_LINEAR_GRAPHQL_URL` env-var override inside
 # `linear::client` so the release binary always targets the hardcoded endpoint.
