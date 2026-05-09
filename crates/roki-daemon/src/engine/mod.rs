@@ -17,6 +17,7 @@ pub mod dispatch;
 pub mod on_failure;
 pub mod outcome;
 pub mod phase;
+pub mod sentinel;
 pub mod session;
 pub mod stall;
 pub mod stream;
