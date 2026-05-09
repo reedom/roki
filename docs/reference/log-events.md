@@ -43,7 +43,7 @@ Attached to every event via tracing spans (when in scope).
 | `failure_unhandled` | A cycle failure was not recovered: no `[[on_failure]]` match (`marker = none`), handler cycle itself failed (`marker = recursion_bound`), or handler cycle hit an infra error (`marker = recursion_bound`) | `(ticket.id, cycle.id, cycle.kind, failure.kind, phase, error_text, marker)`. Daemon exits 1. The escalation queue is **not** touched ([fr:06 §Failure-handler cycle](../fr/06-failure-handling.md)) |
 | `cycle_completed` | Cycle ends with terminal directive | `cycle.kind`, terminal directive, iter count, duration |
 | `cycle_aborted` | Cycle aborted (failure or admission lost mid-cycle) | `cycle.kind`, `failure.kind` (if applicable), iter count |
-| `escalation_added` | Escalation queue entry added | Daemon-stuck failures only: failure-handler cycle that itself failed, or daemon-internal error with no cycle association ([fr:06 §Escalation queue](../fr/06-failure-handling.md)) |
+| `escalation_added` | Escalation queue entry added | `(ts, failure.kind, error_text)`; `ticket_id` and `cycle_id` present for cycle-bound entries, omitted for daemon-internal errors with no cycle association ([fr:06 §Escalation queue](../fr/06-failure-handling.md)) |
 
 ## Worktree / session lifecycle
 

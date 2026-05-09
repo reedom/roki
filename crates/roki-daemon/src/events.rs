@@ -58,6 +58,7 @@ pub enum SessionTempdirDeleteReason {
 #[derive(Debug, Serialize)]
 pub struct FailureMetaSer {
     pub kind: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub phase: Option<String>,
     pub iter: u32,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -93,6 +94,14 @@ pub enum Event {
         cycle_kind: String,
         failure: FailureMetaSer,
         marker: FailureMarker,
+    },
+    EscalationAdded {
+        ts: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        ticket_id: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        cycle_id: Option<String>,
+        failure: FailureMetaSer,
     },
     WorktreeDeleteRequested {
         ts: String,
@@ -402,5 +411,47 @@ mod tests {
         assert!(s.contains("\"marker\":\"none\""));
         assert!(s.contains("\"kind\":\"stall\""));
         assert!(!s.contains("exit_code"), "None exit_code should be omitted");
+    }
+
+    #[test]
+    fn escalation_added_serializes_cycle_bound_entry() {
+        let ev = Event::EscalationAdded {
+            ts: "2026-05-09T12:34:56Z".to_string(),
+            ticket_id: Some("TEAM-1".to_string()),
+            cycle_id: Some("00000000-0000-0000-0000-000000000001".to_string()),
+            failure: FailureMetaSer {
+                kind: "fs_poison".to_string(),
+                phase: Some("post".to_string()),
+                iter: 0,
+                exit_code: None,
+                error_text: "cleanup remove_dir_all failed".to_string(),
+            },
+        };
+        let s = serde_json::to_string(&ev).unwrap();
+        assert!(s.contains("\"event\":\"escalation_added\""), "{s}");
+        assert!(s.contains("\"ticket_id\":\"TEAM-1\""), "{s}");
+        assert!(s.contains("\"cycle_id\":\"00000000-0000-0000-0000-000000000001\""), "{s}");
+        assert!(s.contains("\"kind\":\"fs_poison\""), "{s}");
+    }
+
+    #[test]
+    fn escalation_added_omits_cycle_fields_for_daemon_entry() {
+        let ev = Event::EscalationAdded {
+            ts: "2026-05-09T12:34:56Z".to_string(),
+            ticket_id: None,
+            cycle_id: None,
+            failure: FailureMetaSer {
+                kind: "fs_poison".to_string(),
+                phase: None,
+                iter: 0,
+                exit_code: None,
+                error_text: "orphan reconcile failed".to_string(),
+            },
+        };
+        let s = serde_json::to_string(&ev).unwrap();
+        assert!(s.contains("\"event\":\"escalation_added\""), "{s}");
+        assert!(!s.contains("\"ticket_id\""), "ticket_id must be elided: {s}");
+        assert!(!s.contains("\"cycle_id\""), "cycle_id must be elided: {s}");
+        assert!(!s.contains("\"phase\""), "phase must be elided: {s}");
     }
 }
