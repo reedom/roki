@@ -1,8 +1,8 @@
-//! Escalation queue (fr:06 §Escalation queue). In-memory bounded ring of
-//! daemon-stuck failures. See `docs/superpowers/specs/2026-05-09-slice7-
-//! escalation-queue-design.md`.
+//! Escalation queue (fr:06 §Escalation queue).
 
 pub mod entry;
+pub mod queue;
 pub mod ring;
 
 pub use entry::EscalationEntry;
+pub use queue::EscalationQueue;
