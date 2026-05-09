@@ -6,6 +6,7 @@ mod cli;
 mod config;
 mod daemon;
 mod engine;
+mod escalation;
 pub mod error;
 pub mod events;
 mod linear;
