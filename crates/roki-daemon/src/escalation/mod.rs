@@ -2,4 +2,7 @@
 //! daemon-stuck failures. See `docs/superpowers/specs/2026-05-09-slice7-
 //! escalation-queue-design.md`.
 
+pub mod entry;
 pub mod ring;
+
+pub use entry::EscalationEntry;
