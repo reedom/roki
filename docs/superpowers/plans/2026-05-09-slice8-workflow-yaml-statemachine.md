@@ -6,7 +6,7 @@
 
 **Architecture:** New `workflow::*` module owns YAML parser, sugar→canonical state-machine expansion, and 8-rule validator. New `engine::sentinel` provides per-state directive-file protocol via `$ROKI_DIRECTIVE_PATH`. New `engine::state_runtime` runs one state per call (spawn subprocess → wait → read sentinel → resolve edge). `engine::cycle` is rewritten around `StateMachine` consumption. Pre/run/post phase enum, session-shape phases, `iter_exhausted` failure kind, and stdout-JSON directive parsing are removed. Slice 7's escalation queue is reused unchanged: `recursion_bound` (replaces `iter_exhausted`'s loop semantics + recursive failure-cycle handling) feeds the queue.
 
-**Tech Stack:** Rust 2024 (workspace edition), `serde_yaml` (new), `liquid` (existing), `tokio` (existing), slice 1-7 deps.
+**Tech Stack:** Rust 2024 (workspace edition), `serde_yaml_ng = "0.10"` (already in `crates/roki-daemon/Cargo.toml`; maintained successor to deprecated `serde_yaml`), `liquid` (existing), `tokio` (existing), slice 1-7 deps.
 
 **Spec:** `docs/superpowers/specs/2026-05-09-slice8-workflow-yaml-statemachine-design.md`.
 
@@ -22,7 +22,7 @@
 |---|---|
 | `crates/roki-daemon/src/workflow/mod.rs` | Module root. `WorkflowFile`, re-exports. |
 | `crates/roki-daemon/src/workflow/canonical.rs` | `StateMachine`, `State`, `StateBody`, `Terminal`, `EdgeTarget`, `RuleEntry`, `WhenClause`, `Admission`, `RepoEntry` types. |
-| `crates/roki-daemon/src/workflow/parse.rs` | `serde_yaml` deserializer to a sugar-or-canonical IR; resolves admission + per-repo override files; path resolution. |
+| `crates/roki-daemon/src/workflow/parse.rs` | `serde_yaml_ng` deserializer to a sugar-or-canonical IR; resolves admission + per-repo override files; path resolution. |
 | `crates/roki-daemon/src/workflow/sugar.rs` | 5-pass expansion (terminals, tasks-array, directive defaults, max_visits SCC injection). Outputs canonical `WorkflowFile`. |
 | `crates/roki-daemon/src/workflow/validate.rs` | 8 validation rules; multi-error accumulation. |
 | `crates/roki-daemon/src/workflow/liquid.rs` | Liquid context construction for state machines (cycle, ticket, repo, state, tasks.<id>.*, failure.* namespaces). |
@@ -53,7 +53,7 @@
 
 | Path | Change |
 |---|---|
-| `crates/roki-daemon/Cargo.toml` | Add `serde_yaml` dep. |
+| `crates/roki-daemon/Cargo.toml` | Confirm `serde_yaml_ng` dep present (already in Cargo.toml). |
 | `crates/roki-daemon/src/main.rs` | Add `mod workflow;` to the top-level module list. (Daemon is a binary; no `lib.rs`.) |
 | `crates/roki-daemon/src/config/mod.rs` | Drop `pub mod workflow;` and `pub mod workflow_md;` (TOML parsers superseded by top-level `workflow/` module). |
 | `crates/roki-daemon/src/config/roki.rs` | `[paths] workflow` default → `./WORKFLOW.yaml`. `[default.ai.session]` block removed. `[default.ai.command]` → `[default.ai]` (single `cli` + `stall_seconds`). |
@@ -142,17 +142,17 @@
 
 ---
 
-## Task 2: `workflow::parse` (serde_yaml round-trip)
+## Task 2: `workflow::parse` (serde_yaml_ng round-trip)
 
 **Goal:** Deserialize `WORKFLOW.yaml` into a sugar-or-canonical IR. Resolve per-repo override files. Apply path resolution rules.
 
 **Spec ref:** §3.1, §3.2, §3.2.1, §3.3 (sugar form acceptance).
 
-**Files:** `Cargo.toml` (add `serde_yaml`), `workflow/parse.rs` (new).
+**Files:** `Cargo.toml` (serde_yaml_ng already present), `workflow/parse.rs` (new).
 
 **Steps:**
 
-- [ ] Add `serde_yaml = "0.9"` to `crates/roki-daemon/Cargo.toml` `[dependencies]`. Add `serde = { version = "1", features = ["derive"] }` if not already.
+- [ ] Confirm `serde_yaml_ng = "0.10"` is in `crates/roki-daemon/Cargo.toml` `[dependencies]` (already present). `serde = { version = "1", features = ["derive"] }` already present.
 - [ ] Define IR enums in `parse.rs`:
   ```rust
   #[derive(Deserialize)]
@@ -169,7 +169,7 @@
 - [ ] Reject the `Empty` variant outside `cleanup:` lists (schema error).
 - [ ] Round-trip test: load each sugar+canonical example fixture from `tests/fixtures/workflow/` (create three: minimal sugar, full canonical, immediate-delete cleanup). Assert no panic + structurally-correct IR.
 
-**Acceptance:** `cargo test -p roki-daemon workflow::parse::tests` green. `serde_yaml::from_str` accepts both sugar and canonical forms with realistic fixtures.
+**Acceptance:** `cargo test -p roki-daemon workflow::parse::tests` green. `serde_yaml_ng::from_str` accepts both sugar and canonical forms with realistic fixtures.
 
 ---
 
@@ -405,7 +405,7 @@
   - Accept `<FILE>` arg.
   - Call `workflow::parse::parse_workflow_file` + `workflow::sugar::expand`.
   - On `Ok(_)`: exit 0, print nothing.
-  - On parse error: print error with `file:line` if `serde_yaml` provides location; exit 1.
+  - On parse error: print error with `file:line` if `serde_yaml_ng` provides location; exit 1.
   - On validation error: print every accumulated error one per line as `<file>:<rule_idx>: <ValidationError variant>: <details>`; exit 2.
 - [ ] Unit test: valid fixture → exit 0. Invalid fixture (orphan target) → exit 2; stderr contains all expected error variants.
 
@@ -683,7 +683,7 @@ All 15 spec sections covered.
 
 | Risk | Mitigation |
 |---|---|
-| `serde_yaml` deserializes `tasks:` and `states:` ambiguously when both present in error fixtures | Custom `Deserialize` impl on `SugarOrCanonical` that requires exactly one of the discriminating keys; reject "both present" with a parse error in Task 2. |
+| `serde_yaml_ng` deserializes `tasks:` and `states:` ambiguously when both present in error fixtures | Custom `Deserialize` impl on `SugarOrCanonical` that requires exactly one of the discriminating keys; reject "both present" with a parse error in Task 2. |
 | Stall window per-state: existing slice 4 stall-detector is per-phase; reusing for state may regress slice 4 fixtures | In Task 6 keep the same `tokio::time::timeout` pattern but key on `state_id` + `visit_n` instead of `phase`. Slice 4 e2e migration in Task 16 verifies. |
 | Pre/run/post terminology leaks into operator-facing docs as "states" prose feels less natural in some places | Doc rewrites in Task 13 use "state machine" + "state" consistently. Verify with `grep -ri 'pre.phase\|post.phase\|pre/run/post' docs/` after Task 13 — only allowed in historical / migration context (none expected since we don't write migration prose per docs-concise rule). |
 | Test-harness YAML emitter (Task 16) might not cover every TOML quirk used by slice 1-7 fixtures | Build emitter incrementally; migrate one fixture at a time; emitter API expands as fixtures hit gaps. |
