@@ -102,10 +102,12 @@ path = "tests/e2e/persistent_no_diff_smoke.rs"
 [[test]]
 name = "cold_start_two_tickets_smoke"
 path = "tests/e2e/cold_start_two_tickets_smoke.rs"
+required-features = ["test-support"]
 
 [[test]]
 name = "cold_start_orphan_reconcile_smoke"
 path = "tests/e2e/cold_start_orphan_reconcile_smoke.rs"
+required-features = ["test-support"]
 
 [[test]]
 name = "cold_start_partial_enum_smoke"
@@ -114,6 +116,7 @@ path = "tests/e2e/cold_start_partial_enum_smoke.rs"
 [[test]]
 name = "cold_start_backoff_smoke"
 path = "tests/e2e/cold_start_backoff_smoke.rs"
+required-features = ["test-support"]
 
 [[test]]
 name = "eviction_in_flight_smoke"
@@ -138,6 +141,7 @@ path = "tests/e2e/cold_start_listener_parked_smoke.rs"
 [[test]]
 name = "cold_start_cleanup_mode_smoke"
 path = "tests/e2e/cold_start_cleanup_mode_smoke.rs"
+required-features = ["test-support"]
 
 [features]
 # Test-only seam: gates the `ROKI_LINEAR_GRAPHQL_URL` env-var override inside

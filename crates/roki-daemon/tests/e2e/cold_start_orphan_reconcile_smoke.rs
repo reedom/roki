@@ -11,11 +11,11 @@
 //!   3. After `cold_start_completed`, assert:
 //!        - report["orphans_deleted"] == 2
 //!        - the two old dirs are gone
-//!      and after `daemon_ready`, the new ticket's session_tempdir
-//!      either exists (cycle has begun and admission opened the dir)
-//!      or its events file exists. Either is acceptable evidence of
-//!      admission; the orphan-reconcile contract per fr:07 §Cold start
-//!      step 5 is the deletion of the two old dirs.
+//!          and after `daemon_ready`, the new ticket's session_tempdir
+//!          either exists (cycle has begun and admission opened the dir)
+//!          or its events file exists. Either is acceptable evidence of
+//!          admission; the orphan-reconcile contract per fr:07 §Cold start
+//!          step 5 is the deletion of the two old dirs.
 
 use std::net::{SocketAddr, TcpListener};
 use std::time::Duration;
