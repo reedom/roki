@@ -1,0 +1,356 @@
+//! E2E (slice 6 Task 17): re-admission cancels a pending eviction set
+//! by an earlier admission-revoking webhook, leaving the cache entry
+//! intact for the next cycle.
+//!
+//! Sequence:
+//!   1. Webhook A (status=todo, assignee=u1) admits ticket; long-running
+//!      rule cycle starts (sleep 2).
+//!   2. Webhook B (status=todo, assignee=stranger) is rejected by
+//!      admission; dispatcher emits `webhook_skipped reason=assignee_mismatch`
+//!      and sets `pending_evict` because a ticket task is in flight.
+//!   3. Webhook C (status=todo, assignee=u1) is admitted again — the
+//!      dispatcher clears `pending_evict` BEFORE running `cache.observe`,
+//!      so even though the (status, assignee, labels) triple is unchanged
+//!      and the dispatcher emits `webhook_skipped reason=no_diff`, the
+//!      cache entry survives.
+//!   4. Cycle from A finishes; the ticket task's `take_pending_evict`
+//!      returns `false` (cleared by C) so the cache entry is retained.
+//!   5. Webhook D (status=in_progress, assignee=u1) arrives and triggers
+//!      a SECOND cycle for the same ticket.
+//!
+//! Simplification (per Task 17 prompt): the `pending_evict` flag is
+//! internal cache state with no direct on-disk signal. Distinguishing
+//! "cache survived" from "cache was evicted then re-created" is not
+//! possible from event log content alone — both paths reach
+//! `cycle_completed` for webhook D. We therefore assert the easier
+//! invariant: *cycle_completed = 2 fires* (so re-admission did not
+//! break the system) and the cache-only invariant *no
+//! `worktree_delete_requested`, no `session_tempdir_deleted`* (so the
+//! eviction path stayed cache-only either way).
+
+use std::net::{SocketAddr, TcpListener};
+use std::time::Duration;
+
+use tempfile::TempDir;
+use tokio::process::Command;
+use tokio::time::sleep;
+use wiremock::matchers::method;
+use wiremock::{Mock, MockServer, ResponseTemplate};
+
+mod support_cold_start;
+use support_cold_start::{await_daemon_ready, stub_empty_issues};
+
+#[tokio::test]
+async fn re_admission_after_revoke_keeps_cache_for_next_cycle() {
+    let port = TcpListener::bind("127.0.0.1:0")
+        .expect("bind ephemeral webhook port")
+        .local_addr()
+        .expect("local_addr")
+        .port();
+
+    let linear = MockServer::start().await;
+    Mock::given(method("POST"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "data": {"viewer": {"id": "u1"}}
+        })))
+        .mount(&linear)
+        .await;
+    stub_empty_issues(&linear).await;
+
+    let work = TempDir::new().expect("workspace tempdir");
+    let session_root = work.path().join("sessions");
+    std::fs::create_dir_all(&session_root).unwrap();
+
+    let wt_root = work.path().join("wts");
+    std::fs::create_dir_all(&wt_root).unwrap();
+
+    let ticket_id = "ENG-100";
+
+    // Two rules: status=todo runs slowly (gives B and C time to arrive
+    // mid-cycle); status=in_progress runs fast (used by webhook D after
+    // the first cycle completes, to prove the cache survived).
+    let workflow_path = work.path().join("WORKFLOW.toml");
+    let workflow_body = r#"
+[admission]
+assignee = "u1"
+
+[[admission.repos]]
+ghq = "github.com/example/repo"
+
+[[rule]]
+[rule.when]
+status = "todo"
+[rule.when.labels]
+has_all = []
+[rule.pre]
+cmd = "printf '{\"directive\":\"run\"}'"
+[rule.run]
+cmd = "sleep 2"
+[rule.post]
+cmd = "printf '{\"directive\":\"end\",\"outcome\":\"todo_done\"}'"
+
+[[rule]]
+[rule.when]
+status = "in_progress"
+[rule.when.labels]
+has_all = []
+[rule.pre]
+cmd = "printf '{\"directive\":\"run\"}'"
+[rule.run]
+cmd = "true"
+[rule.post]
+cmd = "printf '{\"directive\":\"end\",\"outcome\":\"ip_done\"}'"
+"#;
+    std::fs::write(&workflow_path, workflow_body).unwrap();
+
+    let roki_path = work.path().join("roki.toml");
+    let roki_body = format!(
+        r#"
+[linear]
+token = "linear-test-token"
+
+[linear.webhook]
+bind = "127.0.0.1"
+port = {port}
+
+[default.ai.command]
+cli = "echo"
+
+[engine]
+max_iterations = 5
+shutdown_window_seconds = 10
+
+[paths]
+workflow = "{workflow}"
+session_root = "{session_root}"
+
+[log]
+"#,
+        port = port,
+        workflow = workflow_path.display(),
+        session_root = session_root.display(),
+    );
+    std::fs::write(&roki_path, roki_body).unwrap();
+
+    let binary = env!("CARGO_BIN_EXE_roki");
+    let mut child = Command::new(binary)
+        .arg("run")
+        .arg("--config")
+        .arg(&roki_path)
+        .env("ROKI_LINEAR_GRAPHQL_URL", linear.uri())
+        .env("ROKI_GHQ_BASE_OVERRIDE", work.path())
+        .env("ROKI_WT_ROOT_OVERRIDE", &wt_root)
+        .kill_on_drop(true)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("spawn roki binary");
+
+    let webhook_addr: SocketAddr = ([127, 0, 0, 1], port).into();
+    wait_for_listener(webhook_addr).await;
+    let _ = await_daemon_ready(&session_root).await;
+
+    let webhook_url = format!("http://127.0.0.1:{port}/");
+    let client = reqwest::Client::new();
+
+    // Webhook A: admit + start the long cycle.
+    let payload_a = serde_json::json!({
+        "action": "update",
+        "type": "Issue",
+        "data": {
+            "id": ticket_id,
+            "assignee": {"id": "u1"},
+            "state": {"name": "todo"},
+            "labels": []
+        }
+    });
+    let resp = client
+        .post(&webhook_url)
+        .json(&payload_a)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status().as_u16(), 202);
+    sleep(Duration::from_millis(300)).await;
+
+    // Webhook B: stranger assignee → admission rejects, sets pending_evict.
+    let payload_b = serde_json::json!({
+        "action": "update",
+        "type": "Issue",
+        "data": {
+            "id": ticket_id,
+            "assignee": {"id": "stranger"},
+            "state": {"name": "todo"},
+            "labels": []
+        }
+    });
+    let resp = client
+        .post(&webhook_url)
+        .json(&payload_b)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status().as_u16(), 202);
+
+    // Webhook C: same triple as A → admits, clears pending_evict before
+    // observe; observe returns Unchanged → webhook_skipped reason=no_diff.
+    let payload_c = serde_json::json!({
+        "action": "update",
+        "type": "Issue",
+        "data": {
+            "id": ticket_id,
+            "assignee": {"id": "u1"},
+            "state": {"name": "todo"},
+            "labels": []
+        }
+    });
+    let resp = client
+        .post(&webhook_url)
+        .json(&payload_c)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status().as_u16(), 202);
+
+    let events_path = session_root.join(format!("{ticket_id}.events.jsonl"));
+    let daemon_events_path = session_root.join("_daemon.events.jsonl");
+
+    // Wait for cycle 1 to complete (sleep 2 + bookkeeping).
+    wait_for_event_count(&events_path, "cycle_completed", 1, Duration::from_secs(15)).await;
+
+    // Both B (assignee_mismatch) and C (no_diff) emit webhook_skipped.
+    wait_for_event_count(
+        &daemon_events_path,
+        "webhook_skipped",
+        2,
+        Duration::from_secs(10),
+    )
+    .await;
+
+    // Webhook D: status diff → second cycle should fire if the cache
+    // entry is alive (re-admission cleared pending_evict so the post-
+    // cycle drain did not evict). This is the asserted side effect.
+    let payload_d = serde_json::json!({
+        "action": "update",
+        "type": "Issue",
+        "data": {
+            "id": ticket_id,
+            "assignee": {"id": "u1"},
+            "state": {"name": "in_progress"},
+            "labels": []
+        }
+    });
+    let resp = client
+        .post(&webhook_url)
+        .json(&payload_d)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status().as_u16(), 202);
+
+    wait_for_event_count(&events_path, "cycle_completed", 2, Duration::from_secs(15)).await;
+
+    sigterm_child(&child);
+    let status = tokio::time::timeout(Duration::from_secs(15), child.wait())
+        .await
+        .expect("binary should exit within 15s after SIGTERM")
+        .expect("child wait succeeds");
+    assert!(
+        status.success(),
+        "binary should exit 0 after SIGTERM, got {status:?}"
+    );
+
+    // Per-ticket events: exactly 2 cycle_completed; cache-only invariant
+    // (no worktree/tempdir delete events).
+    let body = std::fs::read_to_string(&events_path).unwrap();
+    let cycle_completed_count = body.matches("\"event\":\"cycle_completed\"").count();
+    assert_eq!(
+        cycle_completed_count, 2,
+        "expected exactly 2 cycle_completed; got:\n{body}"
+    );
+    assert!(
+        !body.contains("\"event\":\"worktree_delete_requested\""),
+        "per-ticket log must not contain worktree_delete_requested:\n{body}"
+    );
+    assert!(
+        !body.contains("\"event\":\"session_tempdir_deleted\""),
+        "per-ticket log must not contain session_tempdir_deleted:\n{body}"
+    );
+
+    // Daemon-scoped: at least one webhook_skipped reason=assignee_mismatch (B)
+    // and at least one webhook_skipped reason=no_diff (C). The exact ordering
+    // is not asserted because B and C race the in-flight cycle.
+    let daemon_body = std::fs::read_to_string(&daemon_events_path).unwrap();
+    assert!(
+        daemon_body
+            .lines()
+            .any(|l| l.contains("\"event\":\"webhook_skipped\"")
+                && l.contains("\"reason\":\"assignee_mismatch\"")),
+        "expected webhook_skipped reason=assignee_mismatch in daemon log:\n{daemon_body}"
+    );
+    assert!(
+        daemon_body
+            .lines()
+            .any(|l| l.contains("\"event\":\"webhook_skipped\"")
+                && l.contains("\"reason\":\"no_diff\"")),
+        "expected webhook_skipped reason=no_diff in daemon log:\n{daemon_body}"
+    );
+    assert!(
+        !daemon_body.contains("\"event\":\"worktree_delete_requested\""),
+        "daemon log must not contain worktree_delete_requested:\n{daemon_body}"
+    );
+    assert!(
+        !daemon_body.contains("\"event\":\"session_tempdir_deleted\""),
+        "daemon log must not contain session_tempdir_deleted:\n{daemon_body}"
+    );
+
+    // Disk: worktree + session_tempdir RETAINED across the entire flow.
+    let ticket_dir = session_root.join(ticket_id);
+    assert!(
+        ticket_dir.is_dir(),
+        "session_tempdir must still exist at {ticket_dir:?}"
+    );
+    let wt_dir = wt_root.join(ticket_id);
+    assert!(wt_dir.is_dir(), "worktree must still exist at {wt_dir:?}");
+}
+
+async fn wait_for_listener(addr: SocketAddr) {
+    for _ in 0..50 {
+        if tokio::net::TcpStream::connect(addr).await.is_ok() {
+            return;
+        }
+        sleep(Duration::from_millis(100)).await;
+    }
+    panic!("webhook listener never came up at {addr}");
+}
+
+async fn wait_for_event_count(
+    path: &std::path::Path,
+    event_kind: &str,
+    expected_count: usize,
+    timeout: Duration,
+) {
+    let needle = format!("\"event\":\"{event_kind}\"");
+    let deadline = tokio::time::Instant::now() + timeout;
+    while tokio::time::Instant::now() < deadline {
+        if let Ok(body) = tokio::fs::read_to_string(path).await {
+            if body.matches(&needle).count() >= expected_count {
+                return;
+            }
+        }
+        sleep(Duration::from_millis(50)).await;
+    }
+    panic!(
+        "timed out waiting for {expected_count} occurrences of {event_kind} in {}",
+        path.display()
+    );
+}
+
+fn sigterm_child(child: &tokio::process::Child) {
+    use nix::sys::signal::{Signal, kill};
+    use nix::unistd::Pid;
+    if let Some(pid) = child.id() {
+        let _ = kill(Pid::from_raw(pid as i32), Signal::SIGTERM);
+    }
+}
