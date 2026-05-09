@@ -15,12 +15,21 @@
 //! always targets `https://api.linear.app/graphql` per design
 //! `linear::client` block.
 
+use std::sync::Arc;
+use std::time::Duration;
+
 use crate::error::LinearClientError;
+use crate::linear::rate_limit::RateLimitState;
 
 /// Hardcoded Linear GraphQL endpoint. The release binary always targets
 /// this URL — the env-var override below is compiled out unless the
 /// `test-support` feature (or `cfg(test)`) is active.
 const LINEAR_GRAPHQL_URL_DEFAULT: &str = "https://api.linear.app/graphql";
+
+/// Maximum number of 429 retries `resolve_viewer` will tolerate before
+/// surfacing `ViewerResolveFailed { reason: "backoff exhausted ..." }`.
+/// Mirrors the cap used by `LinearGraphqlClient::enumerate`.
+const MAX_BACKOFF_RETRIES: u32 = 6;
 
 /// Resolved Linear viewer id. The skeleton runtime holds one of these
 /// for the lifetime of the cycle to compare against `NormalizedTicket`
@@ -36,13 +45,15 @@ pub struct MeId(pub String);
 pub struct LinearClient {
     http: reqwest::Client,
     token: String,
+    rate_limit: Arc<RateLimitState>,
 }
 
 impl LinearClient {
-    pub fn new(token: String) -> Self {
+    pub fn new(token: String, rate_limit: Arc<RateLimitState>) -> Self {
         Self {
             http: reqwest::Client::new(),
             token,
+            rate_limit,
         }
     }
 
@@ -79,18 +90,42 @@ impl LinearClient {
         // Static query body — the skeleton sends one shape only.
         let body = serde_json::json!({"query": "query { viewer { id } }"});
 
-        let resp = self
-            .http
-            .post(&endpoint)
-            // Token applied verbatim, no `Bearer` prefix (Linear contract).
-            .header("Authorization", &self.token)
-            .json(&body)
-            .send()
-            .await
-            .map_err(|source| LinearClientError::Http {
-                endpoint: endpoint.clone(),
-                source,
-            })?;
+        let mut retries: u32 = 0;
+        let resp = loop {
+            self.rate_limit.wait_if_backoff().await;
+            let resp = self
+                .http
+                .post(&endpoint)
+                // Token applied verbatim, no `Bearer` prefix (Linear contract).
+                .header("Authorization", &self.token)
+                .json(&body)
+                .send()
+                .await
+                .map_err(|source| LinearClientError::Http {
+                    endpoint: endpoint.clone(),
+                    source,
+                })?;
+
+            if resp.status().as_u16() == 429 {
+                if retries >= MAX_BACKOFF_RETRIES {
+                    return Err(LinearClientError::ViewerResolveFailed {
+                        endpoint,
+                        reason: format!("backoff exhausted after {retries} retries"),
+                    });
+                }
+                retries += 1;
+                let retry_after = resp
+                    .headers()
+                    .get("Retry-After")
+                    .and_then(|v| v.to_str().ok())
+                    .and_then(|s| s.parse::<u64>().ok())
+                    .map(Duration::from_secs);
+                self.rate_limit.record_429(retry_after);
+                continue;
+            }
+
+            break resp;
+        };
 
         let status = resp.status();
         if !status.is_success() {
@@ -99,6 +134,9 @@ impl LinearClient {
                 reason: format!("non-success status {}", status.as_u16()),
             });
         }
+
+        // Success clears any prior 429 state.
+        self.rate_limit.clear();
 
         let parsed: serde_json::Value =
             resp.json()
@@ -150,7 +188,7 @@ mod tests {
 
         let me =
             temp_env::async_with_vars([("ROKI_LINEAR_GRAPHQL_URL", Some(url.as_str()))], async {
-                let client = LinearClient::new("token-abc".into());
+                let client = LinearClient::new("token-abc".into(), Arc::new(RateLimitState::new()));
                 client.resolve_viewer().await
             })
             .await
@@ -170,7 +208,7 @@ mod tests {
 
         let result =
             temp_env::async_with_vars([("ROKI_LINEAR_GRAPHQL_URL", Some(url.as_str()))], async {
-                let client = LinearClient::new("t".into());
+                let client = LinearClient::new("t".into(), Arc::new(RateLimitState::new()));
                 client.resolve_viewer().await
             })
             .await;
@@ -199,7 +237,7 @@ mod tests {
             .await;
         let url = format!("{}/graphql", server.uri());
         temp_env::async_with_vars([("ROKI_LINEAR_GRAPHQL_URL", Some(url.as_str()))], async {
-            let client = LinearClient::new("token-abc".into());
+            let client = LinearClient::new("token-abc".into(), Arc::new(RateLimitState::new()));
             match client.resolve_viewer().await {
                 Err(LinearClientError::ViewerResolveFailed { endpoint, reason }) => {
                     assert!(endpoint.contains("/graphql"));
@@ -224,7 +262,7 @@ mod tests {
 
         let result =
             temp_env::async_with_vars([("ROKI_LINEAR_GRAPHQL_URL", Some(url.as_str()))], async {
-                let client = LinearClient::new("t".into());
+                let client = LinearClient::new("t".into(), Arc::new(RateLimitState::new()));
                 client.resolve_viewer().await
             })
             .await;

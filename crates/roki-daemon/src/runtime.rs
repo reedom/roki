@@ -71,10 +71,15 @@ pub(crate) async fn run_inner(config_path: &Path, mode: DispatchMode) -> Result<
     // 2. Load WORKFLOW.toml.
     let workflow = WorkflowConfig::load(&cfg.paths.workflow)?;
 
+    // Shared rate-limit state — both the viewer-resolve client below and
+    // the cold-start GraphQL enumerate client share this atom so a 429
+    // observed by either path defers the other.
+    let rate_limit = Arc::new(crate::linear::rate_limit::RateLimitState::new());
+
     // 3. Resolve `me` only when admission says "me"; any other value is a
     //    literal Linear user id compared verbatim by `admission::accept`.
     let me = if workflow.admission.assignee == "me" {
-        let client = LinearClient::new(cfg.linear.token.clone());
+        let client = LinearClient::new(cfg.linear.token.clone(), rate_limit.clone());
         Some(client.resolve_viewer().await?)
     } else {
         None
@@ -119,10 +124,21 @@ pub(crate) async fn run_inner(config_path: &Path, mode: DispatchMode) -> Result<
 
     let shutdown = ShutdownToken::new();
 
+    // The listener binds *before* cold start runs so Linear webhooks
+    // arriving during the cold-start window get a deterministic
+    // `503 cold_start_in_progress` reply rather than a TCP connect
+    // refusal. The gate opens immediately before `daemon_ready`.
+    let ready_gate = crate::linear::webhook::ReadyGate::new();
+
     let listener_shutdown = shutdown.clone();
-    let listener_handle = tokio::spawn(webhook::bind_and_serve(addr, state, async move {
-        listener_shutdown.wait().await;
-    }));
+    let listener_handle = tokio::spawn(webhook::bind_and_serve(
+        addr,
+        state,
+        ready_gate.clone(),
+        async move {
+            listener_shutdown.wait().await;
+        },
+    ));
 
     // 7. Build executor.
     let executor = Arc::new(crate::engine::CommandPhaseExecutor {
@@ -152,7 +168,63 @@ pub(crate) async fn run_inner(config_path: &Path, mode: DispatchMode) -> Result<
         daemon_events.clone(),
     ));
 
-    // 10. DaemonReady.
+    // 10. Cold start (fr:07): paginated GraphQL enumerate -> cache
+    //     populate -> dispatch with ColdStart trigger -> orphan
+    //     reconcile. Runs while `ready_gate` is still closed so any
+    //     webhooks arriving during the window observe 503
+    //     `cold_start_in_progress`.
+    let graphql = Arc::new(crate::linear::graphql::LinearGraphqlClient::with_writer(
+        cfg.linear.token.clone(),
+        rate_limit.clone(),
+        Some(daemon_events.clone()),
+    ));
+
+    {
+        let mut w = daemon_events.lock().await;
+        let _ = w.emit(&Event::ColdStartBegan {
+            ts: now_rfc3339(),
+            roki_toml_path: config_path.display().to_string(),
+            workflow_toml_path: cfg.paths.workflow.display().to_string(),
+        });
+    }
+
+    let cold_start = crate::daemon::cold_start::ColdStart {
+        cfg: cfg.clone(),
+        workflow: workflow.clone(),
+        me: me.clone(),
+        cache: cache.clone(),
+        dispatcher: dispatcher.clone(),
+        graphql,
+        mode,
+    };
+    // Hold the writer lock across `cold_start.run` so its internal
+    // `writer.emit(...)` calls (status_filter_dropped, webhook_skipped,
+    // orphan_reconcile_*, session_tempdir_deleted) do not race with the
+    // event-writer's own consistency.
+    let report = {
+        let mut w = daemon_events.lock().await;
+        cold_start.run(&mut w).await
+    };
+
+    {
+        let mut w = daemon_events.lock().await;
+        let _ = w.emit(&Event::ColdStartCompleted {
+            ts: now_rfc3339(),
+            enumerated: report.enumerated,
+            admitted: report.admitted,
+            cycles_spawned: report.cycles_spawned,
+            orphans_deleted: report.orphans_deleted,
+            enum_partial: report.enum_partial,
+            partial_reason: report.partial_reason.clone(),
+            partial_error_text: report.partial_error_text.clone(),
+        });
+    }
+
+    // 11. Open the gate, then DaemonReady. Order matters: the
+    //     `daemon_ready` event is the contract the operator and tests
+    //     wait on, and webhooks must already be admitted by the time
+    //     that event lands on disk.
+    ready_gate.open();
     {
         let mut w = daemon_events.lock().await;
         let _ = w.emit(&Event::DaemonReady {
@@ -161,13 +233,13 @@ pub(crate) async fn run_inner(config_path: &Path, mode: DispatchMode) -> Result<
         });
     }
 
-    // 11. Spawn dispatcher drain.
+    // 12. Spawn dispatcher drain.
     let dispatcher_drain = dispatcher.clone();
     let drain_handle = tokio::spawn(async move {
         dispatcher_drain.drain(rx).await;
     });
 
-    // 12. Spawn signal trap.
+    // 13. Spawn signal trap.
     let signal_shutdown = shutdown.clone();
     let signal_cache = cache.clone();
     let signal_events = daemon_events.clone();
@@ -204,10 +276,10 @@ pub(crate) async fn run_inner(config_path: &Path, mode: DispatchMode) -> Result<
         signal_shutdown.fire();
     });
 
-    // 13. Block on shutdown.
+    // 14. Block on shutdown.
     shutdown.wait().await;
 
-    // 14. Wait for the listener and dispatcher drain to wind down. The
+    // 15. Wait for the listener and dispatcher drain to wind down. The
     //     listener observes the shared `ShutdownToken` via the future
     //     handed to `bind_and_serve`. The dispatcher's drain loop exits
     //     once the listener drops the sender (no more ticket forwards).
@@ -219,7 +291,7 @@ pub(crate) async fn run_inner(config_path: &Path, mode: DispatchMode) -> Result<
     signal_handle.abort();
     let _ = signal_handle.await;
 
-    // 15. Drain ticket tasks within the configured window.
+    // 16. Drain ticket tasks within the configured window.
     let window = Duration::from_secs(u64::from(cfg.engine.shutdown_window_seconds));
     let deadline = Instant::now() + window;
 

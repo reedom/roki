@@ -9,8 +9,10 @@ use std::time::Duration;
 
 use serde_json::{Value, json};
 use time::OffsetDateTime;
+use tokio::sync::Mutex;
 
 use crate::error::LinearEnumerateError;
+use crate::events::{Event, EventWriter, now_rfc3339};
 use crate::linear::rate_limit::RateLimitState;
 
 pub const LINEAR_GRAPHQL_URL_DEFAULT: &str = "https://api.linear.app/graphql";
@@ -45,14 +47,33 @@ pub struct LinearGraphqlClient {
     http: reqwest::Client,
     token: String,
     rate_limit: Arc<RateLimitState>,
+    event_writer: Option<Arc<Mutex<EventWriter>>>,
 }
 
 impl LinearGraphqlClient {
+    /// Construct a client with no event-writer hook. Equivalent to
+    /// `with_writer(token, rate_limit, None)` — kept for tests and call
+    /// sites that do not have a daemon-events writer in scope.
     pub fn new(token: String, rate_limit: Arc<RateLimitState>) -> Self {
+        Self::with_writer(token, rate_limit, None)
+    }
+
+    /// Construct a client that emits `linear_backoff_applied` to the
+    /// supplied writer whenever a 429 response triggers backoff. The
+    /// writer is shared (and thus locked) with other daemon-event
+    /// emitters; the lock is held only for the duration of the single
+    /// `emit` call so it never overlaps the subsequent `wait_if_backoff`
+    /// sleep.
+    pub fn with_writer(
+        token: String,
+        rate_limit: Arc<RateLimitState>,
+        event_writer: Option<Arc<Mutex<EventWriter>>>,
+    ) -> Self {
         Self {
             http: reqwest::Client::new(),
             token,
             rate_limit,
+            event_writer,
         }
     }
 
@@ -103,7 +124,14 @@ impl LinearGraphqlClient {
                         .and_then(|v| v.to_str().ok())
                         .and_then(|s| s.parse::<u64>().ok())
                         .map(Duration::from_secs);
-                    self.rate_limit.record_429(retry_after);
+                    let applied = self.rate_limit.record_429(retry_after);
+                    if let Some(writer) = &self.event_writer {
+                        let mut w = writer.lock().await;
+                        let _ = w.emit(&Event::LinearBackoffApplied {
+                            ts: now_rfc3339(),
+                            backoff_seconds: applied.as_secs(),
+                        });
+                    }
                     self.rate_limit.wait_if_backoff().await;
                     continue;
                 }

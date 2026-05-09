@@ -20,12 +20,14 @@
 
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use axum::{
     Json, Router,
     body::Bytes,
-    extract::State,
+    extract::{Request, State},
     http::StatusCode,
+    middleware::{self, Next},
     response::{IntoResponse, Response},
     routing::post,
 };
@@ -35,6 +37,51 @@ use uuid::Uuid;
 
 use crate::error::WebhookError;
 use crate::linear::ticket::NormalizedTicket;
+
+/// Cold-start admission gate for the webhook listener.
+///
+/// While the gate is closed (default at construction), every inbound
+/// request is short-circuited to HTTP 503 `cold_start_in_progress` so
+/// Linear retries after the daemon finishes the cold-start enumerate +
+/// dispatch + orphan reconcile pipeline. `runtime::run_inner` opens the
+/// gate immediately before emitting `daemon_ready`.
+#[derive(Clone)]
+pub struct ReadyGate {
+    open: Arc<AtomicBool>,
+}
+
+impl ReadyGate {
+    pub fn new() -> Self {
+        Self {
+            open: Arc::new(AtomicBool::new(false)),
+        }
+    }
+
+    pub fn open(&self) {
+        self.open.store(true, Ordering::Release);
+    }
+
+    pub fn is_open(&self) -> bool {
+        self.open.load(Ordering::Acquire)
+    }
+}
+
+impl Default for ReadyGate {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+async fn ready_gate_layer(State(gate): State<ReadyGate>, request: Request, next: Next) -> Response {
+    if !gate.is_open() {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(serde_json::json!({"error": "cold_start_in_progress"})),
+        )
+            .into_response();
+    }
+    next.run(request).await
+}
 
 /// Cross-task state shared between the axum handler and the dispatcher.
 ///
@@ -52,11 +99,17 @@ pub struct WebhookState {
 /// Path-agnostic POST routing per design `linear::webhook`: the route `/`
 /// and the wildcard `/*rest` both forward to `handle`. Other methods on
 /// any path fall through to axum's default 405 response.
-pub fn router(state: WebhookState) -> Router {
+///
+/// The router is wrapped in a `ready_gate_layer` middleware that
+/// short-circuits to HTTP 503 `cold_start_in_progress` while
+/// `gate.is_open()` is `false`. The runtime opens the gate immediately
+/// before emitting `daemon_ready`.
+pub fn router(state: WebhookState, gate: ReadyGate) -> Router {
     Router::new()
         .route("/", post(handle))
         .route("/*rest", post(handle))
         .with_state(state)
+        .layer(middleware::from_fn_with_state(gate, ready_gate_layer))
 }
 
 async fn handle(State(state): State<WebhookState>, body: Bytes) -> Response {
@@ -177,9 +230,10 @@ fn parse_ticket(body: &[u8]) -> Result<NormalizedTicket, String> {
 pub async fn bind_and_serve(
     addr: SocketAddr,
     state: WebhookState,
+    gate: ReadyGate,
     shutdown: impl std::future::Future<Output = ()> + Send + 'static,
 ) -> Result<(), WebhookError> {
-    let app = router(state);
+    let app = router(state, gate);
     let listener = tokio::net::TcpListener::bind(&addr)
         .await
         .map_err(|source| WebhookError::BindFailed {
@@ -234,6 +288,16 @@ mod tests {
         (state, rx)
     }
 
+    /// Test helper: a `ReadyGate` already in the open state, so the
+    /// router-level tests exercise the post-cold-start happy paths
+    /// (400 / 202 / 503-on-backpressure) rather than the
+    /// `cold_start_in_progress` short-circuit.
+    fn open_gate() -> ReadyGate {
+        let g = ReadyGate::new();
+        g.open();
+        g
+    }
+
     async fn post_json(app: Router, body: Vec<u8>) -> Response {
         app.oneshot(
             Request::builder()
@@ -263,7 +327,7 @@ mod tests {
     #[tokio::test]
     async fn good_body_returns_202_and_emits_normalized_ticket() {
         let (state, mut rx) = make_state();
-        let app = router(state);
+        let app = router(state, open_gate());
 
         let res = post_json(app, serde_json::to_vec(&good_body()).unwrap()).await;
 
@@ -279,7 +343,7 @@ mod tests {
     async fn good_body_on_arbitrary_path_returns_202() {
         // Path-agnostic routing per design `linear::webhook` (POST /*).
         let (state, mut rx) = make_state();
-        let app = router(state);
+        let app = router(state, open_gate());
 
         let res = post_to(
             app,
@@ -296,7 +360,7 @@ mod tests {
     #[tokio::test]
     async fn malformed_json_returns_400_with_invalid_payload_body() {
         let (state, _rx) = make_state();
-        let app = router(state);
+        let app = router(state, open_gate());
 
         let res = post_json(app, b"not json".to_vec()).await;
 
@@ -309,7 +373,7 @@ mod tests {
     #[tokio::test]
     async fn missing_id_returns_400() {
         let (state, _rx) = make_state();
-        let app = router(state);
+        let app = router(state, open_gate());
 
         let mut body = good_body();
         body["data"].as_object_mut().unwrap().remove("id");
@@ -321,7 +385,7 @@ mod tests {
     #[tokio::test]
     async fn missing_assignee_id_returns_400() {
         let (state, _rx) = make_state();
-        let app = router(state);
+        let app = router(state, open_gate());
 
         let body = serde_json::json!({
             "data": {
@@ -339,7 +403,7 @@ mod tests {
     #[tokio::test]
     async fn missing_state_name_returns_400() {
         let (state, _rx) = make_state();
-        let app = router(state);
+        let app = router(state, open_gate());
 
         let mut body = good_body();
         body["data"].as_object_mut().unwrap().remove("state");
@@ -351,7 +415,7 @@ mod tests {
     #[tokio::test]
     async fn missing_label_node_name_returns_400() {
         let (state, _rx) = make_state();
-        let app = router(state);
+        let app = router(state, open_gate());
 
         let body = serde_json::json!({
             "data": {
@@ -372,7 +436,7 @@ mod tests {
         // "shutting_down" reason on the wire.
         let (state, rx) = make_state();
         drop(rx);
-        let app = router(state);
+        let app = router(state, open_gate());
 
         let res = post_json(app, serde_json::to_vec(&good_body()).unwrap()).await;
 
@@ -386,8 +450,8 @@ mod tests {
         // Holding `_rx` keeps the receiver alive so we exercise `Full`,
         // not `Closed`.
         let (state, _rx) = make_state();
-        let app1 = router(state.clone());
-        let app2 = router(state);
+        let app1 = router(state.clone(), open_gate());
+        let app2 = router(state, open_gate());
 
         let body1 = serde_json::to_vec(&good_body()).unwrap();
         let body2 = serde_json::to_vec(&good_body()).unwrap();
@@ -414,7 +478,7 @@ mod tests {
     #[tokio::test]
     async fn good_body_propagates_title_and_description() {
         let (state, mut rx) = make_state();
-        let app = router(state);
+        let app = router(state, open_gate());
 
         let mut body = good_body();
         body["data"]["title"] = serde_json::json!("Implement widget");
@@ -431,7 +495,7 @@ mod tests {
     #[tokio::test]
     async fn missing_title_and_description_default_to_empty() {
         let (state, mut rx) = make_state();
-        let app = router(state);
+        let app = router(state, open_gate());
 
         // good_body() omits title/description; assert they default to "".
         let res = post_json(app, serde_json::to_vec(&good_body()).unwrap()).await;
@@ -440,5 +504,36 @@ mod tests {
         let ticket = rx.recv().await.expect("ticket emitted");
         assert_eq!(ticket.title, "");
         assert_eq!(ticket.body, "");
+    }
+
+    #[tokio::test]
+    async fn closed_gate_short_circuits_to_503_cold_start_in_progress() {
+        // Default-constructed `ReadyGate` is closed. While closed, the
+        // middleware short-circuits every inbound request to HTTP 503
+        // with `cold_start_in_progress`, regardless of body validity.
+        let (state, _rx) = make_state();
+        let app = router(state, ReadyGate::new());
+
+        let res = post_json(app, serde_json::to_vec(&good_body()).unwrap()).await;
+
+        assert_eq!(res.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let bytes = to_bytes(res.into_body(), 1024).await.unwrap();
+        let parsed: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(
+            parsed,
+            serde_json::json!({"error": "cold_start_in_progress"})
+        );
+    }
+
+    #[tokio::test]
+    async fn opening_gate_after_construction_admits_traffic() {
+        let (state, mut rx) = make_state();
+        let gate = ReadyGate::new();
+        let app = router(state, gate.clone());
+        gate.open();
+
+        let res = post_json(app, serde_json::to_vec(&good_body()).unwrap()).await;
+        assert_eq!(res.status(), StatusCode::ACCEPTED);
+        let _ = rx.recv().await.expect("ticket emitted after gate opens");
     }
 }
