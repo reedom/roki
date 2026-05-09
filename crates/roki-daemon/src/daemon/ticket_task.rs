@@ -71,6 +71,12 @@ pub enum CycleResult {
     /// Cleanup-shorthand path — the runner already performed the
     /// immediate-delete side effect.
     ShorthandDeleted,
+    /// Cleanup-time fs error pushed to the escalation queue (fr:06).
+    /// The cycle is dead; the ticket must be evicted without routing
+    /// through `[[on_failure]]`.
+    CleanupFsError {
+        ticket_id: String,
+    },
 }
 
 /// Run the ticket-task loop until `inbox` closes or `Shutdown` arrives.
@@ -193,6 +199,17 @@ pub async fn step_once<R: CycleRunner>(
         cache.evict(ticket_id).await;
         return StepOutcome::Dispatched {
             kind,
+            evicted: true,
+        };
+    }
+
+    // Cleanup-time fs error: escalation queue was already pushed by the
+    // runner (fr:06). Evict the cache entry without routing through
+    // `[[on_failure]]`.
+    if matches!(&result, CycleResult::CleanupFsError { .. }) {
+        cache.evict(ticket_id).await;
+        return StepOutcome::Dispatched {
+            kind: CycleKind::Cleanup,
             evicted: true,
         };
     }

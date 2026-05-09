@@ -72,8 +72,8 @@ name = "worktree_fs_poison_smoke"
 path = "tests/e2e/worktree_fs_poison_smoke.rs"
 
 [[test]]
-name = "worktree_cleanup_fs_error_smoke"
-path = "tests/e2e/worktree_cleanup_fs_error_smoke.rs"
+name = "escalation_cleanup_fs_error_smoke"
+path = "tests/e2e/escalation_cleanup_fs_error_smoke.rs"
 
 [[test]]
 name = "persistent_parallel_smoke"

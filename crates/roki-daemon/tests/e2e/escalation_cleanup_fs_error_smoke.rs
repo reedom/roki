@@ -1,7 +1,7 @@
-//! E2E: cleanup-time `wt remove` failure surfaces as
-//! `failure_unhandled marker=cleanup_fs_error`. The persistent daemon stays
-//! alive afterwards (a per-ticket failure does not propagate to the daemon's
-//! exit code in slice 5+); the test SIGTERMs it and asserts exit 0.
+//! E2E: cleanup-time `wt remove` failure pushes to the escalation queue
+//! (fr:06) and emits `escalation_added` on the daemon-scoped events file.
+//! The persistent daemon stays alive afterwards; the test SIGTERMs it and
+//! asserts exit 0.
 
 use std::net::{SocketAddr, TcpListener};
 use std::path::PathBuf;
@@ -17,7 +17,7 @@ mod support_cold_start;
 use support_cold_start::{await_daemon_ready, stub_empty_issues};
 
 #[tokio::test]
-async fn cleanup_wt_remove_failure_emits_marker() {
+async fn cleanup_wt_remove_failure_pushes_escalation() {
     let port = TcpListener::bind("127.0.0.1:0")
         .unwrap()
         .local_addr()
@@ -139,10 +139,10 @@ session_root = "{session_root}"
         .await
         .unwrap();
 
-    let events_path = session_root.join(format!("{ticket_id}.events.jsonl"));
+    let daemon_events_path = session_root.join("_daemon.events.jsonl");
     wait_for_event_count(
-        &events_path,
-        "failure_unhandled",
+        &daemon_events_path,
+        "escalation_added",
         1,
         Duration::from_secs(15),
     )
@@ -150,15 +150,24 @@ session_root = "{session_root}"
     let exit = sigterm_and_wait(&mut child, Duration::from_secs(10)).await;
     assert_eq!(exit, Some(0), "binary should exit 0 after SIGTERM");
 
-    let body = std::fs::read_to_string(&events_path).unwrap();
+    let body = std::fs::read_to_string(&daemon_events_path).unwrap();
     assert!(
-        body.contains("\"event\":\"failure_unhandled\""),
-        "expected failure_unhandled event:\n{body}"
+        !body.contains("\"event\":\"failure_unhandled\""),
+        "no failure_unhandled expected:\n{body}"
     );
     assert!(
-        body.contains("\"marker\":\"cleanup_fs_error\""),
-        "expected marker=cleanup_fs_error:\n{body}"
+        !body.contains("\"cycle_kind\":\"failure\""),
+        "no failure-handler cycle expected (cleanup_fs_error must skip [[on_failure]]):\n{body}"
     );
+    let escalations: Vec<_> = body
+        .lines()
+        .filter(|l| l.contains("\"event\":\"escalation_added\""))
+        .collect();
+    assert_eq!(escalations.len(), 1, "exactly one escalation_added:\n{body}");
+    let line = escalations[0];
+    assert!(line.contains("\"kind\":\"fs_poison\""), "{line}");
+    assert!(line.contains("\"phase\":\"post\""), "{line}");
+    assert!(line.contains("\"ticket_id\":"), "{line}");
 }
 
 async fn wait_for_listener(addr: SocketAddr) {

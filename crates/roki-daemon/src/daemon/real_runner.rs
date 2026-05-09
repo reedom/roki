@@ -58,18 +58,20 @@ impl CycleRunner for RealCycleRunner {
                 ..
             } => (cleanup_to_rule(c), kind),
             DispatchTarget::CleanupShorthand => {
+                let cycle_id = uuid::Uuid::new_v4();
                 if crate::engine::cleanup::delete_immediate(
                     &admitted.ticket.id,
                     &admitted.ghq,
                     &self.cfg.paths.session_root,
+                    cycle_id,
                     &mut events,
+                    &self.escalation,
                 )
                 .await
                 .is_err()
                 {
-                    return CycleResult::Failed {
-                        meta: boot_path_failure(),
-                        kind: CycleKind::Cleanup,
+                    return CycleResult::CleanupFsError {
+                        ticket_id: admitted.ticket.id.clone(),
                     };
                 }
                 return CycleResult::ShorthandDeleted;
@@ -121,6 +123,7 @@ impl CycleRunner for RealCycleRunner {
                         &self.cfg.paths.session_root,
                         cycle_id,
                         &mut events,
+                        &self.escalation,
                     )
                     .await;
                 }
