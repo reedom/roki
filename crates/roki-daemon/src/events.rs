@@ -428,7 +428,10 @@ mod tests {
         let s = serde_json::to_string(&ev).unwrap();
         assert!(s.contains("\"event\":\"escalation_added\""), "{s}");
         assert!(s.contains("\"ticket_id\":\"TEAM-1\""), "{s}");
-        assert!(s.contains("\"cycle_id\":\"00000000-0000-0000-0000-000000000001\""), "{s}");
+        assert!(
+            s.contains("\"cycle_id\":\"00000000-0000-0000-0000-000000000001\""),
+            "{s}"
+        );
         assert!(s.contains("\"kind\":\"fs_poison\""), "{s}");
     }
 
@@ -448,7 +451,10 @@ mod tests {
         };
         let s = serde_json::to_string(&ev).unwrap();
         assert!(s.contains("\"event\":\"escalation_added\""), "{s}");
-        assert!(!s.contains("\"ticket_id\""), "ticket_id must be elided: {s}");
+        assert!(
+            !s.contains("\"ticket_id\""),
+            "ticket_id must be elided: {s}"
+        );
         assert!(!s.contains("\"cycle_id\""), "cycle_id must be elided: {s}");
         assert!(!s.contains("\"phase\""), "phase must be elided: {s}");
     }

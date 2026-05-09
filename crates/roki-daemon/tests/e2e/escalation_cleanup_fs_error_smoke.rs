@@ -163,7 +163,11 @@ session_root = "{session_root}"
         .lines()
         .filter(|l| l.contains("\"event\":\"escalation_added\""))
         .collect();
-    assert_eq!(escalations.len(), 1, "exactly one escalation_added:\n{body}");
+    assert_eq!(
+        escalations.len(),
+        1,
+        "exactly one escalation_added:\n{body}"
+    );
     let line = escalations[0];
     assert!(line.contains("\"kind\":\"fs_poison\""), "{line}");
     assert!(line.contains("\"phase\":\"post\""), "{line}");

@@ -33,13 +33,8 @@ impl EscalationQueue {
         phase: PhaseKind,
         error_text: String,
     ) {
-        let entry = EscalationEntry::cycle(
-            ticket_id.clone(),
-            cycle_id,
-            failure_kind,
-            phase,
-            error_text,
-        );
+        let entry =
+            EscalationEntry::cycle(ticket_id.clone(), cycle_id, failure_kind, phase, error_text);
         self.insert_and_emit(entry).await;
     }
 
@@ -125,7 +120,8 @@ mod tests {
     async fn push_daemon_leaves_cycle_fields_none() {
         let dir = TempDir::new().unwrap();
         let q = EscalationQueue::new(4, writer_for(dir.path()));
-        q.push_daemon(FailureKind::FsPoison, "no cycle".into()).await;
+        q.push_daemon(FailureKind::FsPoison, "no cycle".into())
+            .await;
         let snap = q.snapshot().await;
         assert!(snap[0].ticket_id.is_none());
         assert!(snap[0].cycle_id.is_none());
@@ -179,12 +175,12 @@ mod tests {
         assert_eq!(snap[0].ticket_id.as_deref(), Some("T-1"));
         assert_eq!(snap[1].ticket_id.as_deref(), Some("T-2"));
 
-        let body = std::fs::read_to_string(
-            crate::events::events_path(dir.path(), "_daemon"),
-        )
-        .unwrap();
+        let body =
+            std::fs::read_to_string(crate::events::events_path(dir.path(), "_daemon")).unwrap();
         assert_eq!(
-            body.lines().filter(|l| l.contains("\"event\":\"escalation_added\"")).count(),
+            body.lines()
+                .filter(|l| l.contains("\"event\":\"escalation_added\""))
+                .count(),
             3,
             "one escalation_added per push"
         );

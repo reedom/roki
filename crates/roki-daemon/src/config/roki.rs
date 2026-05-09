@@ -441,10 +441,7 @@ fn parse_engine(path: &Path, raw: RawEngine) -> Result<EngineSection, RokiConfig
     })
 }
 
-fn parse_escalation(
-    path: &Path,
-    raw: RawEscalation,
-) -> Result<EscalationSection, RokiConfigError> {
+fn parse_escalation(path: &Path, raw: RawEscalation) -> Result<EscalationSection, RokiConfigError> {
     let queue_size = match raw.queue_size {
         None => 64,
         Some(n) if (1..=1024).contains(&n) => n,
@@ -952,10 +949,7 @@ session_root = "/tmp/sess"
 
     #[test]
     fn escalation_explicit_value_is_honored() {
-        let body = format!(
-            "{}\n[escalation]\nqueue_size = 256\n",
-            HAPPY_PATH_TOML
-        );
+        let body = format!("{}\n[escalation]\nqueue_size = 256\n", HAPPY_PATH_TOML);
         let dir = tempfile::tempdir().unwrap();
         let path = write_toml(&dir, &body);
         let cfg = RokiConfig::load(&path).expect("explicit ok");
@@ -964,10 +958,7 @@ session_root = "/tmp/sess"
 
     #[test]
     fn escalation_zero_is_rejected() {
-        let body = format!(
-            "{}\n[escalation]\nqueue_size = 0\n",
-            HAPPY_PATH_TOML
-        );
+        let body = format!("{}\n[escalation]\nqueue_size = 0\n", HAPPY_PATH_TOML);
         let dir = tempfile::tempdir().unwrap();
         let path = write_toml(&dir, &body);
         let err = RokiConfig::load(&path).expect_err("zero rejected");
@@ -981,10 +972,7 @@ session_root = "/tmp/sess"
 
     #[test]
     fn escalation_above_max_is_rejected() {
-        let body = format!(
-            "{}\n[escalation]\nqueue_size = 2000\n",
-            HAPPY_PATH_TOML
-        );
+        let body = format!("{}\n[escalation]\nqueue_size = 2000\n", HAPPY_PATH_TOML);
         let dir = tempfile::tempdir().unwrap();
         let path = write_toml(&dir, &body);
         let err = RokiConfig::load(&path).expect_err("above max rejected");
