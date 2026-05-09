@@ -28,6 +28,9 @@ use tokio::time::sleep;
 use wiremock::matchers::method;
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
+mod support_cold_start;
+use support_cold_start::{await_daemon_ready, stub_empty_issues};
+
 #[tokio::test]
 async fn skeleton_runs_one_cycle_and_rejects_subsequent_webhook() {
     // 1. Reserve an ephemeral webhook port. Bound + immediately dropped so
@@ -52,6 +55,7 @@ async fn skeleton_runs_one_cycle_and_rejects_subsequent_webhook() {
         })))
         .mount(&linear)
         .await;
+    stub_empty_issues(&linear).await;
 
     // 3. Build the workspace tempdir, WORKFLOW.toml, and roki.toml. The
     //    runner's `run.cmd` writes literal `out` to stdout and `err` to
@@ -137,6 +141,10 @@ session_root = "{session_root}"
     //    that follows.
     let webhook_addr: SocketAddr = ([127, 0, 0, 1], port).into();
     wait_for_listener(webhook_addr).await;
+    // Slice 6: cold start runs after the listener binds. Wait for
+    // `daemon_ready` so the gate is open and the POST below is not
+    // short-circuited to 503 `cold_start_in_progress`.
+    let _ = await_daemon_ready(&session_root).await;
 
     // 6. POST one Linear-shaped body. The runtime drains the channel and
     //    runs the cycle in the per-ticket task; a duplicate POST for the

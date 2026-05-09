@@ -10,6 +10,9 @@ use tokio::time::sleep;
 use wiremock::matchers::method;
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
+mod support_cold_start;
+use support_cold_start::{await_daemon_ready, stub_empty_issues};
+
 #[tokio::test]
 async fn cleanup_deletes_worktree_then_session_dir() {
     let port = TcpListener::bind("127.0.0.1:0")
@@ -25,6 +28,7 @@ async fn cleanup_deletes_worktree_then_session_dir() {
         })))
         .mount(&linear)
         .await;
+    stub_empty_issues(&linear).await;
 
     let work = TempDir::new().unwrap();
     let session_root = work.path().join("sessions");
@@ -102,6 +106,10 @@ session_root = "{session_root}"
 
     let webhook_addr: SocketAddr = ([127, 0, 0, 1], port).into();
     wait_for_listener(webhook_addr).await;
+    // Slice 6: cold start runs after the listener binds. Wait for
+    // `daemon_ready` so the gate is open and the POST below is not
+    // short-circuited to 503 `cold_start_in_progress`.
+    let _ = await_daemon_ready(&session_root).await;
 
     let payload = serde_json::json!({
         "action": "update",
