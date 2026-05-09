@@ -498,6 +498,7 @@ mod tests {
                 session_root: PathBuf::from("/tmp"),
             },
             log: LogSection::default(),
+            escalation: EscalationSection::default(),
             default_ai_session: None,
         }
     }

@@ -19,6 +19,7 @@ use crate::daemon::cache::{DiffCache, DiffOutcome};
 use crate::daemon::shutdown::ShutdownToken;
 use crate::daemon::ticket_task::{CycleRunner, DispatchMsg};
 use crate::engine::dispatch::DispatchMode;
+use crate::escalation::EscalationQueue;
 use crate::events::{Event, EventWriter, WebhookSkipReason, now_rfc3339};
 use crate::linear::client::MeId;
 use crate::linear::ticket::NormalizedTicket;
@@ -33,6 +34,7 @@ pub struct Dispatcher<R: CycleRunner + 'static> {
     shutdown: ShutdownToken,
     runner: Arc<R>,
     daemon_events: Arc<Mutex<EventWriter>>,
+    escalation: Arc<EscalationQueue>,
 }
 
 pub struct TicketHandle {
@@ -60,6 +62,7 @@ impl<R: CycleRunner + 'static> Dispatcher<R> {
         shutdown: ShutdownToken,
         runner: Arc<R>,
         daemon_events: Arc<Mutex<EventWriter>>,
+        escalation: Arc<EscalationQueue>,
     ) -> Self {
         Self {
             cache,
@@ -71,6 +74,7 @@ impl<R: CycleRunner + 'static> Dispatcher<R> {
             shutdown,
             runner,
             daemon_events,
+            escalation,
         }
     }
 
@@ -112,12 +116,14 @@ impl<R: CycleRunner + 'static> Dispatcher<R> {
                 // via cold-start orphan reconcile.
                 if self.cache.snapshot(&ticket_id).await.is_some() {
                     self.cache.set_pending_evict(&ticket_id).await;
+                    self.escalation.evict_ticket(&ticket_id).await;
                     let map = self.tickets.lock().await;
                     if !map.contains_key(&ticket_id) {
                         // No in-flight ticket task to drain the flag —
                         // reclaim cache immediately.
                         drop(map);
                         self.cache.evict(&ticket_id).await;
+                        self.escalation.evict_ticket(&ticket_id).await;
                     }
                 }
                 return DispatchAction::AdmissionRejected;
@@ -213,6 +219,7 @@ impl<R: CycleRunner + 'static> Dispatcher<R> {
         let runner = self.runner.clone();
         let session_root = self.cfg.paths.session_root.clone();
         let id_for_task = ticket_id.clone();
+        let escalation = self.escalation.clone();
 
         let join = tokio::spawn(async move {
             crate::daemon::ticket_task::run_ticket_task(
@@ -225,6 +232,7 @@ impl<R: CycleRunner + 'static> Dispatcher<R> {
                 rx,
                 tx_self,
                 session_root,
+                escalation,
             )
             .await;
         });
@@ -338,6 +346,7 @@ mod tests {
         let events = Arc::new(Mutex::new(
             EventWriter::open(work, "_daemon").expect("open events"),
         ));
+        let escalation = crate::escalation::EscalationQueue::new(64, events.clone());
         Dispatcher::new(
             Arc::new(DiffCache::new()),
             workflow(),
@@ -347,6 +356,7 @@ mod tests {
             ShutdownToken::new(),
             runner,
             events,
+            escalation,
         )
     }
 
@@ -396,6 +406,7 @@ mod tests {
         let events = Arc::new(Mutex::new(
             EventWriter::open(work, "_daemon").expect("open events"),
         ));
+        let escalation = crate::escalation::EscalationQueue::new(64, events.clone());
         Dispatcher::new(
             Arc::new(DiffCache::new()),
             workflow_no_repos(),
@@ -405,6 +416,7 @@ mod tests {
             ShutdownToken::new(),
             runner,
             events,
+            escalation,
         )
     }
 

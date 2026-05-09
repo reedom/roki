@@ -71,6 +71,12 @@ pub enum CycleResult {
     /// Cleanup-shorthand path — the runner already performed the
     /// immediate-delete side effect.
     ShorthandDeleted,
+    /// Cleanup-time fs error pushed to the escalation queue (fr:06).
+    /// The cycle is dead; the ticket must be evicted without routing
+    /// through `[[on_failure]]`.
+    CleanupFsError {
+        ticket_id: String,
+    },
 }
 
 /// Run the ticket-task loop until `inbox` closes or `Shutdown` arrives.
@@ -86,6 +92,7 @@ pub async fn run_ticket_task<R: CycleRunner>(
     mut inbox: mpsc::Receiver<DispatchMsg>,
     inbox_self: mpsc::Sender<DispatchMsg>,
     session_root: PathBuf,
+    escalation: Arc<crate::escalation::EscalationQueue>,
 ) {
     while let Some(msg) = inbox.recv().await {
         let outcome = match msg {
@@ -102,6 +109,7 @@ pub async fn run_ticket_task<R: CycleRunner>(
                     &inbox_self,
                     &session_root,
                     CycleTrigger::Runtime,
+                    &escalation,
                 )
                 .await
             }
@@ -117,6 +125,7 @@ pub async fn run_ticket_task<R: CycleRunner>(
                     &inbox_self,
                     &session_root,
                     CycleTrigger::ColdStart,
+                    &escalation,
                 )
                 .await
             }
@@ -145,6 +154,7 @@ pub async fn step_once<R: CycleRunner>(
     inbox_self: &mpsc::Sender<DispatchMsg>,
     _session_root: &std::path::Path,
     cycle_trigger: CycleTrigger,
+    escalation: &crate::escalation::EscalationQueue,
 ) -> StepOutcome {
     // The dispatcher already updated the cache via `cache.observe`. We
     // re-snapshot here because additional webhooks may have arrived
@@ -190,8 +200,21 @@ pub async fn step_once<R: CycleRunner>(
 
     if evicted {
         cache.evict(ticket_id).await;
+        escalation.evict_ticket(ticket_id).await;
         return StepOutcome::Dispatched {
             kind,
+            evicted: true,
+        };
+    }
+
+    // Cleanup-time fs error: escalation queue was already pushed by the
+    // runner (fr:06). Evict the cache entry without routing through
+    // `[[on_failure]]`.
+    if matches!(&result, CycleResult::CleanupFsError { .. }) {
+        cache.evict(ticket_id).await;
+        escalation.evict_ticket(ticket_id).await;
+        return StepOutcome::Dispatched {
+            kind: CycleKind::Cleanup,
             evicted: true,
         };
     }
@@ -205,6 +228,7 @@ pub async fn step_once<R: CycleRunner>(
     // `pending_recheck`.
     if cache.take_pending_evict(ticket_id).await {
         cache.evict(ticket_id).await;
+        escalation.evict_ticket(ticket_id).await;
         return StepOutcome::Dispatched {
             kind,
             evicted: true,
@@ -347,6 +371,15 @@ mod tests {
         Arc::new(RokiConfig::test_default(path))
     }
 
+    fn escalation_for(path: &std::path::Path) -> Arc<crate::escalation::EscalationQueue> {
+        use std::sync::Arc;
+        use tokio::sync::Mutex;
+        let writer = Arc::new(Mutex::new(
+            crate::events::EventWriter::open(path, "_daemon").expect("open events"),
+        ));
+        crate::escalation::EscalationQueue::new(64, writer)
+    }
+
     #[tokio::test]
     async fn dispatch_on_first_webhook_runs_cycle() {
         let work = TempDir::new().unwrap();
@@ -372,6 +405,7 @@ mod tests {
             &tx,
             work.path(),
             CycleTrigger::Runtime,
+            &escalation_for(work.path()),
         )
         .await;
 
@@ -414,6 +448,7 @@ mod tests {
             &tx,
             work.path(),
             CycleTrigger::ColdStart,
+            &escalation_for(work.path()),
         )
         .await;
 
@@ -455,6 +490,7 @@ mod tests {
             &tx,
             work.path(),
             CycleTrigger::Runtime,
+            &escalation_for(work.path()),
         )
         .await;
 
@@ -494,6 +530,7 @@ mod tests {
             &tx,
             work.path(),
             CycleTrigger::Runtime,
+            &escalation_for(work.path()),
         )
         .await;
 
@@ -533,6 +570,7 @@ mod tests {
             &tx,
             work.path(),
             CycleTrigger::Runtime,
+            &escalation_for(work.path()),
         )
         .await;
 
@@ -577,6 +615,7 @@ mod tests {
             &tx,
             work.path(),
             CycleTrigger::Runtime,
+            &escalation_for(work.path()),
         )
         .await;
 
@@ -614,6 +653,7 @@ mod tests {
             &tx,
             work.path(),
             CycleTrigger::Runtime,
+            &escalation_for(work.path()),
         )
         .await;
 

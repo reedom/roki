@@ -10,8 +10,8 @@
 //!   removes `<session_root>/<ticket-id>/`.
 //!
 //! Both routes treat `NotFound` on `<ticket-id>/` as success. Other fs errors
-//! emit `failure_unhandled marker=cleanup_fs_error` and propagate as Err so
-//! `runtime::run_inner` exits 1.
+//! push to the escalation queue (fr:06 §Escalation queue) and propagate as Err
+//! so the ticket task tears down the cycle without `[[on_failure]]` routing.
 
 #![allow(dead_code)]
 
@@ -19,13 +19,13 @@ use std::path::Path;
 
 use uuid::Uuid;
 
-use crate::events::{
-    Event, EventWriter, FailureMarker, FailureMetaSer, WorktreeDeleteReason, now_rfc3339,
-};
+use crate::engine::outcome::{FailureKind, PhaseKind};
+use crate::events::{Event, EventWriter, WorktreeDeleteReason, now_rfc3339};
 
 #[derive(Debug)]
 pub enum CleanupError {
-    /// A `failure_unhandled` event was emitted; the runtime should exit 1.
+    /// An fs error occurred; the escalation queue was pushed and the ticket
+    /// task should tear down the cycle without `[[on_failure]]` routing.
     FsError(std::io::Error),
 }
 
@@ -38,15 +38,15 @@ impl std::fmt::Display for CleanupError {
 }
 impl std::error::Error for CleanupError {}
 
-/// Shorthand path. `cycle_id` is synthesized so the structured event has a
-/// stable id.
+/// Shorthand path. `cycle_id` is provided by the caller for a stable id.
 pub async fn delete_immediate(
     ticket_id: &str,
     ghq: &str,
     session_root: &Path,
+    cycle_id: Uuid,
     events: &mut EventWriter,
+    escalation: &crate::escalation::EscalationQueue,
 ) -> Result<(), CleanupError> {
-    let cycle_id = Uuid::new_v4();
     let _ = events.emit(&Event::CycleCompleted {
         ts: now_rfc3339(),
         cycle_id: cycle_id.to_string(),
@@ -61,9 +61,9 @@ pub async fn delete_immediate(
         reason: WorktreeDeleteReason::CleanupShorthand,
     });
     if let Err(err) = crate::engine::worktree::remove(ghq, ticket_id).await {
-        return Err(emit_wt_remove_error(events, &cycle_id.to_string(), &err));
+        return Err(emit_wt_remove_error(escalation, ticket_id, cycle_id, &err).await);
     }
-    remove_ticket_dir(session_root, ticket_id, Some(cycle_id), events)
+    remove_ticket_dir(session_root, ticket_id, Some(cycle_id), escalation).await
 }
 
 /// Post-cycle delete. Called only after a non-shorthand cleanup cycle
@@ -74,6 +74,7 @@ pub async fn post_cycle_delete(
     session_root: &Path,
     cycle_id: Uuid,
     events: &mut EventWriter,
+    escalation: &crate::escalation::EscalationQueue,
 ) -> Result<(), CleanupError> {
     let _ = events.emit(&Event::WorktreeDeleteRequested {
         ts: now_rfc3339(),
@@ -82,61 +83,61 @@ pub async fn post_cycle_delete(
         reason: WorktreeDeleteReason::CleanupTerminal,
     });
     if let Err(err) = crate::engine::worktree::remove(ghq, ticket_id).await {
-        return Err(emit_wt_remove_error(events, &cycle_id.to_string(), &err));
+        return Err(emit_wt_remove_error(escalation, ticket_id, cycle_id, &err).await);
     }
-    remove_ticket_dir(session_root, ticket_id, Some(cycle_id), events)
+    remove_ticket_dir(session_root, ticket_id, Some(cycle_id), escalation).await
 }
 
-fn remove_ticket_dir(
+async fn remove_ticket_dir(
     session_root: &Path,
     ticket_id: &str,
     cycle_id: Option<Uuid>,
-    events: &mut EventWriter,
+    escalation: &crate::escalation::EscalationQueue,
 ) -> Result<(), CleanupError> {
     let dir = session_root.join(sanitize_ticket(ticket_id));
     match std::fs::remove_dir_all(&dir) {
         Ok(()) => Ok(()),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
         Err(e) => {
-            let _ = events.emit(&Event::FailureUnhandled {
-                ts: now_rfc3339(),
-                cycle_id: cycle_id.map(|c| c.to_string()).unwrap_or_default(),
-                cycle_kind: "cleanup".into(),
-                failure: FailureMetaSer {
-                    kind: "fs_poison".into(),
-                    phase: None,
-                    iter: 0,
-                    exit_code: None,
-                    error_text: format!("cleanup remove_dir_all failed: {e}"),
-                },
-                marker: FailureMarker::CleanupFsError,
-            });
+            let err_text = format!("cleanup remove_dir_all failed: {e}");
+            if let Some(cid) = cycle_id {
+                escalation
+                    .push_cycle(
+                        ticket_id.to_string(),
+                        cid,
+                        FailureKind::FsPoison,
+                        PhaseKind::Post,
+                        err_text,
+                    )
+                    .await;
+            } else {
+                escalation
+                    .push_daemon(FailureKind::FsPoison, err_text)
+                    .await;
+            }
             Err(CleanupError::FsError(e))
         }
     }
 }
 
-/// Emit a `failure_unhandled marker=cleanup_fs_error` event for a `wt remove`
-/// failure during cleanup, and build the `CleanupError` to return. Caller is
-/// expected to early-return with the result.
-fn emit_wt_remove_error(
-    events: &mut EventWriter,
-    cycle_id: &str,
+/// Push a cycle escalation entry for a `wt remove` failure during cleanup and
+/// return the `CleanupError`. Caller is expected to early-return with the result.
+async fn emit_wt_remove_error(
+    escalation: &crate::escalation::EscalationQueue,
+    ticket_id: &str,
+    cycle_id: Uuid,
     err: &crate::engine::worktree::WorktreeError,
 ) -> CleanupError {
-    let _ = events.emit(&Event::FailureUnhandled {
-        ts: now_rfc3339(),
-        cycle_id: cycle_id.to_string(),
-        cycle_kind: "cleanup".into(),
-        failure: FailureMetaSer {
-            kind: "fs_poison".into(),
-            phase: None,
-            iter: 0,
-            exit_code: err.exit_code(),
-            error_text: format!("cleanup wt remove failed: {err}"),
-        },
-        marker: FailureMarker::CleanupFsError,
-    });
+    let err_text = format!("cleanup wt remove failed: {err}");
+    escalation
+        .push_cycle(
+            ticket_id.to_string(),
+            cycle_id,
+            FailureKind::FsPoison,
+            PhaseKind::Post,
+            err_text,
+        )
+        .await;
     CleanupError::FsError(std::io::Error::other(err.to_string()))
 }
 
@@ -155,6 +156,17 @@ fn sanitize_ticket(id: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Arc;
+    use tokio::sync::Mutex;
+
+    fn writer_for(dir: &std::path::Path) -> Arc<Mutex<EventWriter>> {
+        let w = EventWriter::open(dir, "_daemon").expect("open");
+        Arc::new(Mutex::new(w))
+    }
+
+    fn queue_for(dir: &std::path::Path) -> Arc<crate::escalation::EscalationQueue> {
+        crate::escalation::EscalationQueue::new(64, writer_for(dir))
+    }
 
     #[test]
     fn delete_immediate_removes_existing_dir() {
@@ -168,6 +180,7 @@ mod tests {
         std::fs::write(dir.join("data.txt"), "hi").unwrap();
 
         let mut w = EventWriter::open(&root, "OPS-1").unwrap();
+        let q = queue_for(&root);
         tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
@@ -176,9 +189,16 @@ mod tests {
                 temp_env::async_with_vars(
                     [("ROKI_WT_ROOT_OVERRIDE", Some(wt_root.to_str().unwrap()))],
                     async {
-                        delete_immediate("OPS-1", "github.com/acme/widget", &root, &mut w)
-                            .await
-                            .unwrap();
+                        delete_immediate(
+                            "OPS-1",
+                            "github.com/acme/widget",
+                            &root,
+                            Uuid::new_v4(),
+                            &mut w,
+                            &q,
+                        )
+                        .await
+                        .unwrap();
                     },
                 )
                 .await
@@ -194,6 +214,7 @@ mod tests {
         std::fs::create_dir_all(&root).unwrap();
         std::fs::create_dir_all(&wt_root).unwrap();
         let mut w = EventWriter::open(&root, "OPS-2").unwrap();
+        let q = queue_for(&root);
         tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
@@ -202,9 +223,16 @@ mod tests {
                 temp_env::async_with_vars(
                     [("ROKI_WT_ROOT_OVERRIDE", Some(wt_root.to_str().unwrap()))],
                     async {
-                        delete_immediate("OPS-2", "github.com/acme/widget", &root, &mut w)
-                            .await
-                            .unwrap();
+                        delete_immediate(
+                            "OPS-2",
+                            "github.com/acme/widget",
+                            &root,
+                            Uuid::new_v4(),
+                            &mut w,
+                            &q,
+                        )
+                        .await
+                        .unwrap();
                     },
                 )
                 .await
@@ -219,6 +247,7 @@ mod tests {
         std::fs::create_dir_all(&root).unwrap();
         std::fs::create_dir_all(&wt_root).unwrap();
         let mut w = EventWriter::open(&root, "OPS-3").unwrap();
+        let q = queue_for(&root);
         tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
@@ -227,9 +256,16 @@ mod tests {
                 temp_env::async_with_vars(
                     [("ROKI_WT_ROOT_OVERRIDE", Some(wt_root.to_str().unwrap()))],
                     async {
-                        delete_immediate("OPS-3", "github.com/acme/widget", &root, &mut w)
-                            .await
-                            .unwrap();
+                        delete_immediate(
+                            "OPS-3",
+                            "github.com/acme/widget",
+                            &root,
+                            Uuid::new_v4(),
+                            &mut w,
+                            &q,
+                        )
+                        .await
+                        .unwrap();
                     },
                 )
                 .await
@@ -258,6 +294,7 @@ mod tests {
 
         let cycle_id = Uuid::new_v4();
         let mut w = EventWriter::open(&root, "OPS-4").unwrap();
+        let q = queue_for(&root);
         tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
@@ -272,6 +309,7 @@ mod tests {
                             &root,
                             cycle_id,
                             &mut w,
+                            &q,
                         )
                         .await
                         .unwrap();
@@ -298,6 +336,7 @@ mod tests {
         std::fs::write(session_root.join("OPS-12").join("data"), "x").unwrap();
 
         let mut w = EventWriter::open(&session_root, "OPS-12").unwrap();
+        let q = queue_for(&session_root);
 
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
@@ -307,9 +346,16 @@ mod tests {
             temp_env::async_with_vars(
                 [("ROKI_WT_ROOT_OVERRIDE", Some(wt_root.to_str().unwrap()))],
                 async {
-                    delete_immediate("OPS-12", "github.com/acme/widget", &session_root, &mut w)
-                        .await
-                        .unwrap();
+                    delete_immediate(
+                        "OPS-12",
+                        "github.com/acme/widget",
+                        &session_root,
+                        Uuid::new_v4(),
+                        &mut w,
+                        &q,
+                    )
+                    .await
+                    .unwrap();
                 },
             )
             .await

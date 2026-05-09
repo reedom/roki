@@ -7,6 +7,7 @@ mod config;
 mod daemon;
 mod engine;
 pub mod error;
+mod escalation;
 pub mod events;
 mod linear;
 mod rule;

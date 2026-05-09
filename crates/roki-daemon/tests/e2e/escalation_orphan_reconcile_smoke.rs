@@ -1,12 +1,11 @@
-//! E2E: rule's post phase exits non-zero (process_crash). The on_failure
-//! handler's post phase also exits non-zero. The recursion bound prevents a
-//! second handler cycle; the per-ticket task emits exactly one
-//! failure_unhandled event with marker=recursion_bound. The persistent daemon
-//! stays alive after the unhandled cycle; the test SIGTERMs it and asserts
-//! exit 0 (a per-ticket failure does not propagate to the daemon's exit code
-//! in slice 5+).
+//! E2E: cold-start orphan reconcile fs error pushes a cycle-less
+//! escalation_added entry to the daemon-scoped event log. Because the
+//! orphan dir cannot be removed (it has mode 0o000, preventing descend),
+//! `OrphanReport::fs_errors` carries one (ticket_id, io::Error) pair,
+//! and `cold_start` invokes `escalation.push_daemon` once.
 
 use std::net::{SocketAddr, TcpListener};
+use std::os::unix::fs::PermissionsExt;
 use std::time::Duration;
 
 use tempfile::TempDir;
@@ -19,11 +18,11 @@ mod support_cold_start;
 use support_cold_start::{await_daemon_ready, stub_empty_issues};
 
 #[tokio::test]
-async fn recursion_bound_emits_failure_unhandled() {
+async fn orphan_reconcile_fs_error_pushes_cycle_less_escalation() {
     let port = TcpListener::bind("127.0.0.1:0")
-        .expect("bind ephemeral webhook port")
+        .unwrap()
         .local_addr()
-        .expect("local_addr")
+        .unwrap()
         .port();
 
     let linear = MockServer::start().await;
@@ -35,42 +34,22 @@ async fn recursion_bound_emits_failure_unhandled() {
         .await;
     stub_empty_issues(&linear).await;
 
-    let work = TempDir::new().expect("workspace tempdir");
+    let work = TempDir::new().unwrap();
     let session_root = work.path().join("sessions");
     std::fs::create_dir_all(&session_root).unwrap();
-    let wt_root = work.path().join("wts");
-    std::fs::create_dir_all(&wt_root).unwrap();
 
-    let ticket_id = "ENG-300";
+    // Pre-create an orphan dir that the reconcile step will try to delete.
+    let orphan_id = "ORPHAN-1";
+    let orphan_dir = session_root.join(orphan_id);
+    std::fs::create_dir_all(&orphan_dir).unwrap();
 
     let workflow_path = work.path().join("WORKFLOW.toml");
-    // The rule's post phase exits non-zero → ProcessCrash. The on_failure
-    // handler's post phase also exits non-zero → another ProcessCrash from
-    // inside a Failure cycle. The recursion bound fires and emits
-    // failure_unhandled marker=recursion_bound.
     let workflow_body = r#"
 [admission]
 assignee = "u1"
 
 [[admission.repos]]
 ghq = "github.com/example/repo"
-
-[[rule]]
-[rule.when]
-status = "in_progress"
-[rule.when.labels]
-has_all = []
-[rule.run]
-cmd = "true"
-[rule.post]
-cmd = "exit 7"
-
-[[on_failure]]
-when.kind = "process_crash"
-[on_failure.run]
-cmd = "true"
-[on_failure.post]
-cmd = "exit 9"
 "#;
     std::fs::write(&workflow_path, workflow_body).unwrap();
 
@@ -78,7 +57,7 @@ cmd = "exit 9"
     let roki_body = format!(
         r#"
 [linear]
-token = "linear-test-token"
+token = "lin"
 
 [linear.webhook]
 bind = "127.0.0.1"
@@ -86,9 +65,6 @@ port = {port}
 
 [default.ai.command]
 cli = "echo"
-
-[engine]
-max_iterations = 5
 
 [paths]
 workflow = "{workflow}"
@@ -102,14 +78,18 @@ session_root = "{session_root}"
     );
     std::fs::write(&roki_path, roki_body).unwrap();
 
+    // Remove all permissions from the orphan dir itself so remove_dir_all
+    // fails to descend into it. This populates OrphanReport::fs_errors.
+    let mut perms = std::fs::metadata(&orphan_dir).unwrap().permissions();
+    perms.set_mode(0o000);
+    std::fs::set_permissions(&orphan_dir, perms).unwrap();
+
     let binary = env!("CARGO_BIN_EXE_roki");
     let mut child = Command::new(binary)
         .arg("run")
         .arg("--config")
         .arg(&roki_path)
         .env("ROKI_LINEAR_GRAPHQL_URL", linear.uri())
-        .env("ROKI_GHQ_BASE_OVERRIDE", work.path())
-        .env("ROKI_WT_ROOT_OVERRIDE", &wt_root)
         .kill_on_drop(true)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
@@ -119,62 +99,48 @@ session_root = "{session_root}"
 
     let webhook_addr: SocketAddr = ([127, 0, 0, 1], port).into();
     wait_for_listener(webhook_addr).await;
-    // Slice 6: cold start runs after the listener binds. Wait for
-    // `daemon_ready` so the gate is open and the POST below is not
-    // short-circuited to 503 `cold_start_in_progress`.
-    let _ = await_daemon_ready(&session_root).await;
 
-    let webhook_url = format!("http://127.0.0.1:{port}/");
-    let payload = serde_json::json!({
-        "action": "update",
-        "type": "Issue",
-        "data": {
-            "id": ticket_id,
-            "assignee": {"id": "u1"},
-            "state": {"name": "in_progress"},
-            "labels": []
-        }
-    });
-    let client = reqwest::Client::new();
-    let resp = client
-        .post(&webhook_url)
-        .json(&payload)
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(resp.status().as_u16(), 202);
-
-    // Events file: exactly one failure_unhandled event with
-    // marker=recursion_bound.
-    let events_path = session_root.join(format!("{ticket_id}.events.jsonl"));
+    let daemon_events_path = session_root.join("_daemon.events.jsonl");
     wait_for_event_count(
-        &events_path,
-        "failure_unhandled",
+        &daemon_events_path,
+        "escalation_added",
         1,
         Duration::from_secs(15),
     )
     .await;
+
+    // Restore writable permissions so test cleanup (TempDir drop) works.
+    let mut restored = std::fs::metadata(&orphan_dir).unwrap().permissions();
+    restored.set_mode(0o755);
+    std::fs::set_permissions(&orphan_dir, restored).unwrap();
+
+    let _ = await_daemon_ready(&session_root).await;
+
     let exit = sigterm_and_wait(&mut child, Duration::from_secs(10)).await;
-    assert_eq!(exit, Some(0), "binary should exit 0 after SIGTERM");
+    assert_eq!(exit, Some(0));
 
-    let body = std::fs::read_to_string(&events_path)
-        .unwrap_or_else(|e| panic!("events.jsonl must exist at {events_path:?}: {e}"));
-    let lines: Vec<&str> = body.lines().collect();
+    let body = std::fs::read_to_string(&daemon_events_path).unwrap();
 
-    assert_eq!(
-        lines.len(),
-        1,
-        "expected exactly 1 event (failure_unhandled); got:\n{body}"
+    let escalations: Vec<&str> = body
+        .lines()
+        .filter(|l| l.contains("\"event\":\"escalation_added\""))
+        .collect();
+    assert_eq!(escalations.len(), 1, "exactly one escalation_added: {body}");
+
+    let line = escalations[0];
+    assert!(
+        !line.contains("\"ticket_id\""),
+        "cycle-less entry must omit ticket_id: {line}"
     );
     assert!(
-        lines[0].contains("\"event\":\"failure_unhandled\""),
-        "line 0 must be failure_unhandled: {}",
-        lines[0]
+        !line.contains("\"cycle_id\""),
+        "cycle-less entry must omit cycle_id: {line}"
     );
+    assert!(line.contains("\"kind\":\"fs_poison\""), "{line}");
+
     assert!(
-        lines[0].contains("\"marker\":\"recursion_bound\""),
-        "line 0 must have marker=recursion_bound: {}",
-        lines[0]
+        body.contains("\"event\":\"cold_start_completed\""),
+        "cold_start_completed should still fire: {body}"
     );
 }
 

@@ -79,6 +79,9 @@ destination = "stdout"      # "stdout" | "file" | "both"
 file_path = "/var/log/roki/daemon.jsonl"
 level = "info"
 ring_size = 1000
+
+[escalation]
+queue_size = 64             # default 64; min 1; max 1024
 ```
 
 Linear label names are not interpreted by the daemon. Operators express any label-driven gating inside `[[rule]]` / `[[cleanup]]` entries (see below). The example values below (`roki:ready`, `repo:bar`, etc.) are conventions a particular operator might pick.

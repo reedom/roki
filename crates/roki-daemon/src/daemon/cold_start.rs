@@ -48,6 +48,7 @@ pub struct ColdStart<R: CycleRunner + 'static> {
     pub dispatcher: Arc<Dispatcher<R>>,
     pub graphql: Arc<LinearGraphqlClient>,
     pub mode: DispatchMode,
+    pub escalation: Arc<crate::escalation::EscalationQueue>,
 }
 
 /// Compute the status-union narrowing for the GraphQL filter.
@@ -174,6 +175,17 @@ impl<R: CycleRunner + 'static> ColdStart<R> {
             };
             let orphan_report = orphan::reconcile(scan, writer.clone()).await;
             report.orphans_deleted = orphan_report.deleted.len();
+            for (ticket_id, err) in &orphan_report.fs_errors {
+                self.escalation
+                    .push_daemon(
+                        crate::engine::outcome::FailureKind::FsPoison,
+                        format!("orphan reconcile {ticket_id}: {err}"),
+                    )
+                    .await;
+            }
+            for ticket_id in &orphan_report.deleted {
+                self.escalation.evict_ticket(ticket_id).await;
+            }
         }
 
         report

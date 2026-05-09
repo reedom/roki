@@ -47,6 +47,7 @@ Per workspace, specified with `--config <path>` ([cli.md](cli.md)). Not hot-relo
 | `[log].file_path` | yes when `destination ∈ {file, both}` | path | — | Refuses startup if parent directory missing or not writable | [fr:08 §Tier 1](../fr/08-observability-logs.md) |
 | `[log].level` | no | enum (`error` / `warn` / `info` / `debug` / `trace`) | `info` | — | [fr:08 §Tier 1](../fr/08-observability-logs.md) |
 | `[log].ring_size` | no | int | `1000` | min `0` | [fr:08 §Tier 3](../fr/08-observability-logs.md) |
+| `[escalation].queue_size` | no | int | `64` | `1..=1024` | [fr:06 §Escalation queue](../fr/06-failure-handling.md) |
 
 Validation failure refuses startup and emits the offending key path in the structured log. The default-value column lists canonical defaults; a future schema-version bump is the only path to changing them.
 

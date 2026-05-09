@@ -44,8 +44,8 @@ name = "on_failure_smoke"
 path = "tests/e2e/on_failure_smoke.rs"
 
 [[test]]
-name = "recursion_bound_smoke"
-path = "tests/e2e/recursion_bound_smoke.rs"
+name = "escalation_recursion_smoke"
+path = "tests/e2e/escalation_recursion_smoke.rs"
 
 [[test]]
 name = "failure_unhandled_smoke"
@@ -72,8 +72,8 @@ name = "worktree_fs_poison_smoke"
 path = "tests/e2e/worktree_fs_poison_smoke.rs"
 
 [[test]]
-name = "worktree_cleanup_fs_error_smoke"
-path = "tests/e2e/worktree_cleanup_fs_error_smoke.rs"
+name = "escalation_cleanup_fs_error_smoke"
+path = "tests/e2e/escalation_cleanup_fs_error_smoke.rs"
 
 [[test]]
 name = "persistent_parallel_smoke"
@@ -141,6 +141,11 @@ path = "tests/e2e/cold_start_listener_parked_smoke.rs"
 [[test]]
 name = "cold_start_cleanup_mode_smoke"
 path = "tests/e2e/cold_start_cleanup_mode_smoke.rs"
+required-features = ["test-support"]
+
+[[test]]
+name = "escalation_orphan_reconcile_smoke"
+path = "tests/e2e/escalation_orphan_reconcile_smoke.rs"
 required-features = ["test-support"]
 
 [features]
