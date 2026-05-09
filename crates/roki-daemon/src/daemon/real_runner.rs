@@ -139,6 +139,7 @@ impl CycleRunner for RealCycleRunner {
                     self.cfg.as_ref(),
                     &mut events,
                     cycle_trigger,
+                    &self.escalation,
                 )
                 .await;
                 match decision {
@@ -189,16 +190,21 @@ async fn handle_failed_cycle(
     cfg: &RokiConfig,
     events: &mut EventWriter,
     cycle_trigger: CycleTrigger,
+    escalation: &EscalationQueue,
 ) -> HandlerDecision {
     // Recursion bound: a failure cycle that itself fails must not recurse.
+    // fr:06 trigger 1: push to escalation queue instead of emitting
+    // failure_unhandled.
     if failed_kind == CycleKind::Failure {
-        let _ = events.emit(&Event::FailureUnhandled {
-            ts: now_rfc3339(),
-            cycle_id: meta.failed_cycle_id.to_string(),
-            cycle_kind: "failure".into(),
-            failure: FailureMetaSer::from_meta(meta),
-            marker: FailureMarker::RecursionBound,
-        });
+        escalation
+            .push_cycle(
+                admitted.ticket.id.clone(),
+                meta.failed_cycle_id,
+                meta.kind,
+                meta.phase,
+                meta.error_text.clone(),
+            )
+            .await;
         return HandlerDecision::Unhandled;
     }
 
@@ -238,24 +244,35 @@ async fn handle_failed_cycle(
             HandlerDecision::Succeeded
         }
         Ok(crate::engine::CycleOutcome::Failed { meta: handler_meta }) => {
-            let _ = events.emit(&Event::FailureUnhandled {
-                ts: now_rfc3339(),
-                cycle_id: handler_meta.failed_cycle_id.to_string(),
-                cycle_kind: "failure".into(),
-                failure: FailureMetaSer::from_meta(&handler_meta),
-                marker: FailureMarker::RecursionBound,
-            });
+            // fr:06 trigger 1: handler cycle failed. Push to queue with the
+            // handler cycle's own id so operators can correlate logs.
+            escalation
+                .push_cycle(
+                    admitted.ticket.id.clone(),
+                    handler_meta.failed_cycle_id,
+                    handler_meta.kind,
+                    handler_meta.phase,
+                    handler_meta.error_text.clone(),
+                )
+                .await;
             HandlerDecision::Unhandled
         }
         Err(infra) => {
             tracing::error!(?infra, "handler cycle infra error");
-            let _ = events.emit(&Event::FailureUnhandled {
-                ts: now_rfc3339(),
-                cycle_id: meta.failed_cycle_id.to_string(),
-                cycle_kind: "failure".into(),
-                failure: FailureMetaSer::from_meta(meta),
-                marker: FailureMarker::RecursionBound,
-            });
+            // fr:06 trigger 1: handler cycle hit an infra error. Synthesize
+            // FsPoison for the failure_kind because infra errors do not carry
+            // a phase-level FailureKind. Tag with the original failed cycle's
+            // id and phase to keep the operator-visible scope identical to
+            // the user's [[on_failure]] match.
+            escalation
+                .push_cycle(
+                    admitted.ticket.id.clone(),
+                    meta.failed_cycle_id,
+                    FailureKind::FsPoison,
+                    meta.phase,
+                    format!("handler cycle infra error: {infra}"),
+                )
+                .await;
             HandlerDecision::Unhandled
         }
     }

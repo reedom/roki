@@ -44,8 +44,8 @@ name = "on_failure_smoke"
 path = "tests/e2e/on_failure_smoke.rs"
 
 [[test]]
-name = "recursion_bound_smoke"
-path = "tests/e2e/recursion_bound_smoke.rs"
+name = "escalation_recursion_smoke"
+path = "tests/e2e/escalation_recursion_smoke.rs"
 
 [[test]]
 name = "failure_unhandled_smoke"

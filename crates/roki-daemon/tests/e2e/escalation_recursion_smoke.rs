@@ -1,10 +1,9 @@
 //! E2E: rule's post phase exits non-zero (process_crash). The on_failure
 //! handler's post phase also exits non-zero. The recursion bound prevents a
-//! second handler cycle; the per-ticket task emits exactly one
-//! failure_unhandled event with marker=recursion_bound. The persistent daemon
-//! stays alive after the unhandled cycle; the test SIGTERMs it and asserts
-//! exit 0 (a per-ticket failure does not propagate to the daemon's exit code
-//! in slice 5+).
+//! second handler cycle; the per-ticket task pushes a single
+//! escalation_added entry to the daemon-scoped event log instead of emitting
+//! failure_unhandled. The persistent daemon stays alive afterwards; the test
+//! SIGTERMs it and asserts exit 0.
 
 use std::net::{SocketAddr, TcpListener};
 use std::time::Duration;
@@ -19,7 +18,7 @@ mod support_cold_start;
 use support_cold_start::{await_daemon_ready, stub_empty_issues};
 
 #[tokio::test]
-async fn recursion_bound_emits_failure_unhandled() {
+async fn recursion_bound_pushes_escalation_added() {
     let port = TcpListener::bind("127.0.0.1:0")
         .expect("bind ephemeral webhook port")
         .local_addr()
@@ -144,12 +143,12 @@ session_root = "{session_root}"
         .unwrap();
     assert_eq!(resp.status().as_u16(), 202);
 
-    // Events file: exactly one failure_unhandled event with
-    // marker=recursion_bound.
-    let events_path = session_root.join(format!("{ticket_id}.events.jsonl"));
+    // fr:06: handler-cycle-fails route through the escalation queue, not
+    // failure_unhandled. The persistent daemon stays alive.
+    let daemon_events_path = session_root.join("_daemon.events.jsonl");
     wait_for_event_count(
-        &events_path,
-        "failure_unhandled",
+        &daemon_events_path,
+        "escalation_added",
         1,
         Duration::from_secs(15),
     )
@@ -157,25 +156,48 @@ session_root = "{session_root}"
     let exit = sigterm_and_wait(&mut child, Duration::from_secs(10)).await;
     assert_eq!(exit, Some(0), "binary should exit 0 after SIGTERM");
 
-    let body = std::fs::read_to_string(&events_path)
-        .unwrap_or_else(|e| panic!("events.jsonl must exist at {events_path:?}: {e}"));
-    let lines: Vec<&str> = body.lines().collect();
+    let body = std::fs::read_to_string(&daemon_events_path)
+        .unwrap_or_else(|e| panic!("_daemon events.jsonl must exist: {e}"));
 
+    let escalations: Vec<&str> = body
+        .lines()
+        .filter(|l| l.contains("\"event\":\"escalation_added\""))
+        .collect();
     assert_eq!(
-        lines.len(),
+        escalations.len(),
         1,
-        "expected exactly 1 event (failure_unhandled); got:\n{body}"
+        "expected exactly one escalation_added; got:\n{body}"
     );
+
+    let unhandled: Vec<&str> = body
+        .lines()
+        .filter(|l| l.contains("\"event\":\"failure_unhandled\""))
+        .collect();
     assert!(
-        lines[0].contains("\"event\":\"failure_unhandled\""),
-        "line 0 must be failure_unhandled: {}",
-        lines[0]
+        unhandled.is_empty(),
+        "no failure_unhandled expected on daemon log:\n{body}"
     );
-    assert!(
-        lines[0].contains("\"marker\":\"recursion_bound\""),
-        "line 0 must have marker=recursion_bound: {}",
-        lines[0]
-    );
+
+    let entry = escalations[0];
+    assert!(entry.contains("\"ticket_id\":"), "{entry}");
+    assert!(entry.contains("\"cycle_id\":"), "{entry}");
+    assert!(entry.contains("\"kind\":"), "{entry}");
+    assert!(entry.contains("\"phase\":"), "{entry}");
+
+    // Per-ticket events file: should contain NO failure_unhandled and NO
+    // escalation_added (escalation_added lands on the daemon-scoped log only).
+    let per_ticket_events = session_root.join(format!("{ticket_id}.events.jsonl"));
+    if per_ticket_events.exists() {
+        let pt_body = std::fs::read_to_string(&per_ticket_events).unwrap_or_default();
+        assert!(
+            !pt_body.contains("\"event\":\"failure_unhandled\""),
+            "per-ticket file must not contain failure_unhandled:\n{pt_body}"
+        );
+        assert!(
+            !pt_body.contains("\"event\":\"escalation_added\""),
+            "per-ticket file must not contain escalation_added:\n{pt_body}"
+        );
+    }
 }
 
 async fn wait_for_listener(addr: SocketAddr) {

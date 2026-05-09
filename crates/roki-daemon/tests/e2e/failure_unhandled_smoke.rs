@@ -177,6 +177,17 @@ session_root = "{session_root}"
         "line 0 failure.kind must be process_crash: {}",
         lines[0]
     );
+
+    // Slice 7: marker=none path is the only remaining failure_unhandled
+    // emitter. No escalation_added must be emitted on the daemon log.
+    let daemon_events_path = session_root.join("_daemon.events.jsonl");
+    if daemon_events_path.exists() {
+        let daemon_body = std::fs::read_to_string(&daemon_events_path).unwrap_or_default();
+        assert!(
+            !daemon_body.contains("\"event\":\"escalation_added\""),
+            "no escalation_added expected for marker=none path:\n{daemon_body}"
+        );
+    }
 }
 
 async fn wait_for_listener(addr: SocketAddr) {

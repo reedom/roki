@@ -172,6 +172,16 @@ session_root = "{session_root}"
         "no failure_unhandled events expected; got:\n{body}"
     );
 
+    // Slice 7: when [[on_failure]] succeeds, no escalation_added is emitted.
+    let daemon_events_path = session_root.join("_daemon.events.jsonl");
+    if daemon_events_path.exists() {
+        let daemon_body = std::fs::read_to_string(&daemon_events_path).unwrap_or_default();
+        assert!(
+            !daemon_body.contains("\"event\":\"escalation_added\""),
+            "no escalation_added expected when [[on_failure]] succeeds:\n{daemon_body}"
+        );
+    }
+
     // Both the failed rule cycle's iter dir and the handler cycle's iter dir
     // must exist. Look for two distinct cycle-<uuid> dirs under the ticket dir.
     let ticket_dir = session_root.join(ticket_id);
