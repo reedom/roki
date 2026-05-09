@@ -36,7 +36,7 @@ Before any cache update ([07-recovery §Diff cache](07-recovery.md)), the daemon
 1. **Assignee gate**: `ticket.assignee == [admission].assignee`. The literal `me` resolves to the API token holder. Failure → silent eviction (logged but not surfaced to Linear).
 2. **Repo resolution**: `[[admission.repos]]` first-match → resolves the ticket's ghq repo identifier and its per-repo `workflow` path (or fall back to the top-level WORKFLOW.toml entries). No match → silent eviction (`reason: repo_unresolvable`).
 
-Tickets that fail admission are not added to the cache. If the ticket was previously cached and the new webhook fails admission (assignee change, repo matcher no longer hits), the cache entry is evicted; if a cycle is currently in flight for that ticket, the cycle is allowed to terminate naturally and the worktree + session_tempdir are deleted afterward as orphan cleanup ([05-worktree-and-session](05-worktree-and-session.md)).
+Tickets that fail admission are not added to the cache. If the ticket was previously cached and the new webhook fails admission (assignee change, repo matcher no longer hits), the cache entry is evicted after any in-flight cycle terminates naturally. The worktree and session tempdir are **retained** until the ticket reaches a terminal state — reclaimed by a `[[cleanup]]` cycle on re-admission or by cold-start orphan reconcile ([07-recovery §Cold start](07-recovery.md)) when the ticket is no longer enumerable.
 
 ### Polling fallback
 
@@ -67,8 +67,8 @@ The diff cache decides what counts as a change ([07-recovery §Diff cache](07-re
 
 When the assignee on a previously admitted ticket changes to someone other than `[admission].assignee`:
 
-1. The diff cache evicts the entry.
-2. If a cycle is currently in flight, it runs to natural end (queue mode); afterward the daemon deletes the worktree + session_tempdir as orphan cleanup.
+1. If a cycle is currently in flight, it runs to natural end (queue mode); afterward the diff cache evicts the entry.
+2. The worktree and session tempdir are **retained** until the ticket reaches a terminal state — reclaimed by a `[[cleanup]]` cycle on re-admission or by cold-start orphan reconcile ([07-recovery §Cold start](07-recovery.md)) when the ticket is no longer enumerable. Re-admission while the eviction is pending cancels it.
 3. No Linear write is performed by the daemon. Operators that want a Linear comment on reassignment author a `[[cleanup]]` entry whose run phase performs the write.
 
 There is no separate `Cleaning` state in the daemon ([07-recovery](07-recovery.md)).

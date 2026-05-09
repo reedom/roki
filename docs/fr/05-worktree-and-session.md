@@ -25,7 +25,7 @@ Concentrate worktree and session-tempdir lifecycle in the daemon so the operator
 ### Session tempdir
 
 - **Created at admission**: when the admission filter ([03-linear-admission §Admission filter](03-linear-admission.md)) accepts a ticket, the daemon creates `<session_root>/<ticket-id>/` (where `<session_root>` is `roki.toml [paths].session_root`). This directory is the per-iter capture root ([09-log-access-cli §Storage layout](09-log-access-cli.md)). It exists before any cycle starts so even pre-run inspection has somewhere to write logs.
-- **Deleted on**: cleanup-cycle completion, admission-filter eviction (after any in-flight cycle terminates), and orphan reconciliation at cold start.
+- **Deleted on**: cleanup-cycle completion and orphan reconciliation at cold start. Admission-filter eviction does **not** delete the session tempdir — it is retained until the ticket reaches a terminal state (cleanup-cycle reclaim on re-admission, or cold-start orphan reconcile when the ticket is no longer enumerable).
 
 ### Worktree
 
@@ -42,7 +42,7 @@ Auto-delete is gated by cycle kind ([01-engine-model §Cycle kinds](01-engine-mo
 Three conditions actually invoke deletion:
 
 1. **Cleanup cycle completion** (`cycle.kind == "cleanup"`): after the cycle's terminal directive is observed, the daemon enumerates worktrees in the allowlist whose branch name matches the issue identifier and runs `wt remove`, then `rm -rf` on the session tempdir. The branch itself is **not** deleted.
-2. **Admission-filter eviction** (assignee revoked, repo allowlist match lost): the in-flight cycle (if any) runs to natural end first; afterward the daemon evicts and deletes as in (1).
+2. **Admission-filter eviction** (assignee revoked, repo allowlist match lost): the in-flight cycle (if any) runs to natural end first; afterward the daemon evicts the cache entry but **retains** the worktree and session tempdir. They are reclaimed when the ticket reaches a terminal state — by a `[[cleanup]]` cycle on re-admission, or by orphan reconcile (3) at the next daemon cold start when the ticket is no longer enumerable.
 3. **Orphan reconcile at cold start** ([07-recovery §Cold start](07-recovery.md)): residue not corresponding to any admission-passing Linear ticket is auto-deleted with a `reason: orphan` log entry.
 
 Cleanup is a cycle kind, not a daemon-tracked state.

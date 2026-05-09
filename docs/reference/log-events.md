@@ -50,7 +50,7 @@ Attached to every event via tracing spans (when in scope).
 | Event | When | Carries |
 |---|---|---|
 | `worktree_created` | Worktree materialized on first `pre.directive: "run"` | `repo`, branch name, worktree path |
-| `worktree_deleted` | Worktree removed (cleanup-cycle completion / admission eviction / orphan reconcile) | `repo`, branch name, `reason` ∈ `cleanup` / `eviction` / `orphan` |
+| `worktree_deleted` | Worktree removed (cleanup-cycle completion / orphan reconcile). Admission-revoke does not delete worktrees | `repo`, branch name, `reason` ∈ `cleanup` / `orphan` |
 | `session_tempdir_created` | Session tempdir created at admission | `ticket.id`, path |
 | `session_tempdir_deleted` | Session tempdir removed | `ticket.id`, path, `reason` |
 

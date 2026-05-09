@@ -144,7 +144,7 @@ A new webhook arriving while the same ticket has an in-flight cycle:
 2. Defers rule re-evaluation until the in-flight cycle terminates.
 3. After the cycle terminates, the daemon evaluates lists against the latest cached state. The retained webhooks are not replayed individually; only the final state matters.
 
-The single exception is admission-filter failure mid-cycle (assignee revoked, repo allowlist match lost): the in-flight cycle still runs to its natural end. After it terminates, the daemon evicts the ticket and deletes worktree + session_tempdir as orphan cleanup. Operators that want forced-termination behavior on a Linear status change author a `[[cleanup]]` entry whose run phase issues a SIGTERM-equivalent action against whatever subprocess they care about (or simply omits all phases for immediate delete).
+The single exception is admission-filter failure mid-cycle (assignee revoked, repo allowlist match lost): the in-flight cycle still runs to its natural end. After it terminates, the daemon evicts the cache entry but **retains** worktree + session_tempdir for re-admission reuse; reclamation is by `[[cleanup]]` cycle on re-admission or by cold-start orphan reconcile when the ticket is no longer enumerable. Operators that want forced-termination behavior on a Linear status change author a `[[cleanup]]` entry whose run phase issues a SIGTERM-equivalent action against whatever subprocess they care about (or simply omits all phases for immediate delete).
 
 ### Stall detection
 

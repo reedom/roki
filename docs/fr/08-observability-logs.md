@@ -42,7 +42,7 @@ Operators must diagnose daemon behavior, admission decisions, cycle outcomes, an
 
 - **Layout**: `<session_root>/<ticket-id>/cycle-<uuid>/iter-<n>/{pre,run,post}.{stdout,stderr}`, plus parsed-derivative files (`pre.response.json`, `run.exit_code`, `run.terminal.json`, `post.response.json`) and the per-line stream-json event files for session-shape pre / post (`pre.events.jsonl`, `post.events.jsonl`) per [09-log-access-cli §Storage layout](09-log-access-cli.md).
 - **Capture mode**: byte-for-byte. The daemon does not strip ANSI codes, does not redact, and does not impose a per-line tag.
-- **Lifetime**: deleted on cleanup-cycle completion, on admission-eviction orphan cleanup, and on cold-start orphan reconcile (matches [05-worktree-and-session](05-worktree-and-session.md)).
+- **Lifetime**: deleted on cleanup-cycle completion and on cold-start orphan reconcile (matches [05-worktree-and-session](05-worktree-and-session.md)). Admission-revoke does not delete the captures — the directory is retained until cleanup-cycle reclaim or orphan reconcile.
 - **Read access**: `roki log` (scope = same ticket); HTTP API mirrors via `GET /api/tickets/{id}/cycles/{cycle_id}/iters/{n}/{phase}/{stream}`.
 
 ### Tier 3: in-memory ring buffer
