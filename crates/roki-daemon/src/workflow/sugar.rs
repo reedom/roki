@@ -449,7 +449,7 @@ fn apply_pass5_max_visits(sm: &mut StateMachine, default_cap: u32) {
     }
 }
 
-fn state_has_self_edge(sm: &StateMachine, id: &str) -> bool {
+pub(crate) fn state_has_self_edge(sm: &StateMachine, id: &str) -> bool {
     let Some(state) = sm.states.get(id) else {
         return false;
     };
@@ -471,7 +471,7 @@ fn inject_if_unset(sm: &mut StateMachine, id: &str, default_cap: u32) {
 
 /// Tarjan strongly-connected components over `sm.states` only (terminals are
 /// sinks). Returns SCCs sorted by reverse postorder.
-fn tarjan_scc(sm: &StateMachine) -> Vec<Vec<StateId>> {
+pub(crate) fn tarjan_scc(sm: &StateMachine) -> Vec<Vec<StateId>> {
     let ids: Vec<StateId> = sm.states.keys().cloned().collect();
     let id_to_idx: BTreeMap<StateId, usize> =
         ids.iter().cloned().enumerate().map(|(i, id)| (id, i)).collect();
