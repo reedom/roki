@@ -54,11 +54,19 @@
 | Path | Change |
 |---|---|
 | `crates/roki-daemon/Cargo.toml` | Add `serde_yaml` dep. |
-| `crates/roki-daemon/src/lib.rs` | `pub mod workflow;` (replaces `pub mod workflow_toml` if present). |
+| `crates/roki-daemon/src/main.rs` | Add `mod workflow;` to the top-level module list. (Daemon is a binary; no `lib.rs`.) |
+| `crates/roki-daemon/src/config/mod.rs` | Drop `pub mod workflow;` and `pub mod workflow_md;` (TOML parsers superseded by top-level `workflow/` module). |
 | `crates/roki-daemon/src/config/roki.rs` | `[paths] workflow` default → `./WORKFLOW.yaml`. `[default.ai.session]` block removed. `[default.ai.command]` → `[default.ai]` (single `cli` + `stall_seconds`). |
 | `crates/roki-daemon/src/runtime.rs` | `load_workflow_yaml(path)` replaces `load_workflow_toml`. Per-repo override file resolution per spec §3.2.1. |
-| `crates/roki-daemon/src/engine/cycle.rs` | Deleted (replaced by `cycle_state.rs`). Old phase-loop logic gone. |
+| `crates/roki-daemon/src/engine/mod.rs` | Drop `pub mod phase;`, `pub mod session;`, `pub mod directive;`, `pub mod cycle;`. Add `pub mod sentinel;`, `pub mod state_runtime;`, `pub mod cycle_state;`. |
 | `crates/roki-daemon/src/engine/outcome.rs` | `FailureKind` enum: drop `IterExhausted`; add `RecursionBound`; rename `phase: PhaseKind` → `state_id: String` on failure metadata. |
+| `crates/roki-daemon/src/engine/on_failure.rs` | Match on `FailureKind` + `state_id` (was `phase`). Routing logic per spec §7.3. |
+| `crates/roki-daemon/src/engine/dispatch.rs` | Consume canonical `RuleEntry` + `WhenClause`. First-match against new shape. |
+| `crates/roki-daemon/src/engine/context.rs` | Liquid context construction: drop `pre.*`/`post.*`/`run.*` namespaces; add `state.*` and `tasks.<id>.*`. |
+| `crates/roki-daemon/src/engine/template.rs` | Reused. Liquid renderer unchanged (grammar same). Confirm `tasks.<id>` lookups resolve correctly. |
+| `crates/roki-daemon/src/engine/cleanup.rs` | Cleanup-cycle pathway uses state machine; immediate-delete shorthand unchanged. |
+| `crates/roki-daemon/src/engine/stall.rs` | Reused. Stall-window adapter rebound from `phase` to `(state_id, visit_n)` keying. |
+| `crates/roki-daemon/src/engine/worktree.rs`, `cwd.rs`, `stream.rs` | Reused as-is. |
 | `crates/roki-daemon/src/events.rs` | Cycle events carry `state_id: String` + `visit_n: u32` (replaces `phase`). `cycle_completed` adds `terminal_id`. `failure_unhandled` payload field rename. |
 | `crates/roki-daemon/src/daemon/dispatcher.rs` | Match on `WhenClause`-shaped condition; dispatch consumes `RuleEntry`. |
 | `crates/roki-daemon/src/daemon/ticket_task.rs` | Drives `cycle_state::run_cycle` instead of phase loop. |
@@ -80,7 +88,8 @@
 | `docs/examples/workflow-judge.md` | Same. |
 | `docs/examples/workflow-verdict.md` | Same. |
 | `crates/roki-daemon/tests/e2e/*.rs` (slices 1-7) | Test-harness YAML emitter replaces TOML emitter. `phase` assertions → `state_id`. `iter_exhausted` → `recursion_bound`. |
-| `crates/roki-daemon/tests/support/workflow_toml.rs` | Deleted; replaced by `workflow_yaml.rs`. |
+| `crates/roki-daemon/tests/e2e/support_workflow_toml.rs` (if present) → `support_workflow_yaml.rs` | Test-harness module rename. Pattern matches existing `support_cold_start.rs`. |
+| `crates/roki-daemon/Cargo.toml` | 13 new `[[test]]` entries for slice 8 e2e fixtures. |
 
 ### Deleted
 
@@ -88,9 +97,12 @@
 |---|---|
 | `docs/examples/WORKFLOW.minimal.toml` | Replaced by `.yaml` variant. |
 | `docs/examples/WORKFLOW.annotated.toml` | Replaced by `.yaml` variant. |
-| `crates/roki-daemon/src/engine/cycle.rs` | Superseded by `cycle_state.rs`. |
-| `crates/roki-daemon/tests/support/workflow_toml.rs` | Superseded by `workflow_yaml.rs`. |
-| `crates/roki-daemon/src/workflow_toml/**` (if present) | Superseded by `workflow/*` module tree. |
+| `crates/roki-daemon/src/config/workflow.rs` (~50KB) | TOML workflow parser; superseded by `src/workflow/parse.rs` + `sugar.rs` + `validate.rs`. Audit before delete: any non-parser logic (e.g. shared types) migrated to the new module first. |
+| `crates/roki-daemon/src/config/workflow_md.rs` (~6.7KB) | `workflow/*.md` TOML-frontmatter parser; superseded by YAML-frontmatter equivalent reused via the new `workflow/` module. |
+| `crates/roki-daemon/src/engine/cycle.rs` (~44KB) | Superseded by `cycle_state.rs`. Audit for shared helpers before delete. |
+| `crates/roki-daemon/src/engine/phase.rs` (~34KB) | Pre/run/post phase loop; deleted entirely. |
+| `crates/roki-daemon/src/engine/session.rs` (~31KB) | Long-lived AI session subprocess; deleted entirely (no session shape). |
+| `crates/roki-daemon/src/engine/directive.rs` (~8KB) | Stdout-JSON directive parser; superseded by `engine/sentinel.rs`. |
 
 ---
 
@@ -115,11 +127,11 @@
 
 **Spec ref:** §2.2.
 
-**Files:** `crates/roki-daemon/src/workflow/canonical.rs` (new), `crates/roki-daemon/src/workflow/mod.rs` (new), `crates/roki-daemon/src/lib.rs` (modified).
+**Files:** `crates/roki-daemon/src/workflow/canonical.rs` (new), `crates/roki-daemon/src/workflow/mod.rs` (new), `crates/roki-daemon/src/main.rs` (modified — add `mod workflow;`).
 
 **Steps:**
 
-- [ ] Add `pub mod workflow;` to `lib.rs`.
+- [ ] Add `mod workflow;` to `crates/roki-daemon/src/main.rs` top-level module list (sorted alphabetically).
 - [ ] Create `workflow/mod.rs` with `pub mod canonical; pub mod parse; pub mod sugar; pub mod validate; pub mod liquid;` declarations (other modules empty placeholders for later tasks).
 - [ ] In `canonical.rs`, define types per spec §2.2: `WorkflowFile`, `Admission`, `AssigneeMatcher`, `RepoEntry`, `RuleEntry`, `WhenClause`, `StateMachine`, `State`, `StateBody`, `Terminal`, `EdgeTarget`, `StateId`, `DirectiveName`.
 - [ ] Use `BTreeMap` for `states` and `terminals` (deterministic iteration, deterministic SCC entry-pick).
@@ -542,12 +554,12 @@
 
 **Spec ref:** §12.2.
 
-**Files:** `crates/roki-daemon/tests/support/workflow_yaml.rs` (new), `crates/roki-daemon/tests/support/workflow_toml.rs` (deleted), all `crates/roki-daemon/tests/e2e/*.rs`.
+**Files:** `crates/roki-daemon/tests/e2e/support_workflow_yaml.rs` (new); existing TOML harness inlined per-fixture (no central `support_workflow_toml.rs` module — confirmed by `ls tests/e2e/`); all `crates/roki-daemon/tests/e2e/*.rs`.
 
 **Steps:**
 
-- [ ] Write `workflow_yaml.rs` test-harness module: builder functions `WorkflowYaml::admission(...).rule(...).cleanup(...).on_failure(...).render() -> String`. Mirrors API of the existing `workflow_toml.rs` helpers. Output is canonical YAML (no sugar) for test determinism.
-- [ ] Delete `workflow_toml.rs` (do this LAST in the migration; existing tests reference it).
+- [ ] Write `support_workflow_yaml.rs` (in `tests/e2e/`, matching the `support_cold_start.rs` pattern): builder functions `WorkflowYaml::admission(...).rule(...).cleanup(...).on_failure(...).render() -> String`. Output is canonical YAML (no sugar) for test determinism.
+- [ ] Search current TOML emitter usage: `grep -rn 'WORKFLOW.toml\|workflow.toml\|render_workflow_toml\|to_string.*\.toml' crates/roki-daemon/tests/`. Each call site replaced with the YAML emitter.
 - [ ] For each slice 1-7 e2e fixture under `crates/roki-daemon/tests/e2e/`:
   - Replace `workflow_toml::WorkflowToml::...` calls with `workflow_yaml::WorkflowYaml::...`.
   - Replace `[[rule]]`-flavored test scaffolding with YAML equivalents.
@@ -555,7 +567,7 @@
   - Replace `iter_exhausted` failure-kind assertions with `recursion_bound`.
   - Replace `pre`/`run`/`post`-named state assertions with state-id-based assertions.
 - [ ] After each fixture passes, commit (one fixture per commit ideal; group small fixtures if risk is low).
-- [ ] After all slice 1-7 fixtures green, delete `workflow_toml.rs`.
+- [ ] After all slice 1-7 fixtures green, run `grep -rn 'WORKFLOW.toml\|workflow.toml' crates/roki-daemon/tests/` to confirm zero residual TOML emitter calls.
 
 **Acceptance:** `cargo test -p roki-daemon --test '*'` green for every slice 1-7 fixture. `grep -r 'workflow_toml' crates/roki-daemon/tests/` returns zero hits.
 
@@ -584,8 +596,14 @@
 - [ ] **`per_repo_override_smoke`**: top-level YAML has `[[admission.repos]] workflow: repos/bar.yaml`. `repos/bar.yaml` declares its own `rules:`. Cycle spawned uses bar.yaml's rule, not the top-level rule list.
 - [ ] **`workflow_graph_cli_smoke`**: invoke `roki workflow graph` against a fixture; assert ASCII output contains expected `start:`, edge, and terminal lines.
 - [ ] **`workflow_validate_cli_smoke`**: valid fixture → exit 0. Invalid fixture → exit 2; stderr contains all expected ValidationError variants.
+- [ ] Register every new fixture in `crates/roki-daemon/Cargo.toml` as a `[[test]]` entry (current count is 33; slice 8 adds 13 → 46). Format mirrors existing entries:
+  ```toml
+  [[test]]
+  name = "yaml_load_smoke"
+  path = "tests/e2e/yaml_load_smoke.rs"
+  ```
 
-**Acceptance:** Each fixture green individually. `cargo test -p roki-daemon --test '*' yaml_load sugar canonical sentinel state_on_fail recursion_bound_yaml validate_orphan cleanup_immediate per_repo workflow_graph_cli workflow_validate_cli` runs all 12 + 1 in one go.
+**Acceptance:** Each fixture green individually. `cargo test -p roki-daemon --test '*' yaml_load sugar canonical sentinel state_on_fail recursion_bound_yaml validate_orphan cleanup_immediate per_repo workflow_graph_cli workflow_validate_cli` runs all 12 + 1 in one go. `grep -c '\[\[test\]\]' crates/roki-daemon/Cargo.toml` returns 46.
 
 ---
 
@@ -672,6 +690,9 @@ All 15 spec sections covered.
 | `roki.toml` rename `[default.ai.command]` → `[default.ai]` breaks any pre-release operator config | Pre-release per spec; no migrator. Emit a clear error at boot if `[default.ai.command]` or `[default.ai.session]` is encountered: "key removed in slice 8; use `[default.ai]`". |
 | Liquid template `cycle.iter` semantics shift from per-iter (pre/run/post triple) to total state visits — operator wrap-up templates that compare to `max_iterations - 1` may behave differently | Doc explicit in Task 13 (`fr:01` rewrite). E2e `sugar_retry_smoke` (Task 17) exercises the new semantics. |
 | Sub-agent task ordering: Task 8 (failure routing) depends on Tasks 6+7+12; missing one mid-flight blocks Task 8 | Plan ordering enforces 1→2→3→4→5→6→7→8. Each task has explicit `cargo build` + `cargo test` acceptance gates. Sub-agent must complete each before next. |
+| Existing 50KB+ files (`config/workflow.rs`, `engine/cycle.rs`, `engine/phase.rs`, `engine/session.rs`) carry shared types or helpers consumed by code outside the workflow loop | Before deletion: `cargo build` after stubbing each module's exports to `pub use {}` and observe linker errors → relocate truly-shared helpers to a new `engine/shared.rs` (or analogous) before final delete. Audit pass added implicitly to Tasks 1, 6, 7. |
+| Daemon crate has no `lib.rs` — module declarations live in `main.rs` | Plan accounts for this in Task 1 + File Structure. |
+| Each `[[test]]` entry in `Cargo.toml` requires explicit registration | Task 17 acceptance criterion verifies count = 46 (33 + 13). |
 
 ---
 
