@@ -38,6 +38,7 @@ pub struct RokiConfig {
     pub engine: EngineSection,
     pub paths: PathsSection,
     pub log: LogSection,
+    pub escalation: EscalationSection,
     /// `[default.ai.session]` section. Slice 2 loads it eagerly so cycles
     /// can resolve the session subprocess cli + stall window.
     pub default_ai_session: Option<DefaultAiSessionSection>,
@@ -131,6 +132,19 @@ pub struct LogSection {
     pub ring_size: Option<u32>,
 }
 
+/// `[escalation]` section. Bounds the in-memory escalation queue
+/// (fr:06 §Escalation queue).
+#[derive(Clone, Debug)]
+pub struct EscalationSection {
+    pub queue_size: u32,
+}
+
+impl Default for EscalationSection {
+    fn default() -> Self {
+        Self { queue_size: 64 }
+    }
+}
+
 impl fmt::Debug for RokiConfig {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("RokiConfig")
@@ -140,6 +154,7 @@ impl fmt::Debug for RokiConfig {
             .field("engine", &self.engine)
             .field("paths", &self.paths)
             .field("log", &self.log)
+            .field("escalation", &self.escalation)
             .field("default_ai_session", &self.default_ai_session)
             .finish()
     }
@@ -211,6 +226,7 @@ impl RokiConfig {
                 session_root: session_root.to_path_buf(),
             },
             log: LogSection::default(),
+            escalation: EscalationSection::default(),
             default_ai_session: None,
         }
     }
@@ -227,6 +243,7 @@ struct RawRokiConfig {
     engine: Option<RawEngine>,
     paths: Option<RawPaths>,
     log: Option<RawLog>,
+    escalation: Option<RawEscalation>,
 }
 
 #[derive(Default, Deserialize)]
@@ -294,6 +311,12 @@ struct RawLog {
     ring_size: Option<u32>,
 }
 
+#[derive(Default, Deserialize)]
+#[serde(default)]
+struct RawEscalation {
+    queue_size: Option<u32>,
+}
+
 impl RawRokiConfig {
     fn validate(self, path: &Path) -> Result<RokiConfig, RokiConfigError> {
         let raw_linear = self.linear.unwrap_or_default();
@@ -356,6 +379,9 @@ impl RawRokiConfig {
             ring_size: raw_log.ring_size,
         };
 
+        let raw_escalation = self.escalation.unwrap_or_default();
+        let escalation = parse_escalation(path, raw_escalation)?;
+
         Ok(RokiConfig {
             linear,
             linear_webhook,
@@ -363,6 +389,7 @@ impl RawRokiConfig {
             engine,
             paths: paths_section,
             log,
+            escalation,
             default_ai_session,
         })
     }
@@ -412,6 +439,24 @@ fn parse_engine(path: &Path, raw: RawEngine) -> Result<EngineSection, RokiConfig
         max_iterations,
         shutdown_window_seconds,
     })
+}
+
+fn parse_escalation(
+    path: &Path,
+    raw: RawEscalation,
+) -> Result<EscalationSection, RokiConfigError> {
+    let queue_size = match raw.queue_size {
+        None => 64,
+        Some(n) if (1..=1024).contains(&n) => n,
+        Some(_) => {
+            return Err(RokiConfigError::TypeMismatch {
+                path: path.to_path_buf(),
+                key: "escalation.queue_size".to_string(),
+                expected: "u32 in 1..=1024",
+            });
+        }
+    };
+    Ok(EscalationSection { queue_size })
 }
 
 fn required_field<T>(
@@ -895,5 +940,59 @@ session_root = "/tmp/sess"
         let err = RokiConfig::load(&path).expect_err("rejects 601");
         let msg = format!("{err}");
         assert!(msg.contains("shutdown_window_seconds"), "msg: {msg}");
+    }
+
+    #[test]
+    fn escalation_default_is_64() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_toml(&dir, HAPPY_PATH_TOML);
+        let cfg = RokiConfig::load(&path).expect("happy path");
+        assert_eq!(cfg.escalation.queue_size, 64);
+    }
+
+    #[test]
+    fn escalation_explicit_value_is_honored() {
+        let body = format!(
+            "{}\n[escalation]\nqueue_size = 256\n",
+            HAPPY_PATH_TOML
+        );
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_toml(&dir, &body);
+        let cfg = RokiConfig::load(&path).expect("explicit ok");
+        assert_eq!(cfg.escalation.queue_size, 256);
+    }
+
+    #[test]
+    fn escalation_zero_is_rejected() {
+        let body = format!(
+            "{}\n[escalation]\nqueue_size = 0\n",
+            HAPPY_PATH_TOML
+        );
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_toml(&dir, &body);
+        let err = RokiConfig::load(&path).expect_err("zero rejected");
+        match err {
+            crate::error::RokiConfigError::TypeMismatch { key, .. } => {
+                assert_eq!(key, "escalation.queue_size");
+            }
+            other => panic!("expected TypeMismatch, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn escalation_above_max_is_rejected() {
+        let body = format!(
+            "{}\n[escalation]\nqueue_size = 2000\n",
+            HAPPY_PATH_TOML
+        );
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_toml(&dir, &body);
+        let err = RokiConfig::load(&path).expect_err("above max rejected");
+        match err {
+            crate::error::RokiConfigError::TypeMismatch { key, .. } => {
+                assert_eq!(key, "escalation.queue_size");
+            }
+            other => panic!("expected TypeMismatch, got {other:?}"),
+        }
     }
 }
