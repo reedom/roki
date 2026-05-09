@@ -176,6 +176,13 @@ impl<R: CycleRunner + 'static> Dispatcher<R> {
         map.insert(admitted.ticket.id.clone(), TicketHandle { inbox: tx, join });
     }
 
+    /// Cold-start admission entry point. Stub for Task 5; real impl lands
+    /// in Task 6 (spawns a per-ticket task with `CycleTrigger::ColdStart`
+    /// for the first cycle).
+    pub async fn admit_for_cold_start(&self, _admitted: AdmittedTicket) -> Result<(), ()> {
+        Ok(())
+    }
+
     async fn emit_skip(&self, ticket_id: &str, reason: WebhookSkipReason) {
         let _ = self
             .daemon_events

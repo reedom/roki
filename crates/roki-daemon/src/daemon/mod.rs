@@ -5,6 +5,7 @@
 //! unchanged.
 
 pub mod cache;
+pub mod cold_start;
 pub mod dispatcher;
 pub mod orphan;
 pub mod real_runner;
