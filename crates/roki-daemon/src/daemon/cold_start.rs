@@ -175,6 +175,14 @@ impl<R: CycleRunner + 'static> ColdStart<R> {
             };
             let orphan_report = orphan::reconcile(scan, writer.clone()).await;
             report.orphans_deleted = orphan_report.deleted.len();
+            for (ticket_id, err) in &orphan_report.fs_errors {
+                self.escalation
+                    .push_daemon(
+                        crate::engine::outcome::FailureKind::FsPoison,
+                        format!("orphan reconcile {ticket_id}: {err}"),
+                    )
+                    .await;
+            }
         }
 
         report

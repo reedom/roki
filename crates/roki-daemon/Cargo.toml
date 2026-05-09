@@ -143,6 +143,11 @@ name = "cold_start_cleanup_mode_smoke"
 path = "tests/e2e/cold_start_cleanup_mode_smoke.rs"
 required-features = ["test-support"]
 
+[[test]]
+name = "escalation_orphan_reconcile_smoke"
+path = "tests/e2e/escalation_orphan_reconcile_smoke.rs"
+required-features = ["test-support"]
+
 [features]
 # Test-only seam: gates the `ROKI_LINEAR_GRAPHQL_URL` env-var override inside
 # `linear::client` so the release binary always targets the hardcoded endpoint.
