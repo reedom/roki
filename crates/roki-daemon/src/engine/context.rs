@@ -16,6 +16,27 @@ use crate::admission::AdmittedTicket;
 use crate::config::roki::RokiConfig;
 use crate::linear::ticket::NormalizedTicket;
 
+/// Identifies why a cycle was started. Surfaced through `cycle.trigger`
+/// (Liquid + `ROKI_CYCLE_TRIGGER` env). Slices 1-5 hardcoded `"runtime"`;
+/// slice 6 introduces the cold-start path which uses `ColdStart`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CycleTrigger {
+    Runtime,
+    // ColdStart is constructed by the cold-start scheduler in slice 6 Task 5+;
+    // covered by tests in this module today.
+    #[allow(dead_code)]
+    ColdStart,
+}
+
+impl CycleTrigger {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            CycleTrigger::Runtime => "runtime",
+            CycleTrigger::ColdStart => "cold_start",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct TicketView {
     pub id: String,
@@ -93,6 +114,7 @@ impl PhaseContext {
         cycle_id: Uuid,
         cfg: &RokiConfig,
         cycle_kind: crate::engine::outcome::CycleKind,
+        cycle_trigger: CycleTrigger,
     ) -> Self {
         Self {
             ticket: TicketView::from(&admitted.ticket),
@@ -103,7 +125,7 @@ impl PhaseContext {
             cycle: CycleView {
                 id: cycle_id.to_string(),
                 kind: cycle_kind.as_str(),
-                trigger: "runtime",
+                trigger: cycle_trigger.as_str(),
                 iter: 0,
             },
             config: ConfigView {
@@ -329,6 +351,7 @@ mod tests {
             Uuid::nil(),
             &cfg(7),
             crate::engine::outcome::CycleKind::Rule,
+            CycleTrigger::Runtime,
         );
         let pairs = roki_env_pairs(&ctx);
         assert!(
@@ -371,6 +394,7 @@ mod tests {
             Uuid::nil(),
             &cfg(10),
             crate::engine::outcome::CycleKind::Rule,
+            CycleTrigger::Runtime,
         );
         ctx.set_pre(serde_json::json!({
             "directive": "run",
@@ -398,6 +422,7 @@ mod tests {
             Uuid::nil(),
             &cfg(10),
             crate::engine::outcome::CycleKind::Rule,
+            CycleTrigger::Runtime,
         );
         ctx.set_pre(serde_json::json!({
             "directive": "run",
@@ -416,6 +441,7 @@ mod tests {
             Uuid::nil(),
             &cfg(10),
             crate::engine::outcome::CycleKind::Rule,
+            CycleTrigger::Runtime,
         );
         ctx.set_run(7, 42, None);
         let pairs = roki_env_pairs(&ctx);
@@ -438,6 +464,7 @@ mod tests {
             Uuid::nil(),
             &cfg(10),
             crate::engine::outcome::CycleKind::Rule,
+            CycleTrigger::Runtime,
         );
         let terminal = serde_json::json!({"is_error": false, "result": "ok"});
         ctx.set_run(0, 12, Some(terminal));
@@ -456,6 +483,7 @@ mod tests {
             Uuid::nil(),
             &cfg(10),
             crate::engine::outcome::CycleKind::Rule,
+            CycleTrigger::Runtime,
         );
         ctx.set_run(0, 1, Some(serde_json::json!({"is_error": false})));
         ctx.set_iter(2);
@@ -471,6 +499,7 @@ mod tests {
             Uuid::nil(),
             &cfg(10),
             crate::engine::outcome::CycleKind::Rule,
+            CycleTrigger::Runtime,
         );
         ctx.set_iter(3);
         let obj = to_liquid_object(&ctx);
@@ -485,7 +514,13 @@ mod tests {
     #[test]
     fn phase_context_cycle_kind_failure() {
         use crate::engine::outcome::CycleKind;
-        let ctx = PhaseContext::new(&admitted(), uuid::Uuid::nil(), &cfg(5), CycleKind::Failure);
+        let ctx = PhaseContext::new(
+            &admitted(),
+            uuid::Uuid::nil(),
+            &cfg(5),
+            CycleKind::Failure,
+            CycleTrigger::Runtime,
+        );
         assert_eq!(ctx.cycle.kind, "failure");
 
         let env: Vec<(String, String)> = roki_env_pairs(&ctx).into_iter().collect();
@@ -507,8 +542,13 @@ mod tests {
             exit_code: Some(0),
             error_text: "no JSON object on stdout".into(),
         };
-        let mut ctx =
-            PhaseContext::new(&admitted(), uuid::Uuid::nil(), &cfg(5), CycleKind::Failure);
+        let mut ctx = PhaseContext::new(
+            &admitted(),
+            uuid::Uuid::nil(),
+            &cfg(5),
+            CycleKind::Failure,
+            CycleTrigger::Runtime,
+        );
         ctx.set_failure(meta);
 
         let env: std::collections::HashMap<String, String> =
@@ -530,7 +570,13 @@ mod tests {
     #[test]
     fn phase_context_failure_absent_for_rule_cycle() {
         use crate::engine::outcome::CycleKind;
-        let ctx = PhaseContext::new(&admitted(), uuid::Uuid::nil(), &cfg(5), CycleKind::Rule);
+        let ctx = PhaseContext::new(
+            &admitted(),
+            uuid::Uuid::nil(),
+            &cfg(5),
+            CycleKind::Rule,
+            CycleTrigger::Runtime,
+        );
         let env: std::collections::HashMap<String, String> =
             roki_env_pairs(&ctx).into_iter().collect();
         assert!(!env.contains_key("ROKI_FAILURE_KIND"));
@@ -547,8 +593,13 @@ mod tests {
             exit_code: None,
             error_text: "stall".into(),
         };
-        let mut ctx =
-            PhaseContext::new(&admitted(), uuid::Uuid::nil(), &cfg(5), CycleKind::Failure);
+        let mut ctx = PhaseContext::new(
+            &admitted(),
+            uuid::Uuid::nil(),
+            &cfg(5),
+            CycleKind::Failure,
+            CycleTrigger::Runtime,
+        );
         ctx.set_failure(meta);
         let env: std::collections::HashMap<String, String> =
             roki_env_pairs(&ctx).into_iter().collect();
@@ -563,8 +614,27 @@ mod tests {
             uuid::Uuid::nil(),
             &cfg(5),
             crate::engine::outcome::CycleKind::Rule,
+            CycleTrigger::Runtime,
         );
         assert_eq!(ctx.repo.ticket_id, "OPS-100");
         assert_eq!(ctx.ticket.id, "OPS-100");
+    }
+
+    #[test]
+    fn cold_start_trigger_renders_into_cycle_view_and_env() {
+        let ctx = PhaseContext::new(
+            &admitted(),
+            Uuid::new_v4(),
+            &cfg(5),
+            crate::engine::outcome::CycleKind::Rule,
+            CycleTrigger::ColdStart,
+        );
+        assert_eq!(ctx.cycle.trigger, "cold_start");
+
+        let env = roki_env_pairs(&ctx);
+        assert!(
+            env.iter()
+                .any(|(k, v)| k == "ROKI_CYCLE_TRIGGER" && v == "cold_start")
+        );
     }
 }

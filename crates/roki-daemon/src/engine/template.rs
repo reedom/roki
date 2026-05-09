@@ -222,6 +222,7 @@ mod tests {
     use super::*;
     use crate::admission::AdmittedTicket;
     use crate::config::roki::*;
+    use crate::engine::context::CycleTrigger;
     use crate::engine::outcome::CycleKind;
     use crate::linear::ticket::NormalizedTicket;
     use std::path::PathBuf;
@@ -270,7 +271,13 @@ mod tests {
 
     #[test]
     fn renders_ticket_id_and_iter() {
-        let mut ctx = super::PhaseContext::new(&admitted(), Uuid::nil(), &cfg(), CycleKind::Rule);
+        let mut ctx = super::PhaseContext::new(
+            &admitted(),
+            Uuid::nil(),
+            &cfg(),
+            CycleKind::Rule,
+            CycleTrigger::Runtime,
+        );
         ctx.set_iter(2);
         let out = render_str("ticket {{ ticket.id }} iter {{ cycle.iter }}", &ctx).unwrap();
         assert_eq!(out, "ticket ENG-7 iter 2");
@@ -278,7 +285,13 @@ mod tests {
 
     #[test]
     fn renders_pre_payload_field() {
-        let mut ctx = super::PhaseContext::new(&admitted(), Uuid::nil(), &cfg(), CycleKind::Rule);
+        let mut ctx = super::PhaseContext::new(
+            &admitted(),
+            Uuid::nil(),
+            &cfg(),
+            CycleKind::Rule,
+            CycleTrigger::Runtime,
+        );
         ctx.set_pre(serde_json::json!({"directive":"run","note":"hello"}));
         let out = render_str("pre note: {{ pre.note }}", &ctx).unwrap();
         assert_eq!(out, "pre note: hello");
@@ -286,7 +299,13 @@ mod tests {
 
     #[test]
     fn missing_variable_expands_to_empty_string() {
-        let ctx = super::PhaseContext::new(&admitted(), Uuid::nil(), &cfg(), CycleKind::Rule);
+        let ctx = super::PhaseContext::new(
+            &admitted(),
+            Uuid::nil(),
+            &cfg(),
+            CycleKind::Rule,
+            CycleTrigger::Runtime,
+        );
         // `pre` is None at iter 0 before any pre runs; the dereference returns nil.
         let out = render_str("got [{{ pre.note }}]", &ctx).unwrap();
         assert_eq!(out, "got []");
@@ -294,7 +313,13 @@ mod tests {
 
     #[test]
     fn parse_error_returns_template_error() {
-        let ctx = super::PhaseContext::new(&admitted(), Uuid::nil(), &cfg(), CycleKind::Rule);
+        let ctx = super::PhaseContext::new(
+            &admitted(),
+            Uuid::nil(),
+            &cfg(),
+            CycleKind::Rule,
+            CycleTrigger::Runtime,
+        );
         // Unmatched `{%` confuses the parser.
         let result = render_str("{% if foo %}", &ctx);
         match result {
@@ -305,7 +330,13 @@ mod tests {
 
     #[test]
     fn renders_run_exit_code_when_set() {
-        let mut ctx = super::PhaseContext::new(&admitted(), Uuid::nil(), &cfg(), CycleKind::Rule);
+        let mut ctx = super::PhaseContext::new(
+            &admitted(),
+            Uuid::nil(),
+            &cfg(),
+            CycleKind::Rule,
+            CycleTrigger::Runtime,
+        );
         ctx.set_run(5, 12, None);
         let out = render_str(
             "exit={{ run.exit_code }} dur={{ run.duration_seconds }}",

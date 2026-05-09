@@ -1,6 +1,16 @@
-//! E2E: persistent daemon runs two cycles for the same ticket without
-//! exiting in between. Webhook A (status=todo) → cycle 1; webhook B
-//! (status=in_progress) after cycle 1 ends → cycle 2; SIGTERM → exit 0.
+//! E2E (slice 6 Task 16): admission revoke after a cycle completes is
+//! still cache-only — the worktree and session_tempdir on disk survive.
+//!
+//! Sequence:
+//!   1. Webhook A (assignee=u1, status=todo) admits ticket; short rule
+//!      cycle runs to `cycle_completed`.
+//!   2. Webhook B (assignee=stranger) → admission rejects, dispatcher
+//!      emits `webhook_skipped reason=assignee_mismatch` to the
+//!      daemon-scoped log and marks the cache for eviction.
+//!   3. Assert NO `worktree_delete_requested` and NO
+//!      `session_tempdir_deleted` are emitted, and the on-disk
+//!      `<session_root>/ENG-100/` and `<wt_root>/ENG-100/` directories
+//!      still exist. Eviction is cache-only.
 
 use std::net::{SocketAddr, TcpListener};
 use std::time::Duration;
@@ -15,7 +25,7 @@ mod support_cold_start;
 use support_cold_start::{await_daemon_ready, stub_empty_issues};
 
 #[tokio::test]
-async fn persistent_runs_two_cycles_for_same_ticket() {
+async fn admission_revoke_after_cycle_evicts_cache_only() {
     let port = TcpListener::bind("127.0.0.1:0")
         .expect("bind ephemeral webhook port")
         .local_addr()
@@ -40,6 +50,9 @@ async fn persistent_runs_two_cycles_for_same_ticket() {
 
     let ticket_id = "ENG-100";
 
+    // Short rule with `pre` directing run so the worktree gets
+    // materialized; the run phase is trivial so the cycle completes
+    // quickly.
     let workflow_path = work.path().join("WORKFLOW.toml");
     let workflow_body = r#"
 [admission]
@@ -53,20 +66,12 @@ ghq = "github.com/example/repo"
 status = "todo"
 [rule.when.labels]
 has_all = []
+[rule.pre]
+cmd = "printf '{\"directive\":\"run\"}'"
 [rule.run]
 cmd = "true"
 [rule.post]
 cmd = "printf '{\"directive\":\"end\",\"outcome\":\"todo_done\"}'"
-
-[[rule]]
-[rule.when]
-status = "in_progress"
-[rule.when.labels]
-has_all = []
-[rule.run]
-cmd = "true"
-[rule.post]
-cmd = "printf '{\"directive\":\"end\",\"outcome\":\"in_progress_done\"}'"
 "#;
     std::fs::write(&workflow_path, workflow_body).unwrap();
 
@@ -116,15 +121,13 @@ session_root = "{session_root}"
 
     let webhook_addr: SocketAddr = ([127, 0, 0, 1], port).into();
     wait_for_listener(webhook_addr).await;
-    // Slice 6: cold start runs after the listener binds. Wait for
-    // `daemon_ready` so the gate is open and the POST below is not
-    // short-circuited to 503 `cold_start_in_progress`.
     let _ = await_daemon_ready(&session_root).await;
 
     let webhook_url = format!("http://127.0.0.1:{port}/");
     let client = reqwest::Client::new();
 
-    let payload_todo = serde_json::json!({
+    // Webhook A: admits + runs the rule cycle to completion.
+    let payload_a = serde_json::json!({
         "action": "update",
         "type": "Issue",
         "data": {
@@ -136,36 +139,50 @@ session_root = "{session_root}"
     });
     let resp = client
         .post(&webhook_url)
-        .json(&payload_todo)
+        .json(&payload_a)
         .send()
         .await
         .unwrap();
     assert_eq!(resp.status().as_u16(), 202);
 
     let events_path = session_root.join(format!("{ticket_id}.events.jsonl"));
+    let daemon_events_path = session_root.join("_daemon.events.jsonl");
+
     wait_for_event_count(&events_path, "cycle_completed", 1, Duration::from_secs(15)).await;
 
-    let payload_in_progress = serde_json::json!({
+    // Webhook B: assignee mismatch → admission rejects. Dispatcher emits
+    // webhook_skipped and marks the cache entry for eviction. Worktree
+    // and session_tempdir are RETAINED.
+    let payload_b = serde_json::json!({
         "action": "update",
         "type": "Issue",
         "data": {
             "id": ticket_id,
-            "assignee": {"id": "u1"},
-            "state": {"name": "in_progress"},
+            "assignee": {"id": "stranger"},
+            "state": {"name": "todo"},
             "labels": []
         }
     });
     let resp = client
         .post(&webhook_url)
-        .json(&payload_in_progress)
+        .json(&payload_b)
         .send()
         .await
         .unwrap();
     assert_eq!(resp.status().as_u16(), 202);
 
-    wait_for_event_count(&events_path, "cycle_completed", 2, Duration::from_secs(15)).await;
+    wait_for_event_count(
+        &daemon_events_path,
+        "webhook_skipped",
+        1,
+        Duration::from_secs(10),
+    )
+    .await;
 
-    // SIGTERM and wait for clean exit.
+    // Brief grace period for any (incorrect) post-revoke disk side-effects to
+    // surface in the event log before we assert their absence.
+    sleep(Duration::from_millis(300)).await;
+
     sigterm_child(&child);
     let status = tokio::time::timeout(Duration::from_secs(15), child.wait())
         .await
@@ -176,11 +193,56 @@ session_root = "{session_root}"
         "binary should exit 0 after SIGTERM, got {status:?}"
     );
 
+    // Per-ticket events: exactly 1 cycle_completed; no eviction-driven
+    // worktree/tempdir delete events.
     let body = std::fs::read_to_string(&events_path).unwrap();
     let cycle_completed_count = body.matches("\"event\":\"cycle_completed\"").count();
     assert_eq!(
-        cycle_completed_count, 2,
-        "expected exactly 2 cycle_completed events; got:\n{body}"
+        cycle_completed_count, 1,
+        "expected exactly 1 cycle_completed; got:\n{body}"
+    );
+    assert!(
+        !body.contains("\"event\":\"worktree_delete_requested\""),
+        "per-ticket log must not contain worktree_delete_requested:\n{body}"
+    );
+    assert!(
+        !body.contains("\"event\":\"session_tempdir_deleted\""),
+        "per-ticket log must not contain session_tempdir_deleted:\n{body}"
+    );
+
+    // Daemon-scoped log: webhook_skipped with assignee_mismatch reason.
+    let daemon_body = std::fs::read_to_string(&daemon_events_path).unwrap();
+    let skip_line = daemon_body
+        .lines()
+        .find(|l| l.contains("\"event\":\"webhook_skipped\""))
+        .unwrap_or_else(|| panic!("expected webhook_skipped in daemon log:\n{daemon_body}"));
+    assert!(
+        skip_line.contains("\"reason\":\"assignee_mismatch\""),
+        "webhook_skipped must carry reason=assignee_mismatch; got: {skip_line}"
+    );
+    assert!(
+        skip_line.contains("\"ticket_id\":\"ENG-100\""),
+        "webhook_skipped must reference ENG-100; got: {skip_line}"
+    );
+    assert!(
+        !daemon_body.contains("\"event\":\"worktree_delete_requested\""),
+        "daemon log must not contain worktree_delete_requested:\n{daemon_body}"
+    );
+    assert!(
+        !daemon_body.contains("\"event\":\"session_tempdir_deleted\""),
+        "daemon log must not contain session_tempdir_deleted:\n{daemon_body}"
+    );
+
+    // Disk: worktree + session_tempdir RETAINED (eviction is cache-only).
+    let ticket_dir = session_root.join(ticket_id);
+    assert!(
+        ticket_dir.is_dir(),
+        "session_tempdir must still exist at {ticket_dir:?} after admission revoke"
+    );
+    let wt_dir = wt_root.join(ticket_id);
+    assert!(
+        wt_dir.is_dir(),
+        "worktree must still exist at {wt_dir:?} after admission revoke"
     );
 }
 

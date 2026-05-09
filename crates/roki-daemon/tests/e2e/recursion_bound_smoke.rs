@@ -15,6 +15,9 @@ use tokio::time::sleep;
 use wiremock::matchers::method;
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
+mod support_cold_start;
+use support_cold_start::{await_daemon_ready, stub_empty_issues};
+
 #[tokio::test]
 async fn recursion_bound_emits_failure_unhandled() {
     let port = TcpListener::bind("127.0.0.1:0")
@@ -30,6 +33,7 @@ async fn recursion_bound_emits_failure_unhandled() {
         })))
         .mount(&linear)
         .await;
+    stub_empty_issues(&linear).await;
 
     let work = TempDir::new().expect("workspace tempdir");
     let session_root = work.path().join("sessions");
@@ -44,8 +48,7 @@ async fn recursion_bound_emits_failure_unhandled() {
     // handler's post phase also exits non-zero → another ProcessCrash from
     // inside a Failure cycle. The recursion bound fires and emits
     // failure_unhandled marker=recursion_bound.
-    let workflow_body = format!(
-        r#"
+    let workflow_body = r#"
 [admission]
 assignee = "u1"
 
@@ -68,8 +71,7 @@ when.kind = "process_crash"
 cmd = "true"
 [on_failure.post]
 cmd = "exit 9"
-"#
-    );
+"#;
     std::fs::write(&workflow_path, workflow_body).unwrap();
 
     let roki_path = work.path().join("roki.toml");
@@ -117,6 +119,10 @@ session_root = "{session_root}"
 
     let webhook_addr: SocketAddr = ([127, 0, 0, 1], port).into();
     wait_for_listener(webhook_addr).await;
+    // Slice 6: cold start runs after the listener binds. Wait for
+    // `daemon_ready` so the gate is open and the POST below is not
+    // short-circuited to 503 `cold_start_in_progress`.
+    let _ = await_daemon_ready(&session_root).await;
 
     let webhook_url = format!("http://127.0.0.1:{port}/");
     let payload = serde_json::json!({

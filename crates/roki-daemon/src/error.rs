@@ -164,6 +164,38 @@ pub enum LinearClientError {
     ViewerResolveFailed { endpoint: String, reason: String },
 }
 
+/// Errors raised by the paginated Linear GraphQL `issues(...)` enumeration
+/// primitive used by cold start (slice 6) and, in a future slice, by
+/// polling.
+///
+/// Distinct from `LinearClientError` (which models the slice-1 one-shot
+/// `viewer { id }` resolve at startup) so the enumeration's failure modes
+/// — pagination, 429 backoff exhaustion, GraphQL-level `errors` arrays —
+/// stay typed independently. Each variant carries the offending endpoint
+/// (or, for `BackoffExhausted`, the retry count) so the `tracing::error!`
+/// line can identify the cause from the error alone.
+#[derive(Debug, Error)]
+pub enum LinearEnumerateError {
+    #[error("linear graphql request failed for endpoint {endpoint}: {source}")]
+    Http {
+        endpoint: String,
+        #[source]
+        source: reqwest::Error,
+    },
+
+    #[error("linear graphql non-success status {status} at {endpoint}")]
+    NonSuccess { endpoint: String, status: u16 },
+
+    #[error("linear graphql malformed response from {endpoint}: {reason}")]
+    Malformed { endpoint: String, reason: String },
+
+    #[error("linear graphql errors[] from {endpoint}: {message}")]
+    GraphqlError { endpoint: String, message: String },
+
+    #[error("linear graphql 429 backoff exhausted after {retries} retries")]
+    BackoffExhausted { retries: u32 },
+}
+
 /// Errors raised by the webhook listener.
 ///
 /// `BindFailed` covers Req 3.1 (listener bind on the configured port).

@@ -10,6 +10,9 @@ use tokio::time::sleep;
 use wiremock::matchers::method;
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
+mod support_cold_start;
+use support_cold_start::{await_daemon_ready_count, stub_empty_issues};
+
 #[tokio::test]
 async fn worktree_lazy_create_reuse_recreate() {
     let port = TcpListener::bind("127.0.0.1:0")
@@ -25,6 +28,7 @@ async fn worktree_lazy_create_reuse_recreate() {
         })))
         .mount(&linear)
         .await;
+    stub_empty_issues(&linear).await;
 
     let work = TempDir::new().unwrap();
     let session_root = work.path().join("sessions");
@@ -112,6 +116,9 @@ session_root = "{session_root}"
     let mut child = spawn_one();
     let webhook_addr: SocketAddr = ([127, 0, 0, 1], port).into();
     wait_for_listener(webhook_addr).await;
+    // Slice 6: cold start runs after the listener binds. Wait for the
+    // first `daemon_ready` so the gate is open before posting.
+    await_daemon_ready_count(&session_root, 1).await;
     post_webhook(port, ticket_id).await;
 
     wait_for_event_count(&events_path, "cycle_completed", 1, Duration::from_secs(15)).await;
@@ -125,6 +132,10 @@ session_root = "{session_root}"
     // ---------- Cycle 2: same ticket; worktree must be reused (still on disk) ----------
     let mut child = spawn_one();
     wait_for_listener(webhook_addr).await;
+    // Daemon events file is shared across spawns (append mode), so wait
+    // for the second `daemon_ready` to confirm the cold-start gate is
+    // open for cycle 2.
+    await_daemon_ready_count(&session_root, 2).await;
     post_webhook(port, ticket_id).await;
     // Each spawn writes to the same per-ticket events file, so wait for the
     // cumulative count to reach 2.
@@ -142,6 +153,7 @@ session_root = "{session_root}"
 
     let mut child = spawn_one();
     wait_for_listener(webhook_addr).await;
+    await_daemon_ready_count(&session_root, 3).await;
     post_webhook(port, ticket_id).await;
     wait_for_event_count(&events_path, "cycle_completed", 3, Duration::from_secs(15)).await;
     let exit = sigterm_and_wait(&mut child, Duration::from_secs(10)).await;

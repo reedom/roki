@@ -48,8 +48,7 @@ async fn fs_poison_routes_through_on_failure() {
     let ticket_id = "ENG-500";
 
     let workflow_path = work.path().join("WORKFLOW.toml");
-    let workflow_body = format!(
-        r#"
+    let workflow_body = r#"
 [admission]
 assignee = "u1"
 
@@ -68,8 +67,7 @@ cmd = "true"
 when.kind = "fs_poison"
 [on_failure.run]
 cmd = "true"
-"#
-    );
+"#;
     std::fs::write(&workflow_path, workflow_body).unwrap();
 
     let roki_path = work.path().join("roki.toml");

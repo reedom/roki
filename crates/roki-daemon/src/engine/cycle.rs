@@ -13,7 +13,7 @@ use crate::config::roki::RokiConfig;
 use crate::config::workflow::Rule;
 use crate::error::{CaptureError, PhaseInfraError};
 
-use super::context::PhaseContext;
+use super::context::{CycleTrigger, PhaseContext};
 use super::outcome::{
     CycleKind, FailureKind, FailureMeta, PhaseBody, PhaseKind, PhaseOutcome, PhaseShape,
     PostDirective, PreDirective,
@@ -90,6 +90,7 @@ fn truncate_tail(s: &str, max: usize) -> String {
 /// Session-shape phases (`PhaseShape::Session`) bypass the executor and route
 /// through a `SessionSupervisor` constructed lazily here when any pre/post
 /// resolves to session shape. Run is always command-shape per slice-2 invariant.
+#[allow(clippy::too_many_arguments)]
 pub async fn run_cycle(
     executor: &dyn PhaseExecutor,
     admitted: &AdmittedTicket,
@@ -97,10 +98,11 @@ pub async fn run_cycle(
     session_root: &Path,
     cfg: &RokiConfig,
     cycle_kind: CycleKind,
+    cycle_trigger: CycleTrigger,
     failure: Option<FailureMeta>,
 ) -> Result<CycleOutcome, PhaseInfraError> {
     let cycle_id = Uuid::new_v4();
-    let mut ctx = PhaseContext::new(admitted, cycle_id, cfg, cycle_kind);
+    let mut ctx = PhaseContext::new(admitted, cycle_id, cfg, cycle_kind, cycle_trigger);
     if let Some(meta) = failure.clone() {
         ctx.set_failure(meta);
     }
@@ -633,6 +635,7 @@ mod tests {
             tmp.path(),
             &cfg(10),
             CycleKind::Rule,
+            CycleTrigger::Runtime,
             None,
         )
         .await
@@ -686,6 +689,7 @@ mod tests {
                 tmp.path(),
                 &cfg(10),
                 CycleKind::Rule,
+                CycleTrigger::Runtime,
                 None,
             ),
         )
@@ -754,6 +758,7 @@ mod tests {
                 tmp.path(),
                 &cfg(10),
                 CycleKind::Rule,
+                CycleTrigger::Runtime,
                 None,
             ),
         )
@@ -813,6 +818,7 @@ mod tests {
             tmp.path(),
             &cfg(2),
             CycleKind::Rule,
+            CycleTrigger::Runtime,
             None,
         )
         .await
@@ -845,6 +851,7 @@ mod tests {
             tmp.path(),
             &cfg(10),
             CycleKind::Rule,
+            CycleTrigger::Runtime,
             None,
         )
         .await
@@ -881,6 +888,7 @@ mod tests {
             tmp.path(),
             &cfg(10),
             CycleKind::Rule,
+            CycleTrigger::Runtime,
             None,
         )
         .await
@@ -911,6 +919,7 @@ mod tests {
             tmp.path(),
             &cfg(10),
             CycleKind::Rule,
+            CycleTrigger::Runtime,
             None,
         )
         .await
@@ -999,6 +1008,7 @@ mod tests {
                 tmp.path(),
                 &cfg(10),
                 CycleKind::Rule,
+                CycleTrigger::Runtime,
                 None,
             ),
         )
@@ -1031,6 +1041,7 @@ mod tests {
             tmp.path(),
             &cfg(10),
             CycleKind::Rule,
+            CycleTrigger::Runtime,
             None,
         )
         .await
@@ -1093,6 +1104,7 @@ mod tests {
             bad_root,
             &cfg(10),
             CycleKind::Rule,
+            CycleTrigger::Runtime,
             None,
         )
         .await
@@ -1144,6 +1156,7 @@ mod tests {
             tmp.path(),
             &cfg(10),
             CycleKind::Rule,
+            CycleTrigger::Runtime,
             None,
         )
         .await

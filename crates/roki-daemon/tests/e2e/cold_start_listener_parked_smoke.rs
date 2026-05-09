@@ -1,6 +1,21 @@
-//! E2E: persistent daemon runs two cycles for the same ticket without
-//! exiting in between. Webhook A (status=todo) → cycle 1; webhook B
-//! (status=in_progress) after cycle 1 ends → cycle 2; SIGTERM → exit 0.
+//! E2E (slice 6): the webhook listener binds early and the
+//! `ready_gate_layer` middleware parks every request with HTTP 503 until
+//! the cold-start phase finishes and `daemon_ready` is emitted. Slice 6
+//! Task 9 added the gate; this fixture is its end-to-end witness.
+//!
+//! The shape of the test is:
+//!
+//!  1. Mount a `viewer { id }` stub that answers immediately and an
+//!     `issues(...)` enumerate stub that takes ~3 seconds. The slow
+//!     enumerate keeps cold start "in progress" long enough for a
+//!     well-timed webhook POST to land before `daemon_ready`.
+//!  2. Boot `roki run`. Wait for the listener TCP socket to accept.
+//!  3. POST a webhook *before* `daemon_ready` -> assert HTTP 503 with the
+//!     `cold_start_in_progress` body the gate layer returns.
+//!  4. Wait for `daemon_ready`.
+//!  5. POST the same webhook again -> assert HTTP 2xx (the listener
+//!     accepts and queues the dispatch).
+//!  6. SIGTERM, exit 0.
 
 use std::net::{SocketAddr, TcpListener};
 use std::time::Duration;
@@ -8,14 +23,14 @@ use std::time::Duration;
 use tempfile::TempDir;
 use tokio::process::Command;
 use tokio::time::sleep;
-use wiremock::matchers::method;
+use wiremock::matchers::{body_string_contains, method};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
 mod support_cold_start;
-use support_cold_start::{await_daemon_ready, stub_empty_issues};
+use support_cold_start::await_daemon_ready;
 
 #[tokio::test]
-async fn persistent_runs_two_cycles_for_same_ticket() {
+async fn webhook_during_cold_start_returns_503() {
     let port = TcpListener::bind("127.0.0.1:0")
         .expect("bind ephemeral webhook port")
         .local_addr()
@@ -23,13 +38,34 @@ async fn persistent_runs_two_cycles_for_same_ticket() {
         .port();
 
     let linear = MockServer::start().await;
+
+    // Default-priority viewer stub. Fast.
     Mock::given(method("POST"))
         .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
             "data": {"viewer": {"id": "u1"}}
         })))
         .mount(&linear)
         .await;
-    stub_empty_issues(&linear).await;
+
+    // High-priority slow enumerate stub. ~3s delay buys us a wide window
+    // where cold start is actively running and the gate is parked.
+    Mock::given(method("POST"))
+        .and(body_string_contains("issues("))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_delay(Duration::from_secs(3))
+                .set_body_json(serde_json::json!({
+                    "data": {
+                        "issues": {
+                            "pageInfo": { "hasNextPage": false, "endCursor": null },
+                            "nodes": []
+                        }
+                    }
+                })),
+        )
+        .with_priority(1)
+        .mount(&linear)
+        .await;
 
     let work = TempDir::new().expect("workspace tempdir");
     let session_root = work.path().join("sessions");
@@ -38,7 +74,7 @@ async fn persistent_runs_two_cycles_for_same_ticket() {
     let wt_root = work.path().join("wts");
     std::fs::create_dir_all(&wt_root).unwrap();
 
-    let ticket_id = "ENG-100";
+    let ticket_id = "ENG-700";
 
     let workflow_path = work.path().join("WORKFLOW.toml");
     let workflow_body = r#"
@@ -57,16 +93,6 @@ has_all = []
 cmd = "true"
 [rule.post]
 cmd = "printf '{\"directive\":\"end\",\"outcome\":\"todo_done\"}'"
-
-[[rule]]
-[rule.when]
-status = "in_progress"
-[rule.when.labels]
-has_all = []
-[rule.run]
-cmd = "true"
-[rule.post]
-cmd = "printf '{\"directive\":\"end\",\"outcome\":\"in_progress_done\"}'"
 "#;
     std::fs::write(&workflow_path, workflow_body).unwrap();
 
@@ -116,15 +142,15 @@ session_root = "{session_root}"
 
     let webhook_addr: SocketAddr = ([127, 0, 0, 1], port).into();
     wait_for_listener(webhook_addr).await;
-    // Slice 6: cold start runs after the listener binds. Wait for
-    // `daemon_ready` so the gate is open and the POST below is not
-    // short-circuited to 503 `cold_start_in_progress`.
-    let _ = await_daemon_ready(&session_root).await;
 
+    // Cold start is mid-flight (the slow `issues(...)` stub holds for
+    // ~3s). The listener is bound and accepting, but the gate layer
+    // intercepts before the handler. Body content is irrelevant — the
+    // gate runs before HMAC verification.
     let webhook_url = format!("http://127.0.0.1:{port}/");
     let client = reqwest::Client::new();
 
-    let payload_todo = serde_json::json!({
+    let payload = serde_json::json!({
         "action": "update",
         "type": "Issue",
         "data": {
@@ -134,38 +160,42 @@ session_root = "{session_root}"
             "labels": []
         }
     });
-    let resp = client
+
+    let early = client
         .post(&webhook_url)
-        .json(&payload_todo)
+        .json(&payload)
         .send()
         .await
-        .unwrap();
-    assert_eq!(resp.status().as_u16(), 202);
+        .expect("early webhook POST");
+    assert_eq!(
+        early.status().as_u16(),
+        503,
+        "expected 503 during cold start, got {}",
+        early.status()
+    );
+    let early_body = early.text().await.unwrap_or_default();
+    assert!(
+        early_body.contains("cold_start_in_progress"),
+        "expected 503 body to contain 'cold_start_in_progress', got: {early_body}"
+    );
 
-    let events_path = session_root.join(format!("{ticket_id}.events.jsonl"));
-    wait_for_event_count(&events_path, "cycle_completed", 1, Duration::from_secs(15)).await;
+    // Wait for the gate to open.
+    let _ = await_daemon_ready(&session_root).await;
 
-    let payload_in_progress = serde_json::json!({
-        "action": "update",
-        "type": "Issue",
-        "data": {
-            "id": ticket_id,
-            "assignee": {"id": "u1"},
-            "state": {"name": "in_progress"},
-            "labels": []
-        }
-    });
-    let resp = client
+    // Same payload, gate now open: handler accepts and replies 2xx.
+    let late = client
         .post(&webhook_url)
-        .json(&payload_in_progress)
+        .json(&payload)
         .send()
         .await
-        .unwrap();
-    assert_eq!(resp.status().as_u16(), 202);
+        .expect("late webhook POST");
+    let late_status = late.status();
+    assert!(
+        late_status.is_success(),
+        "expected 2xx after daemon_ready, got {late_status}"
+    );
 
-    wait_for_event_count(&events_path, "cycle_completed", 2, Duration::from_secs(15)).await;
-
-    // SIGTERM and wait for clean exit.
+    // Clean shutdown.
     sigterm_child(&child);
     let status = tokio::time::timeout(Duration::from_secs(15), child.wait())
         .await
@@ -174,13 +204,6 @@ session_root = "{session_root}"
     assert!(
         status.success(),
         "binary should exit 0 after SIGTERM, got {status:?}"
-    );
-
-    let body = std::fs::read_to_string(&events_path).unwrap();
-    let cycle_completed_count = body.matches("\"event\":\"cycle_completed\"").count();
-    assert_eq!(
-        cycle_completed_count, 2,
-        "expected exactly 2 cycle_completed events; got:\n{body}"
     );
 }
 
@@ -192,28 +215,6 @@ async fn wait_for_listener(addr: SocketAddr) {
         sleep(Duration::from_millis(100)).await;
     }
     panic!("webhook listener never came up at {addr}");
-}
-
-async fn wait_for_event_count(
-    path: &std::path::Path,
-    event_kind: &str,
-    expected_count: usize,
-    timeout: Duration,
-) {
-    let needle = format!("\"event\":\"{event_kind}\"");
-    let deadline = tokio::time::Instant::now() + timeout;
-    while tokio::time::Instant::now() < deadline {
-        if let Ok(body) = tokio::fs::read_to_string(path).await {
-            if body.matches(&needle).count() >= expected_count {
-                return;
-            }
-        }
-        sleep(Duration::from_millis(50)).await;
-    }
-    panic!(
-        "timed out waiting for {expected_count} occurrences of {event_kind} in {}",
-        path.display()
-    );
 }
 
 fn sigterm_child(child: &tokio::process::Child) {

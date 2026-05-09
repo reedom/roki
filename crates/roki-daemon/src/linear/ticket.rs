@@ -46,6 +46,19 @@ impl NormalizedTicket {
             body,
         }
     }
+
+    /// Cold-start constructor. Identical to `new` but the distinct name
+    /// keeps cold-start synthesized tickets greppable.
+    pub(crate) fn new_for_cold_start(
+        id: String,
+        assignee_id: Option<String>,
+        status: String,
+        labels: Vec<String>,
+        title: String,
+        body: String,
+    ) -> Self {
+        Self::new(id, assignee_id, status, labels, title, body)
+    }
 }
 
 #[cfg(test)]
