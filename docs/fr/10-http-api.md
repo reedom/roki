@@ -83,7 +83,7 @@ WebSocket / SSE push is deferred. Live tail is achieved by polling `since=<lates
 
 #### `GET /api/escalations`
 
-Escalation queue dump ([06-failure-handling §Escalation queue](06-failure-handling.md)). The queue surfaces daemon-stuck failures only — failure-handler cycles that themselves failed, cleanup-time fs errors, and daemon-internal errors with no cycle association. Per entry: ticket id (nullable), cycle id (nullable), kind, state_id (nullable), visit_n (nullable), timestamp, error text. The list is bounded by ring size.
+Escalation queue dump ([06-failure-handling §Escalation queue](06-failure-handling.md)). The queue surfaces daemon-stuck failures only — failure-handler cycles that themselves failed, cleanup-time fs errors, and daemon-internal errors with no cycle association. Per entry: ticket id (nullable), cycle id (nullable), kind, state_id (nullable), visit_n (nullable), timestamp, error text, marker. The list is bounded by `roki.toml [escalation].queue_size`.
 
 #### `POST /api/refresh`
 

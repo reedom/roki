@@ -44,7 +44,7 @@ When the daemon detects an internal failure during an in-flight cycle:
 1. The originating cycle is marked aborted; the current visit is recorded with the failure metadata (`failure.state_id`, `failure.visit_n`).
 2. The daemon evaluates `on_failure:` first-match against `failure.kind` (and optionally `failure.state_id`, exposed via `when.phase` for matcher-syntax compatibility).
 3. On match: spawn a new cycle with `cycle.kind = "failure"`. The cycle has its own UUID; the failed cycle's UUID is exposed as `{{ failure.failed_cycle_id }}` / `ROKI_FAILURE_FAILED_CYCLE_ID` so the failure handler can read the failed cycle's logs via `roki log --cycle <failed_cycle_id> --state <state_id> ...`.
-4. On no match: the daemon emits a `failure_unhandled` event in the structured event log carrying `(ticket_id, cycle_id, failure.kind, state_id, visit_n, error_text, marker)`. The escalation queue is **not** touched. Operators that want unhandled failures surfaced grep / filter `roki events --kind failure_unhandled`. No Linear write occurs.
+4. On no match: the daemon emits a `failure_unhandled` event in the structured event log carrying `(ticket_id, cycle_id, failure.kind, state_id, visit_n, error_text, marker = none)`. The escalation queue is **not** touched. Operators that want unhandled failures surfaced grep / filter `roki events --kind failure_unhandled`. No Linear write occurs.
 
 A failure cycle that itself fails does **not** chain into another failure cycle. Such recursive failures (and other daemon-stuck cases below) flow into the escalation queue as the **only** route to operator attention.
 
@@ -54,7 +54,7 @@ A failure cycle that itself fails does **not** chain into another failure cycle.
 on_failure:
   - when:
       kind: { in: [unparseable, schema_drift] }
-      phase: post                # optional; matches failure.state_id
+      phase: verdict             # optional; matches failure.state_id
     tasks:
       - id: postmortem
         run:
@@ -73,7 +73,19 @@ The daemon maintains an in-memory escalation queue surfacing **daemon-stuck fail
 
 Normal cycle failures with no `on_failure:` match surface via the `failure_unhandled` structured event ([08-observability-logs §Event catalog](08-observability-logs.md)) only — they do **not** enter the queue. This keeps the queue scoped to "daemon needs human help".
 
-Each entry carries `(ticket_id | null, cycle_id | null, failure.kind, state_id | null, visit_n | null, timestamp, error_text)`. `ticket_id`, `cycle_id`, `state_id`, and `visit_n` are null only for daemon-internal errors not associated with a specific cycle. Cycle-routed entries (failure-cycle-of-failure-cycle, cleanup-time fs error) always carry the originating cycle's `state_id`.
+Each entry carries `(ticket_id | null, cycle_id | null, failure.kind, state_id | null, visit_n | null, timestamp, error_text, marker)`. `ticket_id`, `cycle_id`, `state_id`, and `visit_n` are null only for daemon-internal errors not associated with a specific cycle. Cycle-routed entries (failure-cycle-of-failure-cycle, cleanup-time fs error) always carry the originating cycle's `state_id`.
+
+`marker` discriminates which class of daemon-stuck failure produced the entry:
+
+| Marker | Source |
+|---|---|
+| `recursion_bound` | A failure cycle itself failed (case 1) |
+| `cleanup_fs` | Cleanup-time fs error (case 2) |
+| `daemon_internal` | Daemon-internal error with no cycle association (case 3) |
+
+The same enum is exposed on the `escalation_added` structured event ([ref:log-events](../reference/log-events.md)) and on `GET /api/escalations` ([fr:10](10-http-api.md)). The complementary value `marker = none` appears only on `failure_unhandled` events (no entry is added to the queue in that case).
+
+The queue is bounded by `roki.toml [escalation].queue_size` ([ref:config](../reference/config.md)). When the cap is reached, the oldest entry is dropped to make room for the new one and a `warn`-severity log records the eviction.
 
 Consumers:
 

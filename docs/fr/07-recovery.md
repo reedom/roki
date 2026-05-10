@@ -37,7 +37,7 @@ Cache key: Linear issue identifier. Cache value:
 | Field | Source |
 |---|---|
 | `repo` | Admission match |
-| `workflow_path` | Admission match (per-repo TOML or top-level) |
+| `workflow_path` | Admission match (per-repo YAML or top-level) |
 | `status` | Last seen Linear state |
 | `labels` | Last seen Linear label set |
 | `assignee` | Last seen Linear assignee |
@@ -69,7 +69,7 @@ Other components (HTTP API, TUI, structured event log) observe cache changes via
 
 On every daemon process start (cold or post-crash), the same flow runs and is the only path that re-populates the cache:
 
-1. Load `roki.toml` and `WORKFLOW.yaml` (and any per-repo TOMLs referenced through `[[admission.repos]] workflow`). Validate. Refuse to start on validation failure.
+1. Load `roki.toml` and `WORKFLOW.yaml` (and any per-repo YAML files referenced through `[[admission.repos]] workflow`). Validate. Refuse to start on validation failure.
 2. Query Linear API for tickets satisfying the admission filter. Status narrowing matches [03-linear-admission §Polling fallback](03-linear-admission.md): the union of every ``rules`` / ``cleanup`` entry's explicit `when.status` becomes a Linear-side status filter; if any entry omits `when.status` the filter is dropped and an info log surfaces the choice at startup. Pagination is cursor-based; the daemon walks the full result set before continuing.
 3. For each ticket: resolve repo via `[[admission.repos]]` first-match. On no match, log `reason: repo_unresolvable` and skip. On match, register a cache entry with the current `(status, labels, assignee, repo, workflow_path)`.
 4. After the cache is populated, evaluate ``cleanup`` then ``rules`` first-match for each ticket. On match, start a cycle with `cycle.trigger = "cold_start"` (env var `ROKI_CYCLE_TRIGGER=cold_start`). Cycles for distinct tickets may run concurrently; same-ticket queue ordering still applies.
@@ -77,14 +77,14 @@ On every daemon process start (cold or post-crash), the same flow runs and is th
 
 For tickets the daemon was previously running cycles for (e.g. crash-restart): the in-flight cycle is gone (subprocess died with the daemon). The fresh cycle launched in step 4 takes over. Any partial files inside the session tempdir from the previous run remain on disk and are accessible via `roki log --cycle <previous-uuid> ...` for forensics; the new cycle uses a fresh cycle UUID.
 
-The trigger value `cold_start` covers both first-launch and post-crash recovery. A future `restart_recovery` trigger value can be added if operators need to distinguish "we know the daemon crashed" from "this is a fresh start"; MVP collapses both into `cold_start`.
+The trigger value `cold_start` covers both first-launch and post-crash recovery.
 
 ### Stop / shutdown
 
 On orderly shutdown ([12-daemon-lifecycle](12-daemon-lifecycle.md)):
 
 1. The daemon stops accepting webhooks and stops launching new cycles.
-2. In-flight cycles are SIGTERMed; their pre/run/post subprocesses receive SIGTERM and the configured shutdown grace window applies.
+2. In-flight cycles are SIGTERMed; their in-flight state subprocesses receive SIGTERM and the configured shutdown grace window applies.
 3. The cache is dropped (it is in-memory only; nothing is persisted).
 4. Worktrees and session tempdirs are not deleted at shutdown — recovery will reconcile them at the next start.
 
@@ -101,7 +101,7 @@ On orderly shutdown ([12-daemon-lifecycle](12-daemon-lifecycle.md)):
 ## Boundaries
 
 - **No daemon-side execution-stage enum**: execution stages live inside operator-authored cycles, not as daemon-tracked states.
-- **No `Inactive.reason` discriminator**: stop-condition distinctions are operator-authored `outcome` strings on terminal post directives.
+- **No `Inactive.reason` discriminator**: stop-condition distinctions are operator-authored `outcome` strings on the terminal-targeting state's sentinel directive.
 - **No daemon-driven Linear feedback for skipped tickets**: silent eviction stays silent. Operators that want a Linear comment on a skip (e.g. "this ticket was not assigned to a configured operator") cannot rely on the daemon — the daemon does not have any Linear write path.
 - **No mid-cycle preemption of an in-flight cycle by tracker-terminal observations**: a Linear status change to `Done` or `Cancelled` updates the cache; the in-flight cycle runs to natural end; only after it terminates does the cleanup/rule re-evaluation happen. Operators that want forced termination author a ``cleanup`` entry whose state issues whatever termination signal they want.
 - **No mirroring of Linear-side workflow states** is done. Linear states are looked up via the tracker each time.

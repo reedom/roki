@@ -39,15 +39,25 @@ Both subcommands run the same long-running daemon. The process exits only on sig
 - **Normal startup**: `roki run --config ./roki.toml` (or `roki cleanup --config ./roki.toml`) loads `roki.toml`, loads `WORKFLOW.yaml` (and any per-repo YAML files referenced through `[[admission.repos]] workflow`), validates both, brings up the Linear adapter, the diff cache, the cycle engine, and the Linear webhook receiver bound to `[linear.webhook]`, optionally brings up the observability HTTP API bound to `[api]` (only when `[api].port` is set; see [10-http-api §Server gating and bind](10-http-api.md)), runs the cold-start enumeration ([07-recovery §Cold start](07-recovery.md)), then logs that it is ready.
 - **Configuration error**: configuration file not found, schema validation failure for `roki.toml`, or schema validation failure for the initial `WORKFLOW.yaml` load → non-zero exit, with the offending field name in the structured log.
 - **Missing dependency CLI**: if `wt` / `ghq` are not on `PATH` → refuse to start, with the missing binary name and a remediation hint in the structured log. The cli line configured in `roki.toml [default.ai]` is **not** validated at startup (the daemon does not parse it); its first failure surfaces as a `process_crash` failure on the first state that uses it.
-- **Normal shutdown**: on SIGINT / SIGTERM, stop accepting new work, signal every active cycle's in-flight state subprocess to terminate within the configured shutdown window, then exit cleanly. In-flight worktrees and session tempdirs are not deleted at shutdown — the next cold start reconciles them.
+- **Normal shutdown**: on SIGINT / SIGTERM, stop accepting new work, signal every active cycle's in-flight state subprocess to terminate within the configured shutdown window (`roki.toml [engine].shutdown_window_seconds`), then exit cleanly. In-flight worktrees and session tempdirs are not deleted at shutdown — the next cold start reconciles them. (See [§Normal shutdown](#normal-shutdown) below for the full sequence.)
 - **Help**: `roki --help` and the `--help` of each subcommand (`roki run`, `roki cleanup`, `roki log`, `roki events`, `roki repo`) list every CLI flag and the configuration key each one corresponds to.
+
+### Normal shutdown
+
+On SIGINT / SIGTERM the daemon:
+
+1. Stops accepting webhooks and stops launching new cycles.
+2. Sends SIGTERM to every in-flight state subprocess. The shutdown grace window from `roki.toml [engine].shutdown_window_seconds` applies uniformly to every state regardless of cli line, since every state is command-shape ([04-state-execution §Subprocess shape](04-state-execution.md)).
+3. Waits up to that window for each subprocess to exit. Subprocesses still alive at the end of the window are SIGKILLed and the daemon emits `shutdown_window_exceeded` ([ref:log-events](../reference/log-events.md)) naming each offending subprocess.
+4. Drops the in-memory diff cache (nothing is persisted).
+5. Exits with code 0. Worktrees and session tempdirs are **not** deleted at shutdown — the next cold start reconciles them.
 
 ### Cycle integration
 
 The cycle engine ([01-engine-model](01-engine-model.md)) decides when to spawn cycles; subprocess supervision is owned by [04-state-execution](04-state-execution.md). Daemon responsibilities at the lifecycle layer:
 
 - **Launch a cycle**: the engine signals "drive state machine for ticket X under matched entry Y". The daemon prepares the per-cycle capture root, the engine drives state visits, and each visit invokes the launcher. Cycle kind (`rule` / `cleanup` / `failure`) and trigger (`runtime` / `cold_start`) are propagated through environment variables.
-- **Cycle completion**: when a cycle reaches a terminal, the daemon writes the final structured event (`cycle_completed` with `terminal_id` + `outcome`) and, in the cleanup case, deletes the worktree + session tempdir. On cycle failure, the runtime evaluates `on_failure:` first-match: a match spawns a `cycle.kind = "failure"` handler cycle (recursion bounded to one level); no match emits `failure_unhandled` with `marker = none`; a handler cycle that itself fails is added to the escalation queue with `marker = recursion_bound`. See [06-failure-handling](06-failure-handling.md). The daemon stays running across all of these outcomes.
+- **Cycle completion**: when a cycle reaches a terminal, the daemon writes the final structured event (`cycle_completed` with `terminal_id` + `outcome`) and, in the cleanup case, deletes the worktree + session tempdir. On cycle failure, the runtime evaluates `on_failure:` first-match: a match spawns a `cycle.kind = "failure"` handler cycle (recursion bounded to one level); no match emits `failure_unhandled` with `marker = none`; a handler cycle that itself fails is added to the escalation queue with `marker = recursion_bound`. Cleanup-time fs errors enter the queue with `marker = cleanup_fs`; daemon-internal errors with no cycle association use `marker = daemon_internal` ([06-failure-handling §Escalation queue](06-failure-handling.md)). The daemon stays running across all of these outcomes.
 - **Forced termination on shutdown**: SIGINT / SIGTERM signals every in-flight state subprocess. The shutdown window applies uniformly to every state regardless of cli line, since every state is command-shape ([04-state-execution §Subprocess shape](04-state-execution.md)).
 - **Restart non-persistence**: nothing about the cycle engine or the diff cache is persisted across daemon restarts. The next cold start re-enumerates Linear and reconciles disk residue.
 

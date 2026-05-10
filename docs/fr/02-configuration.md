@@ -33,7 +33,7 @@ Operators specify the path with `--config <path>` ([12-daemon-lifecycle](12-daem
 - **Linear webhook receiver** (`[linear.webhook]`, required): bind address, port, and HMAC secret for the **internet-facing** webhook ingress. Required because Linear strongly recommends webhook ingestion over polling.
 - **Observability HTTP API** (`[api]`, optional): bind address and port for the **read-only** observability surface consumed by `roki-tui` and `roki events`. Default loopback. If `[api].port` is unset the server does not start.
 - **AI default CLI**: the cli line and stall window the daemon uses when a state declares `uses:` with no per-file `cli:` override (or runs an inline `run:` that defers to the default).
-- **Engine knobs**: per-cycle iteration cap and (future) concurrency cap.
+- **Engine knobs**: per-cycle iteration cap.
 - **Paths**: where to load WORKFLOW.yaml from, where to put session tempdirs.
 - **Log destination**: the structured event log goes to stdout, a file, or both, with operator-set rotation policy.
 
@@ -108,8 +108,8 @@ rules:
       status: Todo
       labels: { has_all: [roki:ready] }
     tasks:
-      - id: judge
-        uses: workflow/01-judge.md
+      - id: analyze
+        uses: workflow/01-analyze.md
       - id: impl
         uses: workflow/01-impl.md
       - id: verdict

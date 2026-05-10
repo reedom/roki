@@ -17,8 +17,8 @@ refs:
 Schema for the three configuration files:
 
 - `roki.toml` — per workspace, restart-only ([fr:02 §`roki.toml`](../fr/02-configuration.md)).
-- `WORKFLOW.yaml` — per workspace, restart-only. Admission filter + rules + cleanup + on_failure state machines.
-- `workflow/*.md` — per workspace, restart-only. State body (frontmatter + Liquid template).
+- `WORKFLOW.yaml` — per workspace, hot-reloadable. Admission filter + rules + cleanup + on_failure state machines.
+- `workflow/*.md` — per workspace, hot-reloadable. State body (frontmatter + Liquid template).
 
 Working samples in [`docs/examples/`](../examples/).
 
@@ -33,11 +33,11 @@ Per workspace, specified with `--config <path>` ([cli.md](cli.md)). Not hot-relo
 | `[linear.webhook].secret` | yes | string | — | Refuses startup if missing | [fr:03 §Webhook intake](../fr/03-linear-admission.md) |
 | `[linear.webhook].bind` | yes | bind addr | — | Refuses startup on bind failure. Internet-facing — Linear cloud must reach it | [fr:03 §Webhook intake](../fr/03-linear-admission.md) |
 | `[linear.webhook].port` | yes | port | — | Refuses startup on bind failure | [fr:03 §Webhook intake](../fr/03-linear-admission.md) |
-| `[api].port` | no | port | — (unset → API disabled) | When unset, the observability HTTP server does not start. When set, refuses startup on bind failure | [fr:10 §Server gating](../fr/10-http-api.md) |
-| `[api].bind` | no | bind addr | `127.0.0.1` | Non-loopback emits a warn log noting the absence of authentication | [fr:10 §Server gating](../fr/10-http-api.md) |
+| `[api].port` | no | port | — (unset → API disabled) | When unset, the observability HTTP server does not start. When set, refuses startup on bind failure | [fr:10 §Server gating and bind](../fr/10-http-api.md) |
+| `[api].bind` | no | bind addr | `127.0.0.1` | Non-loopback emits a warn log noting the absence of authentication | [fr:10 §Server gating and bind](../fr/10-http-api.md) |
 | `[default.ai].cli` | no | string (cli line) | — (no default) | Operator-authored; daemon does not parse the cli line. Liquid-rendered at state launch. Not validated at startup; first failure surfaces as `process_crash` on first state that uses it | [fr:04 §Subprocess shape](../fr/04-state-execution.md) |
 | `[default.ai].stall_seconds` | no | int | `300` | min `1` | [fr:04 §Stall detection](../fr/04-state-execution.md) |
-| `[engine].max_iterations` | no | int | `10` | min `1` | [fr:01 §Iteration cap](../fr/01-engine-model.md) |
+| `[engine].max_iterations` | no | int | `10` | min `1` | [fr:01 §Recursion bound](../fr/01-engine-model.md) |
 | `[engine].shutdown_window_seconds` | no | int | `30` | min `1`, max `600` | [fr:12 §Normal shutdown](../fr/12-daemon-lifecycle.md) |
 | `[paths].workflow` | yes | path | `./WORKFLOW.yaml` | Refuses startup if file missing / unreadable | [fr:02](../fr/02-configuration.md) |
 | `[paths].session_root` | yes | path | — | Refuses startup if parent directory missing or not writable | [fr:05](../fr/05-worktree-and-session.md) |
@@ -246,7 +246,7 @@ Body is a Liquid template, rendered against the variables in [fr:01 §Inter-stat
 
 ## Hot reload
 
-`WORKFLOW.yaml` + `workflow/*.md` changes are restart-only in slice 8. A future slice introduces hot reload; that contract documents itself when it lands.
+`WORKFLOW.yaml` + `workflow/*.md` changes are picked up without restart ([fr:02 §Hot reload and validation](../fr/02-configuration.md)). Validation passes apply the new policy from the next webhook; in-flight cycles keep their pre-reload policy until they terminate. Validation failures retain the previous policy and log the offending entry; the daemon does not stop. A `workflow/*.md` change is treated identically to a `WORKFLOW.yaml` change.
 
 `roki.toml` is restart-only.
 

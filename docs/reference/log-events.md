@@ -44,13 +44,13 @@ Attached to every event via tracing spans (when in scope).
 | `failure_unhandled` | A cycle failure with no `on_failure:` match (`marker = none`) | `(ticket.id, cycle.id, cycle.kind, failure.kind, state_id, visit_n, error_text, marker)`. Daemon stays alive; the ticket task drops the cycle and waits for the next admission. Recursive failure-cycle failures and cleanup-time fs errors enter the escalation queue instead — see `escalation_added` ([fr:06 §Failure-handler cycle](../fr/06-failure-handling.md)) |
 | `cycle_completed` | Cycle ends at a terminal | `cycle.kind`, `terminal_id`, `outcome` (terminal-declared or sentinel-overridden), iter count (total state visits), duration |
 | `cycle_aborted` | Cycle aborted (failure or admission lost mid-cycle) | `cycle.kind`, `failure.kind` (if applicable), iter count |
-| `escalation_added` | Escalation queue entry added | Daemon-stuck failure: failure-handler cycle that itself failed, cleanup-time fs error, or daemon-internal error with no cycle association. Carries `(ticket_id?, cycle_id?, failure.kind, state_id?, visit_n?, error_text)`. Cycle-less entries omit ticket / cycle / state context ([fr:06 §Escalation queue](../fr/06-failure-handling.md)) |
+| `escalation_added` | Escalation queue entry added | Daemon-stuck failure: failure-handler cycle that itself failed, cleanup-time fs error, or daemon-internal error with no cycle association. Carries `(ticket_id?, cycle_id?, failure.kind, state_id?, visit_n?, error_text, marker)`. `marker` ∈ `recursion_bound` / `cleanup_fs` / `daemon_internal`. Cycle-less entries omit ticket / cycle / state context ([fr:06 §Escalation queue](../fr/06-failure-handling.md)) |
 
 ## Worktree / session lifecycle
 
 | Event | When | Carries |
 |---|---|---|
-| `worktree_created` | Worktree materialized when a state's sentinel directive resolves to `run` | `repo`, branch name, worktree path |
+| `worktree_created` | Worktree materialized lazily on first state subprocess launch in the cycle | `repo`, branch name, worktree path |
 | `worktree_deleted` | Worktree removed (cleanup-cycle completion / orphan reconcile). Admission-revoke does not delete worktrees | `repo`, branch name, `reason` ∈ `cleanup` / `orphan` |
 | `session_tempdir_created` | Session tempdir created at admission | `ticket.id`, path |
 | `session_tempdir_deleted` | Session tempdir removed | `ticket.id`, path, `reason` ∈ `cleanup` / `orphan` |

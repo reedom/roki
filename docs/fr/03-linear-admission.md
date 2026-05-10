@@ -47,7 +47,7 @@ The webhook receiver is mandatory (`[linear.webhook]` is required in `roki.toml`
 
 Both share the assignee filter and the same status narrowing rules:
 
-- If **every** ``rules`` and ``cleanup`` entry across WORKFLOW.yaml plus every per-repo TOML declares an explicit `when.status`, the union of those values becomes a Linear-side status filter (small, bounded query).
+- If **every** ``rules`` and ``cleanup`` entry across WORKFLOW.yaml plus every per-repo YAML declares an explicit `when.status`, the union of those values becomes a Linear-side status filter (small, bounded query).
 - If **any** entry omits `when.status` (i.e. matches any state), the status filter is dropped and the query enumerates every ticket the assignee owns. The daemon emits an info log at startup naming the entry that triggered the drop, so operators concerned about Linear API budget can add an explicit `when.status` and shrink the query.
 
 Cadence is governed by `roki.toml [linear].polling.cadence_seconds` (canonical default and validation rules in [`docs/reference/config.md`](../reference/config.md)). The cap is enforced even when a refresh nudge arrives (see below). Outage-driven polling stops automatically once webhook delivery resumes (Linear delivers a fresh webhook the daemon successfully verifies); nudge-driven polls are one-shot and do not enter the cadence loop.
