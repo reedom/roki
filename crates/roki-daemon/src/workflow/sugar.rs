@@ -22,8 +22,8 @@ use super::canonical::{
 };
 use super::parse::{
     RawAdmission, RawDirectiveTarget, RawLabelsMatcher, RawRepoEntry, RawRuleBody, RawRuleEntry,
-    RawScalarMatcher, RawStateEntry, RawTaskEntry, RawTerminalEntry, RawTextMatcher,
-    RawWhenClause, RawWorkflow,
+    RawScalarMatcher, RawStateEntry, RawTaskEntry, RawTerminalEntry, RawTextMatcher, RawWhenClause,
+    RawWorkflow,
 };
 use super::validate;
 
@@ -46,7 +46,9 @@ impl Default for ExpandConfig {
 pub enum ExpandError {
     #[error("rule[{rule_idx}] sugar entry has empty tasks list")]
     EmptyTasks { rule_idx: usize },
-    #[error("rule[{rule_idx}] entry has no body content (no tasks, no states/terminals, no immediate-delete shorthand applicable)")]
+    #[error(
+        "rule[{rule_idx}] entry has no body content (no tasks, no states/terminals, no immediate-delete shorthand applicable)"
+    )]
     NoBody { rule_idx: usize },
     #[error("rule[{rule_idx}] invalid duration '{value}'")]
     InvalidDuration { rule_idx: usize, value: String },
@@ -83,9 +85,7 @@ fn expand_rule_section(
         .map(|(rule_idx, r)| {
             let when = r.when.map(convert_when);
             let state_machine = match r.body {
-                RawRuleBody::Empty {} if cleanup_allows_empty => {
-                    immediate_delete_state_machine()
-                }
+                RawRuleBody::Empty {} if cleanup_allows_empty => immediate_delete_state_machine(),
                 RawRuleBody::Empty {} => return Err(ExpandError::NoBody { rule_idx }),
                 other => expand_body(other, rule_idx, cfg)?,
             };
@@ -181,7 +181,11 @@ fn task_to_state(
         Some(id) => EdgeTarget::State(id),
         None => EdgeTarget::Terminal("__success__".to_string()),
     };
-    let on_fail = match task.on_fail.clone().or_else(|| rule_on_fail.map(String::from)) {
+    let on_fail = match task
+        .on_fail
+        .clone()
+        .or_else(|| rule_on_fail.map(String::from))
+    {
         Some(id) => EdgeTarget::State(id),
         None => EdgeTarget::Terminal("__failure__".to_string()),
     };
@@ -267,9 +271,7 @@ fn body_from_run_uses(run: Option<&str>, uses: Option<&std::path::Path>) -> Stat
             path: path.to_path_buf(),
         },
         // Both or neither — validation will flag. Stub to keep struct buildable.
-        _ => StateBody::Run {
-            cmd: String::new(),
-        },
+        _ => StateBody::Run { cmd: String::new() },
     }
 }
 
@@ -379,7 +381,12 @@ fn convert_text_matcher(raw: RawTextMatcher) -> TextMatcher {
 
 fn apply_pass1_implicit_terminals(sm: &mut StateMachine) {
     let referenced = collect_referenced_targets(sm);
-    for builtin in ["__success__", "__failure__", "__no_action__", "__cancelled__"] {
+    for builtin in [
+        "__success__",
+        "__failure__",
+        "__no_action__",
+        "__cancelled__",
+    ] {
         if referenced.contains(builtin) && !sm.terminals.contains_key(builtin) {
             sm.terminals.insert(
                 builtin.to_string(),
@@ -437,12 +444,9 @@ fn apply_pass5_max_visits(sm: &mut StateMachine, default_cap: u32) {
             inject_if_unset(sm, id, default_cap);
         } else {
             // Non-trivial SCC: pick lex-smallest id, inject if no member declares.
-            let any_declared = scc.iter().any(|id| {
-                sm.states
-                    .get(id)
-                    .map(|s| s.max_visits > 1)
-                    .unwrap_or(false)
-            });
+            let any_declared = scc
+                .iter()
+                .any(|id| sm.states.get(id).map(|s| s.max_visits > 1).unwrap_or(false));
             if any_declared {
                 continue;
             }
@@ -477,8 +481,12 @@ fn inject_if_unset(sm: &mut StateMachine, id: &str, default_cap: u32) {
 /// sinks). Returns SCCs sorted by reverse postorder.
 pub(crate) fn tarjan_scc(sm: &StateMachine) -> Vec<Vec<StateId>> {
     let ids: Vec<StateId> = sm.states.keys().cloned().collect();
-    let id_to_idx: BTreeMap<StateId, usize> =
-        ids.iter().cloned().enumerate().map(|(i, id)| (id, i)).collect();
+    let id_to_idx: BTreeMap<StateId, usize> = ids
+        .iter()
+        .cloned()
+        .enumerate()
+        .map(|(i, id)| (id, i))
+        .collect();
 
     let mut state = TarjanState {
         index: 0,
@@ -615,8 +623,14 @@ rules:
         assert_eq!(sm.start, "impl");
         assert_eq!(sm.states.len(), 1);
         let impl_state = &sm.states["impl"];
-        assert_eq!(impl_state.on_done, EdgeTarget::Terminal("__success__".into()));
-        assert_eq!(impl_state.on_fail, EdgeTarget::Terminal("__failure__".into()));
+        assert_eq!(
+            impl_state.on_done,
+            EdgeTarget::Terminal("__success__".into())
+        );
+        assert_eq!(
+            impl_state.on_fail,
+            EdgeTarget::Terminal("__failure__".into())
+        );
         assert!(sm.terminals.contains_key("__success__"));
         assert!(sm.terminals.contains_key("__failure__"));
     }
@@ -634,7 +648,10 @@ rules:
         let sm = &expand_yaml(yaml).unwrap().rules[0].state_machine;
         assert_eq!(sm.start, "judge");
         assert_eq!(sm.states["judge"].on_done, EdgeTarget::State("impl".into()));
-        assert_eq!(sm.states["impl"].on_done, EdgeTarget::State("verdict".into()));
+        assert_eq!(
+            sm.states["impl"].on_done,
+            EdgeTarget::State("verdict".into())
+        );
         assert_eq!(
             sm.states["verdict"].on_done,
             EdgeTarget::Terminal("__success__".into())

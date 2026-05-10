@@ -38,7 +38,9 @@ pub enum ValidationError {
     },
     #[error("rule[{rule_idx}] start references invalid state '{start}'")]
     InvalidStartReference { rule_idx: usize, start: StateId },
-    #[error("rule[{rule_idx}] state id '{state_id}' is not env-var-safe (must match [A-Za-z][A-Za-z0-9_]*)")]
+    #[error(
+        "rule[{rule_idx}] state id '{state_id}' is not env-var-safe (must match [A-Za-z][A-Za-z0-9_]*)"
+    )]
     StateIdNotEnvSafe { rule_idx: usize, state_id: StateId },
 }
 
@@ -185,24 +187,17 @@ fn validate_terminal(
 /// least one member has `max_visits > 1`. Pass 5 should already have
 /// auto-injected the default cap, so this surfaces only genuine bugs in
 /// the expansion pipeline or ill-formed inputs that bypass it.
-fn validate_cycles_bounded(
-    sm: &StateMachine,
-    rule_idx: usize,
-    errors: &mut Vec<ValidationError>,
-) {
+fn validate_cycles_bounded(sm: &StateMachine, rule_idx: usize, errors: &mut Vec<ValidationError>) {
     let sccs = sugar::tarjan_scc(sm);
     for scc in sccs {
-        let on_cycle = scc.len() >= 2
-            || (scc.len() == 1 && sugar::state_has_self_edge(sm, &scc[0]));
+        let on_cycle =
+            scc.len() >= 2 || (scc.len() == 1 && sugar::state_has_self_edge(sm, &scc[0]));
         if !on_cycle {
             continue;
         }
-        let any_bound = scc.iter().any(|id| {
-            sm.states
-                .get(id)
-                .map(|s| s.max_visits > 1)
-                .unwrap_or(false)
-        });
+        let any_bound = scc
+            .iter()
+            .any(|id| sm.states.get(id).map(|s| s.max_visits > 1).unwrap_or(false));
         if !any_bound {
             let mut sorted = scc.clone();
             sorted.sort();
@@ -264,15 +259,17 @@ mod tests {
     fn reserved_prefix_flagged() {
         let mut sm = h::state_machine();
         sm.start = "__internal".into();
-        sm.states.insert("__internal".into(), h::state("__internal", "x"));
+        sm.states
+            .insert("__internal".into(), h::state("__internal", "x"));
         sm.terminals
             .insert("__success__".into(), h::terminal("__success__", "success"));
         sm.terminals
             .insert("__failure__".into(), h::terminal("__failure__", "failure"));
         let errs = run(&one_rule(sm)).unwrap_err();
-        assert!(errs
-            .iter()
-            .any(|e| matches!(e, ValidationError::ReservedPrefixState { .. })));
+        assert!(
+            errs.iter()
+                .any(|e| matches!(e, ValidationError::ReservedPrefixState { .. }))
+        );
     }
 
     #[test]
@@ -285,9 +282,10 @@ mod tests {
         sm.terminals
             .insert("__failure__".into(), h::terminal("__failure__", "failure"));
         let errs = run(&one_rule(sm)).unwrap_err();
-        assert!(errs
-            .iter()
-            .any(|e| matches!(e, ValidationError::InvalidStartReference { .. })));
+        assert!(
+            errs.iter()
+                .any(|e| matches!(e, ValidationError::InvalidStartReference { .. }))
+        );
     }
 
     #[test]
@@ -305,9 +303,10 @@ mod tests {
         sm.terminals
             .insert("__failure__".into(), h::terminal("__failure__", "failure"));
         let errs = run(&one_rule(sm)).unwrap_err();
-        assert!(errs
-            .iter()
-            .any(|e| matches!(e, ValidationError::EmptyTerminalOutcome { .. })));
+        assert!(
+            errs.iter()
+                .any(|e| matches!(e, ValidationError::EmptyTerminalOutcome { .. }))
+        );
     }
 
     #[test]
@@ -322,9 +321,10 @@ mod tests {
         sm.terminals
             .insert("__failure__".into(), h::terminal("__failure__", "failure"));
         let errs = run(&one_rule(sm)).unwrap_err();
-        assert!(errs
-            .iter()
-            .any(|e| matches!(e, ValidationError::OrphanBody { .. })));
+        assert!(
+            errs.iter()
+                .any(|e| matches!(e, ValidationError::OrphanBody { .. }))
+        );
     }
 
     #[test]
@@ -338,9 +338,10 @@ mod tests {
         sm.terminals
             .insert("__failure__".into(), h::terminal("__failure__", "failure"));
         let errs = run(&one_rule(sm)).unwrap_err();
-        assert!(errs
-            .iter()
-            .any(|e| matches!(e, ValidationError::UnboundedCycle { .. })));
+        assert!(
+            errs.iter()
+                .any(|e| matches!(e, ValidationError::UnboundedCycle { .. }))
+        );
     }
 
     #[test]
@@ -360,31 +361,36 @@ mod tests {
     fn state_id_not_env_safe_flagged() {
         let mut sm = h::state_machine();
         sm.start = "9_starts_with_digit".into();
-        sm.states
-            .insert("9_starts_with_digit".into(), h::state("9_starts_with_digit", "x"));
+        sm.states.insert(
+            "9_starts_with_digit".into(),
+            h::state("9_starts_with_digit", "x"),
+        );
         sm.terminals
             .insert("__success__".into(), h::terminal("__success__", "success"));
         sm.terminals
             .insert("__failure__".into(), h::terminal("__failure__", "failure"));
         let errs = run(&one_rule(sm)).unwrap_err();
-        assert!(errs
-            .iter()
-            .any(|e| matches!(e, ValidationError::StateIdNotEnvSafe { .. })));
+        assert!(
+            errs.iter()
+                .any(|e| matches!(e, ValidationError::StateIdNotEnvSafe { .. }))
+        );
     }
 
     #[test]
     fn state_id_dashes_flagged() {
         let mut sm = h::state_machine();
         sm.start = "with-dash".into();
-        sm.states.insert("with-dash".into(), h::state("with-dash", "x"));
+        sm.states
+            .insert("with-dash".into(), h::state("with-dash", "x"));
         sm.terminals
             .insert("__success__".into(), h::terminal("__success__", "success"));
         sm.terminals
             .insert("__failure__".into(), h::terminal("__failure__", "failure"));
         let errs = run(&one_rule(sm)).unwrap_err();
-        assert!(errs
-            .iter()
-            .any(|e| matches!(e, ValidationError::StateIdNotEnvSafe { .. })));
+        assert!(
+            errs.iter()
+                .any(|e| matches!(e, ValidationError::StateIdNotEnvSafe { .. }))
+        );
     }
 
     #[test]

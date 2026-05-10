@@ -86,8 +86,7 @@ pub struct CycleContext {
 
 impl CycleContext {
     pub fn record_capture(&mut self, state_id: &str, captures: TaskCaptures) {
-        self.task_captures
-            .insert(state_id.to_string(), captures);
+        self.task_captures.insert(state_id.to_string(), captures);
     }
 
     pub fn bump_visit(&mut self, state_id: &str) -> u32 {
@@ -241,7 +240,13 @@ mod tests {
         let mut ctx = CycleContext::default();
         ctx.bump_visit("impl");
         let got = runner.run_state(&state, &ctx).await;
-        assert!(matches!(got, StateOutcome::Failure { kind: FailureKind::ProcessCrash, .. }));
+        assert!(matches!(
+            got,
+            StateOutcome::Failure {
+                kind: FailureKind::ProcessCrash,
+                ..
+            }
+        ));
     }
 
     #[test]

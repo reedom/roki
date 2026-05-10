@@ -194,10 +194,7 @@ mod tests {
     fn allocate_path_creates_directives_dir() {
         let dir = TempDir::new().unwrap();
         let p = allocate_path(dir.path(), "judge", 1).unwrap();
-        assert_eq!(
-            p,
-            dir.path().join("directives").join("judge.1.json")
-        );
+        assert_eq!(p, dir.path().join("directives").join("judge.1.json"));
         assert!(dir.path().join("directives").is_dir());
     }
 }
