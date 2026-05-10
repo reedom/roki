@@ -44,21 +44,13 @@ bind = "127.0.0.1"   # default 127.0.0.1; non-loopback emits a warn log noting a
 port = 8080          # omit to disable the API
 
 # ============================================================
-# [default.ai.session] — Default session-shape cli (required)
+# [default.ai] — Default cli for state subprocesses (optional)
 # ============================================================
-# Used when a workflow phase declares `session = "session"` (or inline `prompt`)
-# without a per-file `cli` override. Long-lived AI subprocess reused across all
-# pre / post invocations of one cycle. The daemon does not parse the cli line.
-[default.ai.session]
-cli = "claude --input-format stream-json --output-format stream-json --model claude-opus-4-7"
-stall_seconds = 600   # default 600
-
-# ============================================================
-# [default.ai.command] — Default command-shape cli (required)
-# ============================================================
-# Used when a workflow phase declares `session = "command"` (or inline `cmd`)
-# without a per-file `cli` override. Fresh subprocess per invocation.
-[default.ai.command]
+# Used when a state's `uses:` file frontmatter declares no `cli:` override (or
+# omits the key). Every state visit spawns a fresh subprocess; there is no
+# session-shape. The daemon does not parse the cli line — its first failure
+# surfaces as `process_crash` on the first state that uses it.
+[default.ai]
 cli = "claude -p --output-format stream-json --max-turns 100"
 stall_seconds = 300   # default 300
 
@@ -80,8 +72,8 @@ max_iterations = 10   # default 10
 # WORKFLOW.yaml location. Restart-only in slice 8.
 workflow = "./WORKFLOW.yaml"
 
-# Per-ticket session tempdir + per-iter capture root. Used by the daemon for
-# log capture only; never used as a phase subprocess cwd.
+# Per-ticket session tempdir + per-visit capture root. Used by the daemon for
+# log capture only; never used as a state subprocess cwd.
 session_root = "~/.cache/roki/sessions"
 
 # Worktree paths are owned by worktrunk (see ~/.config/worktrunk/config.toml).

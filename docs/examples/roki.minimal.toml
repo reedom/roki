@@ -10,10 +10,7 @@ secret = { env = "LINEAR_WEBHOOK_SECRET" }
 bind = "0.0.0.0"
 port = 9090
 
-[default.ai.session]
-cli = "claude --input-format stream-json --output-format stream-json --model claude-opus-4-7"
-
-[default.ai.command]
+[default.ai]
 cli = "claude -p --output-format stream-json --max-turns 100"
 
 [paths]

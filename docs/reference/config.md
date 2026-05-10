@@ -35,10 +35,8 @@ Per workspace, specified with `--config <path>` ([cli.md](cli.md)). Not hot-relo
 | `[linear.webhook].port` | yes | port | — | Refuses startup on bind failure | [fr:03 §Webhook intake](../fr/03-linear-admission.md) |
 | `[api].port` | no | port | — (unset → API disabled) | When unset, the observability HTTP server does not start. When set, refuses startup on bind failure | [fr:10 §Server gating](../fr/10-http-api.md) |
 | `[api].bind` | no | bind addr | `127.0.0.1` | Non-loopback emits a warn log noting the absence of authentication | [fr:10 §Server gating](../fr/10-http-api.md) |
-| `[default.ai.session].cli` | yes | string (cli line) | — | Refuses startup if missing. Operator-authored; daemon does not parse the cli line. Liquid-rendered at phase launch | [fr:04 §Subprocess shapes](../fr/04-state-execution.md) |
-| `[default.ai.session].stall_seconds` | no | int | `600` | min `1` | [fr:04 §Stall detection](../fr/04-state-execution.md) |
-| `[default.ai.command].cli` | yes | string (cli line) | — | Refuses startup if missing | [fr:04 §Subprocess shapes](../fr/04-state-execution.md) |
-| `[default.ai.command].stall_seconds` | no | int | `300` | min `1` | [fr:04 §Stall detection](../fr/04-state-execution.md) |
+| `[default.ai].cli` | no | string (cli line) | — (no default) | Operator-authored; daemon does not parse the cli line. Liquid-rendered at state launch. Not validated at startup; first failure surfaces as `process_crash` on first state that uses it | [fr:04 §Subprocess shape](../fr/04-state-execution.md) |
+| `[default.ai].stall_seconds` | no | int | `300` | min `1` | [fr:04 §Stall detection](../fr/04-state-execution.md) |
 | `[engine].max_iterations` | no | int | `10` | min `1` | [fr:01 §Iteration cap](../fr/01-engine-model.md) |
 | `[engine].shutdown_window_seconds` | no | int | `30` | min `1`, max `600` | [fr:12 §Normal shutdown](../fr/12-daemon-lifecycle.md) |
 | `[paths].workflow` | yes | path | `./WORKFLOW.yaml` | Refuses startup if file missing / unreadable | [fr:02](../fr/02-configuration.md) |
@@ -260,8 +258,10 @@ The following pre-pivot keys are removed and **explicitly refused** by the loade
 |---|---|---|
 | `[server].bind` / `[server].port` | `roki.toml` | Single `[server]` block split into `[linear.webhook]` (internet-facing) and `[api]` (loopback observability) |
 | `[linear].webhook_secret` | `roki.toml` | Moved into `[linear.webhook].secret` alongside the webhook receiver's bind/port |
-| `[linear].admit_states` | `roki.toml` | Status filter now derived from the union of `when.status` values across `[[rule]]` and `[[cleanup]]` entries; explicit allowlist no longer needed |
-| `[[repos]]` | `roki.toml` | Repo allowlist moved into `WORKFLOW.toml [[admission.repos]]` |
+| `[linear].admit_states` | `roki.toml` | Status filter now derived from the union of `when.status` values across `rules:` and `cleanup:` entries; explicit allowlist no longer needed |
+| `[[repos]]` | `roki.toml` | Repo allowlist moved into `WORKFLOW.yaml admission.repos` |
+| `[default.ai.session]` (entire block) | `roki.toml` | Session-shape subprocesses removed; every state is command-shape. Use `[default.ai]` |
+| `[default.ai.command]` (entire block) | `roki.toml` | Renamed to `[default.ai]` (single block; no shape distinction) |
 | `[permissions].strategy` | `roki.toml` | Permission strategy is now pass-through: whatever the operator's cli line declares (`--dangerously-skip-permissions`, `--settings`, etc.) is what the subprocess sees |
 | `[judge].*` | `roki.toml` | Pre-admission judge removed; admission is purely mechanical (assignee + repo allowlist) |
 | `extension.orchestrator.*` | `WORKFLOW.md` | Orchestrator session removed |
@@ -271,13 +271,13 @@ The following pre-pivot keys are removed and **explicitly refused** by the loade
 | `extension.linear_updater.*` | `WORKFLOW.md` | Daemon never writes Linear; writes happen inside operator-authored phase subprocesses |
 | `extension.gates.*` | `WORKFLOW.md` | Daemon never validates artifacts |
 | `extension.distill.*` | `WORKFLOW.md` | `materialize_spec` flow removed |
-| `extension.server.*` | `WORKFLOW.md` | HTTP API config moved to top-level `roki.toml [api]` (not in WORKFLOW.toml) |
-| `prompt_template_orchestrator` (named template block) | `WORKFLOW.md` | Orchestrator session removed |
-| `prompt_template_<phase>` (named template block) | `WORKFLOW.md` | Phase prompts now live in `workflow/*.md` and inline `prompt` / `cmd` strings |
-| `WORKFLOW.toml` (entire file) | `[paths].workflow` | Schema migrated to `WORKFLOW.yaml` (state-machine model). Loader refuses any path with `.toml` extension. |
+| `extension.server.*` | `WORKFLOW.toml` | HTTP API config moved to top-level `roki.toml [api]` |
+| `prompt_template_orchestrator` (named template block) | `WORKFLOW.toml` | Orchestrator session removed |
+| `prompt_template_<phase>` (named template block) | `WORKFLOW.toml` | Phase prompts removed; state bodies live in `workflow/*.md` (`uses:`) or inline `run.cmd` |
+| `WORKFLOW.toml` (entire file) | `[paths].workflow` | Schema migrated to `WORKFLOW.yaml` (state-machine model). Loader refuses any path with `.toml` extension |
 | `[[rule]]` / `[[cleanup]]` / `[[on_failure]]` (TOML array-of-tables form) | `WORKFLOW.toml` | YAML lists `rules:` / `cleanup:` / `on_failure:` |
 | `pre` / `run` / `post` (phase blocks) | `WORKFLOW.toml` | State machine replaces fixed phase loop. Use `tasks:` sugar or canonical `start:` / `states:` / `terminals:` |
-| `session:` frontmatter key | `workflow/*.md` | Session-shape phases removed. All states are command-shape. |
+| `session:` frontmatter key | `workflow/*.md` | Session-shape removed. Every state is command-shape |
 
 The loader emits a startup error that names the offending key path. At hot reload the loader retains the previous policy and logs the failure; the daemon does not stop.
 

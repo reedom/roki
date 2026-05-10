@@ -14,8 +14,8 @@ Lookup documents for roki.
 | File | Contents |
 |---|---|
 | [cli.md](cli.md) | All CLI flags of `roki run`, `roki log`, `roki events`, `roki repo` |
-| [config.md](config.md) | `roki.toml` schema, `WORKFLOW.toml` schema, `workflow/*.md` frontmatter schema |
-| [artifacts.md](artifacts.md) | Paths and schemas of daemon-written artifacts (`meta.json`, per-iter captures) |
+| [config.md](config.md) | `roki.toml` schema, `WORKFLOW.yaml` schema, `workflow/*.md` frontmatter schema |
+| [artifacts.md](artifacts.md) | Paths and schemas of daemon-written artifacts (`meta.json`, per-visit captures) |
 | [log-events.md](log-events.md) | Canonical structured log event names |
 
 ## Update rules

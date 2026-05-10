@@ -18,7 +18,7 @@ refs:
 
 ## Purpose
 
-Concentrate worktree and session-tempdir lifecycle in the daemon so the operator-declared allowlist (`[[admission.repos]]` in WORKFLOW.yaml) is the single boundary for git side effects. Lazy worktree creation avoids materializing a worktree for tickets that admit but never reach a `pre.directive: "run"` (e.g. tickets handled entirely by an admission-time cleanup entry).
+Concentrate worktree and session-tempdir lifecycle in the daemon so the operator-declared allowlist (`admission.repos` in WORKFLOW.yaml) is the single boundary for git side effects. Lazy worktree creation avoids materializing a worktree for tickets that admit but never emit a `directive: "run"` from any state (e.g. tickets handled entirely by an admission-time cleanup entry).
 
 ## User-visible Behavior
 
@@ -72,7 +72,7 @@ One ticket → one repo by construction. The admission step resolves it; the wor
 - **Container / VM isolation** is out of scope; the daemon depends on whatever sandbox the operator's cli line provides.
 - **Editing code inside the worktree** is a state subprocess responsibility; the daemon never touches the tree.
 - **Multi-host / worktrees on remote machines** are out of scope.
-- **Eager worktree creation** (creating the worktree at admission time) is rejected: tickets that never reach a `pre.directive: "run"` would otherwise materialize unused worktrees.
+- **Eager worktree creation** (creating the worktree at admission time) is rejected: tickets that never emit `directive: "run"` from any state would otherwise materialize unused worktrees.
 
 ## Traceability
 
