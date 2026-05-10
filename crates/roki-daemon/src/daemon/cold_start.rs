@@ -28,6 +28,7 @@ use crate::linear::graphql::{
     EnumerateRequest, EnumeratedTicket, LinearGraphqlClient, StatusFilter,
 };
 use crate::linear::ticket::NormalizedTicket;
+use crate::workflow::canonical::RuleEntry;
 
 #[derive(Debug, Default)]
 pub struct ColdStartReport {
@@ -63,42 +64,52 @@ pub fn compute_status_union(workflow: &WorkflowConfig) -> (BTreeSet<String>, Opt
     use crate::workflow::canonical::ScalarMatcher;
     let mut union: BTreeSet<String> = BTreeSet::new();
 
-    // Rules contribute their `when.status` matcher's positive values.
-    for r in &workflow.rules {
-        let Some(when) = &r.when else { continue };
-        let Some(status) = &when.status else { continue };
-        match status {
-            ScalarMatcher::Eq(s) => {
-                union.insert(s.clone());
-            }
-            ScalarMatcher::In(values) => {
-                for v in values {
-                    union.insert(v.clone());
-                }
-            }
-            ScalarMatcher::Not(_) => {
-                // `not:` excludes one status; nothing to seed.
-            }
-        }
+    // Each (label, rules, cleanups) tuple is one source of status matchers.
+    // Top-level lists plus every per-repo override contribute; if any cleanup
+    // anywhere lacks `when.status` the filter is dropped (cold-start has to
+    // enumerate all statuses to be safe).
+    let mut sources: Vec<(String, &[RuleEntry], &[RuleEntry])> = Vec::new();
+    sources.push(("".into(), &workflow.rules, &workflow.cleanups));
+    for (ghq, set) in &workflow.repo_overrides {
+        sources.push((format!("repo:{ghq}/"), &set.rules, &set.cleanups));
     }
 
-    // Cleanups may omit `when.status` entirely; that drops the filter.
-    for (idx, c) in workflow.cleanups.iter().enumerate() {
-        let status = c.when.as_ref().and_then(|w| w.status.as_ref());
-        match status {
-            Some(ScalarMatcher::Eq(s)) => {
-                union.insert(s.clone());
-            }
-            Some(ScalarMatcher::In(values)) => {
-                for v in values {
-                    union.insert(v.clone());
+    for (label, rules, cleanups) in sources {
+        for r in rules {
+            let Some(when) = &r.when else { continue };
+            let Some(status) = &when.status else { continue };
+            match status {
+                ScalarMatcher::Eq(s) => {
+                    union.insert(s.clone());
+                }
+                ScalarMatcher::In(values) => {
+                    for v in values {
+                        union.insert(v.clone());
+                    }
+                }
+                ScalarMatcher::Not(_) => {
+                    // `not:` excludes one status; nothing to seed.
                 }
             }
-            Some(ScalarMatcher::Not(_)) => {
-                return (BTreeSet::new(), Some(format!("cleanup[{idx}]")));
-            }
-            None => {
-                return (BTreeSet::new(), Some(format!("cleanup[{idx}]")));
+        }
+
+        for (idx, c) in cleanups.iter().enumerate() {
+            let status = c.when.as_ref().and_then(|w| w.status.as_ref());
+            match status {
+                Some(ScalarMatcher::Eq(s)) => {
+                    union.insert(s.clone());
+                }
+                Some(ScalarMatcher::In(values)) => {
+                    for v in values {
+                        union.insert(v.clone());
+                    }
+                }
+                Some(ScalarMatcher::Not(_)) => {
+                    return (BTreeSet::new(), Some(format!("{label}cleanup[{idx}]")));
+                }
+                None => {
+                    return (BTreeSet::new(), Some(format!("{label}cleanup[{idx}]")));
+                }
             }
         }
     }

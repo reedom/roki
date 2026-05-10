@@ -39,7 +39,8 @@ pub fn evaluate<'a>(
     workflow: &'a WorkflowConfig,
     mode: DispatchMode,
 ) -> DispatchTarget<'a> {
-    if let Some(c) = crate::rule::first_cleanup_match(admitted, &workflow.cleanups) {
+    let cleanups = workflow.cleanups_for(&admitted.ghq);
+    if let Some(c) = crate::rule::first_cleanup_match(admitted, cleanups) {
         if crate::rule::is_shorthand_cleanup(c) {
             return DispatchTarget::CleanupShorthand;
         }
@@ -53,7 +54,8 @@ pub fn evaluate<'a>(
         return DispatchTarget::NoMatch;
     }
 
-    if let Some(r) = crate::rule::first_match(admitted, &workflow.rules) {
+    let rules = workflow.rules_for(&admitted.ghq);
+    if let Some(r) = crate::rule::first_match(admitted, rules) {
         return DispatchTarget::Cycle {
             kind: CycleKind::Rule,
             rule: r,
@@ -279,5 +281,50 @@ mod tests {
     #[test]
     fn _import_labels_for_use() {
         let _: LabelsMatcher = LabelsMatcher::default();
+    }
+
+    #[test]
+    fn per_repo_override_rules_replace_top_level_for_matching_ghq() {
+        use crate::config::workflow::{AdmissionRepo, AdmissionSection, RuleSet, WorkflowConfig};
+        use std::collections::BTreeMap;
+        use std::sync::Arc;
+
+        // Top-level rules match status "InProgress"; override matches "Triage".
+        let mut overrides: BTreeMap<String, Arc<RuleSet>> = BTreeMap::new();
+        overrides.insert(
+            "github.com/acme/widget".into(),
+            Arc::new(RuleSet {
+                rules: vec![rule_for("Triage")],
+                cleanups: vec![],
+                on_failures: vec![],
+            }),
+        );
+        let wf = WorkflowConfig {
+            admission: AdmissionSection {
+                assignee: "u1".into(),
+            },
+            repo: Some(AdmissionRepo {
+                ghq: "github.com/acme/widget".into(),
+            }),
+            rules: vec![rule_for("InProgress")],
+            cleanups: vec![],
+            on_failures: vec![],
+            repo_overrides: overrides,
+        };
+
+        // ghq matches override → "Triage" rule fires, "InProgress" doesn't.
+        let triage = crate::rule::admitted_with("Triage", vec![]);
+        match evaluate(&triage, &wf, DispatchMode::Default) {
+            DispatchTarget::Cycle {
+                kind: CycleKind::Rule,
+                ..
+            } => {}
+            other => panic!("expected override rule cycle, got {other:?}"),
+        }
+        let in_progress = crate::rule::admitted_with("InProgress", vec![]);
+        match evaluate(&in_progress, &wf, DispatchMode::Default) {
+            DispatchTarget::NoMatch => {}
+            other => panic!("expected NoMatch (override replaces top-level), got {other:?}"),
+        }
     }
 }

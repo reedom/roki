@@ -1,18 +1,16 @@
-//! Slice 8 e2e: `[[admission.repos]] workflow:` resolves a per-repo override
-//! file relative to the top-level YAML; the override file's body parses,
-//! sugar-expands, and validates clean. Daemon emits `daemon_ready`, proving
-//! the override-loading path is wired (failure would surface as a startup
-//! abort with a `per-repo override` error). Spec §12.1 "slice8-per-repo-override".
-//!
-//! Note: dispatcher consumption of `WorkflowConfig.repo_overrides` is a
-//! follow-up; this fixture exercises load + parse + validate only, which is
-//! the surface slice 8 actually delivers.
+//! Slice 8 e2e: `[[admission.repos]] workflow:` references a per-repo file
+//! whose `rules:` list replaces the top-level for that ghq. The fixture
+//! seeds the top-level with a rule that writes `top` to a trace file and
+//! the per-repo `repos/bar.yaml` with a rule that writes `bar`. A webhook
+//! matching the admitted repo must run only the override; the trace must
+//! contain `bar` and never `top`. Spec §3.1 footer + fr:02:142.
 
-use std::net::TcpListener;
+use std::net::{SocketAddr, TcpListener};
 use std::time::Duration;
 
 use tempfile::TempDir;
 use tokio::process::Command;
+use tokio::time::sleep;
 use wiremock::matchers::method;
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
@@ -20,7 +18,7 @@ mod support_cold_start;
 use support_cold_start::{await_daemon_ready, stub_empty_issues};
 
 #[tokio::test]
-async fn per_repo_override_file_loads_and_daemon_ready_fires() {
+async fn per_repo_override_replaces_top_level_rules() {
     let port = TcpListener::bind("127.0.0.1:0")
         .expect("bind ephemeral webhook port")
         .local_addr()
@@ -42,8 +40,13 @@ async fn per_repo_override_file_loads_and_daemon_ready_fires() {
     let wt_root = work.path().join("wts");
     std::fs::create_dir_all(&wt_root).unwrap();
 
+    let ticket_id = "ENG-890";
+    let trace_path = work.path().join("trace.txt");
+    let trace_str = trace_path.display().to_string();
+
     let workflow_path = work.path().join("WORKFLOW.yaml");
-    let top_body = r#"
+    let top_body = format!(
+        r#"
 admission:
   assignee: u1
   repos:
@@ -55,20 +58,25 @@ rules:
       status: in_progress
     tasks:
       - id: top
-        run: 'true'
-"#;
+        run: 'printf top >> "{trace}"'
+"#,
+        trace = trace_str
+    );
     std::fs::write(&workflow_path, top_body).unwrap();
 
     let repos_dir = work.path().join("repos");
     std::fs::create_dir_all(&repos_dir).unwrap();
-    let bar_body = r#"
+    let bar_body = format!(
+        r#"
 rules:
   - when:
       status: in_progress
     tasks:
-      - id: from_bar
-        run: 'true'
-"#;
+      - id: bar
+        run: 'printf bar >> "{trace}"'
+"#,
+        trace = trace_str
+    );
     std::fs::write(repos_dir.join("bar.yaml"), bar_body).unwrap();
 
     let roki_path = work.path().join("roki.toml");
@@ -113,14 +121,72 @@ session_root = "{session_root}"
         .spawn()
         .expect("spawn roki binary");
 
-    let evt = await_daemon_ready(&session_root).await;
-    assert_eq!(
-        evt.get("event").and_then(|v| v.as_str()),
-        Some("daemon_ready")
-    );
+    let webhook_addr: SocketAddr = ([127, 0, 0, 1], port).into();
+    wait_for_listener(webhook_addr).await;
+    let _ = await_daemon_ready(&session_root).await;
 
+    let webhook_url = format!("http://127.0.0.1:{port}/");
+    let payload = serde_json::json!({
+        "action": "update",
+        "type": "Issue",
+        "data": {
+            "id": ticket_id,
+            "assignee": {"id": "u1"},
+            "state": {"name": "in_progress"},
+            "labels": []
+        }
+    });
+    let client = reqwest::Client::new();
+    let resp = client
+        .post(&webhook_url)
+        .json(&payload)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status().as_u16(), 202);
+
+    let events_path = session_root.join(format!("{ticket_id}.events.jsonl"));
+    wait_for_event_count(&events_path, "cycle_completed", 1, Duration::from_secs(15)).await;
     let exit = sigterm_and_wait(&mut child, Duration::from_secs(10)).await;
     assert_eq!(exit, Some(0));
+
+    let trace = std::fs::read_to_string(&trace_path).expect("trace file written");
+    assert_eq!(
+        trace, "bar",
+        "override rules must replace top-level; trace expected 'bar', got {trace:?}"
+    );
+}
+
+async fn wait_for_listener(addr: SocketAddr) {
+    for _ in 0..50 {
+        if tokio::net::TcpStream::connect(addr).await.is_ok() {
+            return;
+        }
+        sleep(Duration::from_millis(100)).await;
+    }
+    panic!("webhook listener never came up at {addr}");
+}
+
+async fn wait_for_event_count(
+    path: &std::path::Path,
+    event_kind: &str,
+    expected: usize,
+    timeout: Duration,
+) {
+    let needle = format!("\"event\":\"{event_kind}\"");
+    let deadline = tokio::time::Instant::now() + timeout;
+    while tokio::time::Instant::now() < deadline {
+        if let Ok(body) = tokio::fs::read_to_string(path).await {
+            if body.matches(&needle).count() >= expected {
+                return;
+            }
+        }
+        sleep(Duration::from_millis(50)).await;
+    }
+    panic!(
+        "timed out waiting for {expected} occurrences of {event_kind} in {}",
+        path.display()
+    );
 }
 
 async fn sigterm_and_wait(child: &mut tokio::process::Child, timeout: Duration) -> Option<i32> {
