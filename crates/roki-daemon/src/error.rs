@@ -13,8 +13,6 @@ use std::path::PathBuf;
 
 use thiserror::Error;
 
-use crate::engine::outcome::{FailureKind, PhaseKind};
-
 /// Errors raised while loading `roki.toml`.
 ///
 /// Covers requirement 1.2 (missing config path) and 2.3 (schema validation
@@ -49,28 +47,27 @@ pub enum RokiConfigError {
     },
 }
 
-/// Errors raised while loading `WORKFLOW.toml` or `workflow/*.md` frontmatter.
+/// Errors raised while loading `WORKFLOW.yaml` or `workflow/*.md` frontmatter.
 #[derive(Debug, Error)]
 pub enum WorkflowError {
-    #[error("WORKFLOW.toml not found: {path}")]
+    #[error("WORKFLOW.yaml not found: {path}")]
     MissingFile { path: PathBuf },
 
-    #[error("WORKFLOW.toml unreadable at {path}: {source}")]
+    #[error("WORKFLOW.yaml unreadable at {path}: {source}")]
     Unreadable {
         path: PathBuf,
         #[source]
         source: std::io::Error,
     },
 
-    #[error("WORKFLOW.toml parse error at {path}: {source}")]
-    Parse {
-        path: PathBuf,
-        #[source]
-        source: toml::de::Error,
-    },
+    #[error("WORKFLOW.yaml parse error at {path}: {detail}")]
+    YamlParse { path: PathBuf, detail: String },
 
-    #[error("WORKFLOW.toml at {path} missing required key '{key}'")]
-    MissingField { path: PathBuf, key: String },
+    #[error("WORKFLOW.yaml validation error at {path}: {detail}")]
+    YamlValidation { path: PathBuf, detail: String },
+
+    #[error("WORKFLOW.yaml at {path} missing required field '{field}'")]
+    MissingField { path: PathBuf, field: String },
 
     #[error("invalid workflow.toml at {path}: unsupported when.* key '{key}'")]
     UnsupportedWhen { path: PathBuf, key: String },
@@ -263,12 +260,11 @@ pub enum CaptureError {
     },
 }
 
-/// Errors raised by the engine's phase executor that are infrastructure-level
-/// rather than directive-level failures. These propagate up through
-/// `runtime::run_inner` and exit the binary with `ExitCode::FAILURE`. They
-/// are distinct from `engine::outcome::FailureKind`, which represents
-/// directive-level failures (`unparseable`, `schema_drift`, `process_crash`,
-/// `template_error`, `iter_exhausted`) routed inside the cycle.
+/// Engine-side infrastructure errors. Slice 8 keeps a slim subset (slice 1
+/// session/phase variants are gone) covering subprocess spawn, ghq lookup,
+/// worktree ops, and capture-fs failures. Surface to the cycle driver as
+/// `FailureKind::FsPoison` / `ProcessCrash` / `TemplateError` per the
+/// translation in `engine::real_state_runner`.
 #[derive(Debug, Error)]
 pub enum PhaseInfraError {
     #[error("phase failed to spawn '{cmd}': {source}")]
@@ -304,32 +300,6 @@ pub enum PhaseInfraError {
 
     #[error("ghq base path not found for '{ghq}'")]
     RepoNotFound { ghq: String },
-
-    #[error("cycle failed: {} at iter {iter}", kind.as_str())]
-    CycleFailed { kind: FailureKind, iter: u32 },
-
-    #[error("phase executor returned unexpected outcome variant '{got_variant}' for phase {} at iter {iter}", phase.as_str())]
-    ExecutorContract {
-        phase: PhaseKind,
-        got_variant: &'static str,
-        iter: u32,
-    },
-
-    #[error("session subprocess failed to spawn '{cli}': {source}")]
-    SessionSpawn {
-        cli: String,
-        #[source]
-        source: std::io::Error,
-    },
-
-    #[error("session subprocess stdin closed unexpectedly during turn for phase {}", phase.as_str())]
-    SessionStdinClosed { phase: PhaseKind },
-
-    #[error("session subprocess stdout closed before any directive on phase {}", phase.as_str())]
-    SessionStdoutClosed { phase: PhaseKind },
-
-    #[error("[default.ai.session].cli not configured but cycle requires session shape")]
-    SessionCliMissing,
 
     /// Worktree create / list / remove failed before subprocess launch.
     /// Cycle driver converts this to FailureKind::FsPoison.
@@ -422,27 +392,27 @@ mod tests {
     }
 
     #[test]
-    fn workflow_display_identifies_unsupported_keys() {
-        let e = WorkflowError::UnsupportedWhen {
-            path: PathBuf::from("/tmp/WORKFLOW.toml"),
-            key: "when.assignee".into(),
+    fn workflow_display_identifies_yaml_failures() {
+        let e = WorkflowError::YamlParse {
+            path: PathBuf::from("/tmp/WORKFLOW.yaml"),
+            detail: "expected mapping".into(),
         };
         let s = format!("{e}");
-        assert!(s.contains("/tmp/WORKFLOW.toml"));
-        assert!(s.contains("when.assignee"));
+        assert!(s.contains("/tmp/WORKFLOW.yaml"));
+        assert!(s.contains("expected mapping"));
 
-        let e = WorkflowError::UnsupportedRunForm {
-            path: PathBuf::from("/tmp/WORKFLOW.toml"),
-            key: "run.path".into(),
+        let e = WorkflowError::YamlValidation {
+            path: PathBuf::from("/tmp/WORKFLOW.yaml"),
+            detail: "rule[0]: orphan target".into(),
         };
         let s = format!("{e}");
-        assert!(s.contains("run.path"));
+        assert!(s.contains("orphan target"));
 
         let e = WorkflowError::MissingField {
-            path: PathBuf::from("/tmp/WORKFLOW.toml"),
-            key: "rule.run".into(),
+            path: PathBuf::from("/tmp/WORKFLOW.yaml"),
+            field: "admission".into(),
         };
-        assert!(format!("{e}").contains("rule.run"));
+        assert!(format!("{e}").contains("admission"));
     }
 
     #[test]
@@ -536,64 +506,11 @@ mod tests {
         });
         assert!(format!("{e}").contains("/tmp/foo"));
 
-        let e = PhaseInfraError::CycleFailed {
-            kind: FailureKind::IterExhausted,
-            iter: 3,
+        let e = PhaseInfraError::WorktreeError {
+            error_text: "wt remove failed".into(),
+            exit_code: Some(1),
         };
-        let s = format!("{e}");
-        assert!(s.contains("iter_exhausted"), "msg: {s}");
-        assert!(s.contains("iter 3"), "msg: {s}");
-
-        let e = PhaseInfraError::ExecutorContract {
-            phase: PhaseKind::Pre,
-            got_variant: "RunDone",
-            iter: 2,
-        };
-        let s = format!("{e}");
-        assert!(s.contains("RunDone"), "msg: {s}");
-        assert!(s.contains("pre"), "msg: {s}");
-        assert!(s.contains("iter 2"), "msg: {s}");
-    }
-
-    #[test]
-    fn workflow_session_run_unsupported_display() {
-        let e = WorkflowError::SessionRunUnsupported {
-            path: PathBuf::from("/tmp/W.toml"),
-        };
-        assert!(format!("{e}").contains("/tmp/W.toml"));
-        assert!(format!("{e}").contains("session shape"));
-    }
-
-    #[test]
-    fn workflow_invalid_session_field_display() {
-        let e = WorkflowError::InvalidSessionField {
-            path: PathBuf::from("/tmp/foo.md"),
-            value: "yolo".to_string(),
-        };
-        let s = format!("{e}");
-        assert!(s.contains("/tmp/foo.md"));
-        assert!(s.contains("yolo"));
-    }
-
-    #[test]
-    fn workflow_invalid_stall_seconds_display() {
-        let e = WorkflowError::InvalidStallSeconds {
-            path: PathBuf::from("/tmp/foo.md"),
-            value: "0".to_string(),
-        };
-        assert!(format!("{e}").contains("stall_seconds"));
-        assert!(format!("{e}").contains("0"));
-    }
-
-    #[test]
-    fn workflow_md_frontmatter_display() {
-        let e = WorkflowError::WorkflowMdFrontmatter {
-            path: PathBuf::from("/tmp/foo.md"),
-            reason: "missing closing '---'".to_string(),
-        };
-        let s = format!("{e}");
-        assert!(s.contains("/tmp/foo.md"));
-        assert!(s.contains("missing closing"));
+        assert!(format!("{e}").contains("wt remove failed"));
     }
 
     #[test]

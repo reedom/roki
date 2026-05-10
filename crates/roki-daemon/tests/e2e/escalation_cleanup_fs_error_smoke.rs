@@ -51,23 +51,21 @@ async fn cleanup_wt_remove_failure_pushes_escalation() {
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/e2e/fixtures/wt_fail_remove.sh");
     assert!(fixture.is_file(), "fixture script missing: {fixture:?}");
 
-    let workflow_path = work.path().join("WORKFLOW.toml");
+    let workflow_path = work.path().join("WORKFLOW.yaml");
     let workflow_body = r#"
-[admission]
-assignee = "u1"
+admission:
+  assignee: u1
+  repos:
+    - ghq: github.com/example/repo
 
-[[admission.repos]]
-ghq = "github.com/example/repo"
-
-[[cleanup]]
-[cleanup.when]
-status = "done"
-[cleanup.when.labels]
-has_all = []
-[cleanup.run]
-cmd = "true"
-[cleanup.post]
-cmd = "printf '{\"directive\":\"end\"}'"
+cleanup:
+  - when:
+      status: done
+    tasks:
+      - id: crun0
+        run: 'true'
+      - id: cpost0
+        run: 'printf ''{\"directive\":\"end\"}'''
 "#;
     std::fs::write(&workflow_path, workflow_body).unwrap();
 
@@ -81,7 +79,7 @@ token = "linear-test-token"
 bind = "127.0.0.1"
 port = {port}
 
-[default.ai.command]
+[default.ai]
 cli = "echo"
 
 [engine]
@@ -170,7 +168,7 @@ session_root = "{session_root}"
     );
     let line = escalations[0];
     assert!(line.contains("\"kind\":\"fs_poison\""), "{line}");
-    assert!(line.contains("\"phase\":\"post\""), "{line}");
+    assert!(line.contains("\"state_id\":\"post\""), "{line}");
     assert!(line.contains("\"ticket_id\":"), "{line}");
 }
 

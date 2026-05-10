@@ -57,7 +57,7 @@ async fn skeleton_runs_one_cycle_and_rejects_subsequent_webhook() {
         .await;
     stub_empty_issues(&linear).await;
 
-    // 3. Build the workspace tempdir, WORKFLOW.toml, and roki.toml. The
+    // 3. Build the workspace tempdir, WORKFLOW.yaml, and roki.toml. The
     //    runner's `run.cmd` writes literal `out` to stdout and `err` to
     //    stderr so the assertions below can locate them in the per-cycle
     //    capture files.
@@ -66,25 +66,23 @@ async fn skeleton_runs_one_cycle_and_rejects_subsequent_webhook() {
     std::fs::create_dir_all(&session_root).expect("create sessions dir");
     let wt_root = work.path().join("wts");
     std::fs::create_dir_all(&wt_root).unwrap();
-    let workflow_path = work.path().join("WORKFLOW.toml");
+    let workflow_path = work.path().join("WORKFLOW.yaml");
     let roki_path = work.path().join("roki.toml");
 
     let workflow_body = r#"
-[admission]
-assignee = "u1"
+admission:
+  assignee: u1
+  repos:
+    - ghq: github.com/example/repo
 
-[[admission.repos]]
-ghq = "github.com/example/repo"
-
-[[rule]]
-[rule.when]
-status = "in_progress"
-[rule.when.labels]
-has_all = []
-[rule.run]
-cmd = "printf out; printf err 1>&2; exit 0"
+rules:
+  - when:
+      status: in_progress
+    tasks:
+      - id: run0
+        run: 'printf out; printf err 1>&2; exit 0'
 "#;
-    std::fs::write(&workflow_path, workflow_body).expect("write WORKFLOW.toml");
+    std::fs::write(&workflow_path, workflow_body).expect("write WORKFLOW.yaml");
 
     // The skeleton config keys are the canonical six sections; `[engine]`
     // and `[log]` are accepted-without-applying empty tables (Req 2.4).
@@ -97,7 +95,7 @@ token = "linear-test-token"
 bind = "127.0.0.1"
 port = {port}
 
-[default.ai.command]
+[default.ai]
 cli = "echo"
 
 [engine]
@@ -215,11 +213,13 @@ session_root = "{session_root}"
         .filter_map(Result::ok)
         .find(|entry| entry.file_name().to_string_lossy().starts_with("cycle-"))
         .expect("cycle-<uuid> dir should exist under ticket dir");
-    let iter1 = cycle_entry.path().join("iter-1");
-    assert!(iter1.is_dir(), "iter-1 dir must exist at {iter1:?}");
+    let visit1 = cycle_entry.path().join("visit-1");
+    assert!(visit1.is_dir(), "visit-1 dir must exist at {visit1:?}");
 
-    let stdout_bytes = std::fs::read_to_string(iter1.join("run.stdout")).expect("read run.stdout");
-    let stderr_bytes = std::fs::read_to_string(iter1.join("run.stderr")).expect("read run.stderr");
+    let stdout_bytes =
+        std::fs::read_to_string(visit1.join("run0.stdout")).expect("read run0.stdout");
+    let stderr_bytes =
+        std::fs::read_to_string(visit1.join("run0.stderr")).expect("read run0.stderr");
     assert!(
         stdout_bytes.contains("out"),
         "Req 7.2: run.stdout must contain `out`, got {stdout_bytes:?}"
@@ -230,7 +230,7 @@ session_root = "{session_root}"
     );
 
     let exit_code_text =
-        std::fs::read_to_string(iter1.join("run.exit_code")).expect("read run.exit_code");
+        std::fs::read_to_string(visit1.join("run0.exit_code")).expect("read run0.exit_code");
     assert_eq!(
         exit_code_text.trim(),
         "0",

@@ -45,25 +45,23 @@ async fn cross_ticket_cycles_overlap() {
     let wt_root = work.path().join("wts");
     std::fs::create_dir_all(&wt_root).unwrap();
 
-    let workflow_path = work.path().join("WORKFLOW.toml");
+    let workflow_path = work.path().join("WORKFLOW.yaml");
     // Single rule: matches in_progress; run sleeps 500ms so two concurrent
     // cycles (ENG-100 and ENG-200) both spend time in run phase simultaneously.
     let workflow_body = r#"
-[admission]
-assignee = "u1"
+admission:
+  assignee: u1
+  repos:
+    - ghq: github.com/example/repo
 
-[[admission.repos]]
-ghq = "github.com/example/repo"
-
-[[rule]]
-[rule.when]
-status = "in_progress"
-[rule.when.labels]
-has_all = []
-[rule.run]
-cmd = "sh -c 'sleep 0.5'"
-[rule.post]
-cmd = "printf '{\"directive\":\"end\"}'"
+rules:
+  - when:
+      status: in_progress
+    tasks:
+      - id: run0
+        run: 'sh -c ''sleep 0.5'''
+      - id: post0
+        run: 'printf ''{\"directive\":\"end\"}'''
 "#;
     std::fs::write(&workflow_path, workflow_body).unwrap();
 
@@ -77,7 +75,7 @@ token = "linear-test-token"
 bind = "127.0.0.1"
 port = {port}
 
-[default.ai.command]
+[default.ai]
 cli = "echo"
 
 [engine]

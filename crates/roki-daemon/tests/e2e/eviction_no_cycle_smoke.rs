@@ -50,28 +50,30 @@ async fn admission_revoke_after_cycle_evicts_cache_only() {
 
     let ticket_id = "ENG-100";
 
+    // Slice 8: cycle no longer materializes worktrees. Pre-seed the dir so
+    // the eviction-retention assertion has something to check.
+    std::fs::create_dir_all(wt_root.join(ticket_id)).unwrap();
+
     // Short rule with `pre` directing run so the worktree gets
     // materialized; the run phase is trivial so the cycle completes
     // quickly.
-    let workflow_path = work.path().join("WORKFLOW.toml");
+    let workflow_path = work.path().join("WORKFLOW.yaml");
     let workflow_body = r#"
-[admission]
-assignee = "u1"
+admission:
+  assignee: u1
+  repos:
+    - ghq: github.com/example/repo
 
-[[admission.repos]]
-ghq = "github.com/example/repo"
-
-[[rule]]
-[rule.when]
-status = "todo"
-[rule.when.labels]
-has_all = []
-[rule.pre]
-cmd = "printf '{\"directive\":\"run\"}'"
-[rule.run]
-cmd = "true"
-[rule.post]
-cmd = "printf '{\"directive\":\"end\",\"outcome\":\"todo_done\"}'"
+rules:
+  - when:
+      status: todo
+    tasks:
+      - id: pre0
+        run: 'printf ''{\"directive\":\"run\"}'''
+      - id: run0
+        run: 'true'
+      - id: post0
+        run: 'printf ''{\"directive\":\"end\",\"outcome\":\"todo_done\"}'''
 "#;
     std::fs::write(&workflow_path, workflow_body).unwrap();
 
@@ -85,7 +87,7 @@ token = "linear-test-token"
 bind = "127.0.0.1"
 port = {port}
 
-[default.ai.command]
+[default.ai]
 cli = "echo"
 
 [engine]

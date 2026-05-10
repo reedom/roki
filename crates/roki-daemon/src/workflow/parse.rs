@@ -14,7 +14,7 @@ use std::path::{Path, PathBuf};
 use serde::Deserialize;
 use thiserror::Error;
 
-use super::canonical::{StateId, DirectiveName};
+use super::canonical::{DirectiveName, StateId};
 
 #[derive(Debug, Error)]
 pub enum ParseError {
@@ -259,27 +259,21 @@ pub fn resolve_path(reference_file: &Path, declared: &Path) -> Result<PathBuf, P
     if declared.is_absolute() {
         return Ok(declared.to_path_buf());
     }
-    if let Some(stripped) = declared
-        .to_str()
-        .and_then(|s| s.strip_prefix("~/"))
-    {
-        let home = dirs_home()
-            .ok_or_else(|| ParseError::HomeUnresolvable(declared.to_path_buf()))?;
+    if let Some(stripped) = declared.to_str().and_then(|s| s.strip_prefix("~/")) {
+        let home =
+            dirs_home().ok_or_else(|| ParseError::HomeUnresolvable(declared.to_path_buf()))?;
         return Ok(home.join(stripped));
     }
     if declared.starts_with("~") && !declared.starts_with("~/") {
         // bare "~" or "~name" — only "~" alone is supported in this slice.
         let s = declared.to_str().unwrap_or("");
         if s == "~" {
-            return dirs_home()
-                .ok_or_else(|| ParseError::HomeUnresolvable(declared.to_path_buf()));
+            return dirs_home().ok_or_else(|| ParseError::HomeUnresolvable(declared.to_path_buf()));
         }
         // "~name" not supported.
         return Err(ParseError::HomeUnresolvable(declared.to_path_buf()));
     }
-    let parent = reference_file
-        .parent()
-        .unwrap_or_else(|| Path::new("."));
+    let parent = reference_file.parent().unwrap_or_else(|| Path::new("."));
     Ok(parent.join(declared))
 }
 
@@ -394,7 +388,12 @@ rules:
 "#;
         let raw = parse_workflow_str(Path::new("WORKFLOW.yaml"), yaml).unwrap();
         match &raw.rules[0].body {
-            RawRuleBody::Canonical { start, states, terminals, .. } => {
+            RawRuleBody::Canonical {
+                start,
+                states,
+                terminals,
+                ..
+            } => {
                 assert_eq!(start, "judge");
                 assert_eq!(states.len(), 2);
                 assert_eq!(terminals.len(), 3);

@@ -1,8 +1,8 @@
-//! End-to-end smoke: a run phase emits a claude/codex stream-json `result`
-//! event on stdout. The supervisor's tee scanner extracts it into
-//! `iter-1/run.terminal.json`. The post phase reads
-//! `{{ run.terminal.is_error }}` from the Liquid context and emits its value
-//! on stderr; the test asserts both the on-disk file and the post stderr.
+//! E2E: a run state emits a claude/codex stream-json `result` event on stdout.
+//! The runner's tee scanner extracts it into `visit-1/run0.terminal.json`. A
+//! follow-up state reads `{{ tasks.run0.terminal.is_error }}` from the Liquid
+//! context and emits its value on stderr; the test asserts the on-disk file
+//! and the post stderr.
 
 use std::net::{SocketAddr, TcpListener};
 use std::time::Duration;
@@ -39,35 +39,28 @@ async fn run_terminal_round_trips_through_liquid() {
     let wt_root = work.path().join("wts");
     std::fs::create_dir_all(&wt_root).unwrap();
 
-    // Run phase: emit a thinking event then a result event with is_error=false.
-    let run_cmd = r#"printf '%s\n' '{"type":"thinking","text":"working"}' '{"type":"result","subtype":"success","is_error":false,"result":"ok"}'"#;
+    let workflow_path = work.path().join("WORKFLOW.yaml");
+    // run0 prints a thinking line then a result line with is_error=false.
+    // post0 prints `terminal_is_error=<value>` to stderr (verifying Liquid
+    // round-trip), then writes the end directive to $ROKI_DIRECTIVE_PATH.
+    let workflow_body = r#"
+admission:
+  assignee: u1
+  repos:
+    - ghq: github.com/example/repo
 
-    // Post phase: emit `terminal_is_error=<value>` on stderr (verifies Liquid
-    // round-trip), then write the directive on stdout.
-    let post_cmd = r#"printf 'terminal_is_error=%s\n' "{{ run.terminal.is_error }}" 1>&2; printf '{"directive":"end"}'"#;
-
-    let workflow_path = work.path().join("WORKFLOW.toml");
-    let workflow_body = format!(
-        r#"
-[admission]
-assignee = "u1"
-
-[[admission.repos]]
-ghq = "github.com/example/repo"
-
-[[rule]]
-[rule.when]
-status = "in_progress"
-[rule.when.labels]
-has_all = []
-[rule.run]
-cmd = {run_quoted}
-[rule.post]
-cmd = {post_quoted}
-"#,
-        run_quoted = toml_string(run_cmd),
-        post_quoted = toml_string(post_cmd),
-    );
+rules:
+  - when:
+      status: in_progress
+    tasks:
+      - id: run0
+        run: |
+          printf '%s\n' '{"type":"thinking","text":"working"}' '{"type":"result","subtype":"success","is_error":false,"result":"ok"}'
+      - id: post0
+        run: |
+          printf 'terminal_is_error=%s\n' "{{ tasks.run0.terminal.is_error }}" 1>&2
+          printf '{"directive":"end"}' > "$ROKI_DIRECTIVE_PATH"
+"#;
     std::fs::write(&workflow_path, workflow_body).unwrap();
 
     let roki_path = work.path().join("roki.toml");
@@ -80,7 +73,7 @@ token = "linear-test-token"
 bind = "127.0.0.1"
 port = {port}
 
-[default.ai.command]
+[default.ai]
 cli = "true"
 stall_seconds = 30
 
@@ -153,36 +146,28 @@ session_root = "{session_root}"
         .find(|e| e.file_name().to_string_lossy().starts_with("cycle-"))
         .expect("cycle-<uuid> dir present");
     let cycle_path = cycle_entry.path();
-    let iter_dir = cycle_path.join("iter-1");
+    // ctx.iter advances per state visit, so run0 captures land in visit-1
+    // and post0 in visit-2.
+    let visit_run = cycle_path.join("visit-1");
+    let visit_post = cycle_path.join("visit-2");
 
-    // run.terminal.json exists and contains is_error.
-    let run_terminal = std::fs::read_to_string(iter_dir.join("run.terminal.json"))
-        .expect("run.terminal.json must exist");
+    let run_terminal = std::fs::read_to_string(visit_run.join("run0.terminal.json"))
+        .expect("run0.terminal.json must exist");
     assert!(
         run_terminal.contains("\"is_error\""),
-        "run.terminal.json missing is_error: {run_terminal}"
+        "run0.terminal.json missing is_error: {run_terminal}"
     );
     assert!(
         run_terminal.contains("\"subtype\""),
-        "run.terminal.json missing subtype: {run_terminal}"
+        "run0.terminal.json missing subtype: {run_terminal}"
     );
 
-    // Post stderr proves the Liquid round-trip rendered the value.
     let post_stderr =
-        std::fs::read_to_string(iter_dir.join("post.stderr")).expect("post.stderr must exist");
+        std::fs::read_to_string(visit_post.join("post0.stderr")).expect("post0.stderr must exist");
     assert!(
         post_stderr.contains("terminal_is_error=false"),
-        "post.stderr should contain rendered is_error=false: {post_stderr}"
+        "post0.stderr should contain rendered is_error=false: {post_stderr}"
     );
-}
-
-fn toml_string(s: &str) -> String {
-    let escaped = s
-        .replace('\\', "\\\\")
-        .replace('"', "\\\"")
-        .replace('\n', "\\n")
-        .replace('\r', "\\r");
-    format!("\"{escaped}\"")
 }
 
 async fn wait_for_listener(addr: SocketAddr) {

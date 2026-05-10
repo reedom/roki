@@ -19,7 +19,7 @@ use std::path::Path;
 
 use uuid::Uuid;
 
-use crate::engine::outcome::{FailureKind, PhaseKind};
+use crate::engine::outcome::FailureKind;
 use crate::events::{Event, EventWriter, WorktreeDeleteReason, now_rfc3339};
 
 #[derive(Debug)]
@@ -52,7 +52,8 @@ pub async fn delete_immediate(
         cycle_id: cycle_id.to_string(),
         cycle_kind: "cleanup".into(),
         iters: 0,
-        outcome: None,
+        terminal_id: Some("__success__".into()),
+        outcome: Some("cleaned".into()),
     });
     let _ = events.emit(&Event::WorktreeDeleteRequested {
         ts: now_rfc3339(),
@@ -106,7 +107,7 @@ async fn remove_ticket_dir(
                         ticket_id.to_string(),
                         cid,
                         FailureKind::FsPoison,
-                        PhaseKind::Post,
+                        "post".to_string(),
                         err_text,
                     )
                     .await;
@@ -134,7 +135,7 @@ async fn emit_wt_remove_error(
             ticket_id.to_string(),
             cycle_id,
             FailureKind::FsPoison,
-            PhaseKind::Post,
+            "post".to_string(),
             err_text,
         )
         .await;

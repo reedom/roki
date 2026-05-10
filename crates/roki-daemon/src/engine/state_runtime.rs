@@ -2,10 +2,9 @@
 //!
 //! Spec: §2.4, §6 (data-flow capture).
 //!
-//! Slice 8 introduces this alongside the legacy `engine::phase` module.
-//! Production wiring (real subprocess spawn) lands in Task 8; this file
-//! defines the trait + types + a deterministic mock impl used by
-//! `engine::cycle_state` integration tests.
+//! Defines the `StateRunner` trait + types + a deterministic mock impl used
+//! by `engine::cycle_state` integration tests. Production wiring is in
+//! `engine::real_state_runner`.
 
 #![allow(dead_code)]
 
@@ -86,8 +85,7 @@ pub struct CycleContext {
 
 impl CycleContext {
     pub fn record_capture(&mut self, state_id: &str, captures: TaskCaptures) {
-        self.task_captures
-            .insert(state_id.to_string(), captures);
+        self.task_captures.insert(state_id.to_string(), captures);
     }
 
     pub fn bump_visit(&mut self, state_id: &str) -> u32 {
@@ -241,7 +239,13 @@ mod tests {
         let mut ctx = CycleContext::default();
         ctx.bump_visit("impl");
         let got = runner.run_state(&state, &ctx).await;
-        assert!(matches!(got, StateOutcome::Failure { kind: FailureKind::ProcessCrash, .. }));
+        assert!(matches!(
+            got,
+            StateOutcome::Failure {
+                kind: FailureKind::ProcessCrash,
+                ..
+            }
+        ));
     }
 
     #[test]

@@ -1,9 +1,9 @@
-//! Per-iter capture layout.
+//! Per-state capture layout.
 //!
-//! Layout: `<session_root>/<ticket-id>/cycle-<uuid>/iter-<n>/{pre,run,post}.{stdout,stderr}`
-//! plus parsed-derivative files (`pre.response.json`, `run.exit_code`,
-//! `post.response.json`). The skeleton's flat `cycle-<uuid>/{stdout,stderr}`
-//! layout is gone.
+//! Layout: `<session_root>/<ticket-id>/cycle-<uuid>/visit-<n>/<state_id>.{stdout,stderr,exit_code,directive.json,terminal.json,events.jsonl}`
+//! per fr:04 §Capture. Slice 8 dropped the legacy iter-N + phase-shaped
+//! capture (`pre/run/post.{stdout,stderr,response.json}`) when the engine
+//! switched to the state-machine model.
 
 use std::fs::{self, File};
 use std::io::Write as _;
@@ -11,7 +11,6 @@ use std::path::{Path, PathBuf};
 
 use uuid::Uuid;
 
-use crate::engine::outcome::PhaseKind;
 use crate::error::CaptureError;
 
 /// Sanitise a ticket id for filesystem use. Keeps `[A-Za-z0-9_-]`; replaces
@@ -26,20 +25,19 @@ pub fn sanitize_ticket_id(raw: &str) -> String {
         .collect()
 }
 
-/// Create `<session_root>/<sanitised_ticket>/cycle-<uuid>/iter-<n>/` and
-/// return its path. The directory is empty until `open_phase_files` is
-/// called for each phase.
-pub fn create_iter_dir(
+/// Create `<session_root>/<sanitised_ticket>/cycle-<uuid>/visit-<n>/` per
+/// fr:04 §Capture and return its path.
+pub fn create_visit_dir(
     session_root: &Path,
     ticket_id: &str,
     cycle_id: Uuid,
-    iter: u32,
+    visit_n: u32,
 ) -> Result<PathBuf, CaptureError> {
     let safe_ticket = sanitize_ticket_id(ticket_id);
     let path = session_root
         .join(safe_ticket)
         .join(format!("cycle-{cycle_id}"))
-        .join(format!("iter-{iter}"));
+        .join(format!("visit-{visit_n}"));
     fs::create_dir_all(&path).map_err(|source| CaptureError::CreateDir {
         path: path.clone(),
         source,
@@ -47,11 +45,10 @@ pub fn create_iter_dir(
     Ok(path)
 }
 
-/// Open `<phase>.stdout` and `<phase>.stderr` inside `iter_dir`. Returns the
-/// pair `(stdout, stderr)` ready for `Stdio::from(File)` redirection.
-pub fn open_phase_files(iter_dir: &Path, phase: PhaseKind) -> Result<(File, File), CaptureError> {
-    let stdout_path = iter_dir.join(format!("{}.stdout", phase.as_str()));
-    let stderr_path = iter_dir.join(format!("{}.stderr", phase.as_str()));
+/// Open `<state_id>.stdout` and `<state_id>.stderr` inside `visit_dir`.
+pub fn open_state_files(visit_dir: &Path, state_id: &str) -> Result<(File, File), CaptureError> {
+    let stdout_path = visit_dir.join(format!("{state_id}.stdout"));
+    let stderr_path = visit_dir.join(format!("{state_id}.stderr"));
     let stdout = File::create(&stdout_path).map_err(|source| CaptureError::OpenFile {
         path: stdout_path,
         source,
@@ -63,14 +60,29 @@ pub fn open_phase_files(iter_dir: &Path, phase: PhaseKind) -> Result<(File, File
     Ok((stdout, stderr))
 }
 
-/// Write `<phase>.response.json` (pretty-printed) inside `iter_dir`. Used
-/// after a successful Pre or Post directive parse.
-pub fn write_response_json(
-    iter_dir: &Path,
-    phase: PhaseKind,
+/// Write `<state_id>.exit_code` inside `visit_dir`.
+pub fn write_state_exit_code(
+    visit_dir: &Path,
+    state_id: &str,
+    exit_code: i32,
+) -> Result<(), CaptureError> {
+    let path = visit_dir.join(format!("{state_id}.exit_code"));
+    let mut file = File::create(&path).map_err(|source| CaptureError::OpenFile {
+        path: path.clone(),
+        source,
+    })?;
+    let body = format!("{exit_code}\n");
+    file.write_all(body.as_bytes())
+        .map_err(|source| CaptureError::Write { path, source })
+}
+
+/// Write `<state_id>.directive.json` (pretty-printed) inside `visit_dir`.
+pub fn write_state_directive_json(
+    visit_dir: &Path,
+    state_id: &str,
     value: &serde_json::Value,
 ) -> Result<(), CaptureError> {
-    let path = iter_dir.join(format!("{}.response.json", phase.as_str()));
+    let path = visit_dir.join(format!("{state_id}.directive.json"));
     let pretty = serde_json::to_vec_pretty(value).map_err(|err| CaptureError::Write {
         path: path.clone(),
         source: std::io::Error::other(err),
@@ -83,68 +95,13 @@ pub fn write_response_json(
         .map_err(|source| CaptureError::Write { path, source })
 }
 
-/// Write `run.exit_code` inside `iter_dir`. The text contents are
-/// `"<exit>\n"`.
-pub fn write_run_exit_code(iter_dir: &Path, exit_code: i32) -> Result<(), CaptureError> {
-    let path = iter_dir.join("run.exit_code");
-    let mut file = File::create(&path).map_err(|source| CaptureError::OpenFile {
-        path: path.clone(),
-        source,
-    })?;
-    let body = format!("{exit_code}\n");
-    file.write_all(body.as_bytes())
-        .map_err(|source| CaptureError::Write { path, source })
-}
-
-/// Files opened for one session-shape phase turn. The supervisor opens these
-/// at the start of `run_turn(kind, ...)` and rotates them when the next turn
-/// starts.
-#[allow(dead_code)]
-pub struct SessionPhaseFiles {
-    pub stdout: File,
-    pub stderr: File,
-    pub events: File,
-}
-
-/// Open `<phase>.stdout`, `<phase>.stderr`, and `<phase>.events.jsonl`
-/// inside `iter_dir`. All three files are truncated on open per slice-1
-/// `open_phase_files` semantics — the supervisor writes for the duration
-/// of one turn and never reopens the same triple twice.
-#[allow(dead_code)]
-pub fn open_session_phase_files(
-    iter_dir: &Path,
-    phase: PhaseKind,
-) -> Result<SessionPhaseFiles, CaptureError> {
-    let stdout_path = iter_dir.join(format!("{}.stdout", phase.as_str()));
-    let stderr_path = iter_dir.join(format!("{}.stderr", phase.as_str()));
-    let events_path = iter_dir.join(format!("{}.events.jsonl", phase.as_str()));
-    let stdout = File::create(&stdout_path).map_err(|source| CaptureError::OpenFile {
-        path: stdout_path,
-        source,
-    })?;
-    let stderr = File::create(&stderr_path).map_err(|source| CaptureError::OpenFile {
-        path: stderr_path,
-        source,
-    })?;
-    let events = File::create(&events_path).map_err(|source| CaptureError::OpenFile {
-        path: events_path,
-        source,
-    })?;
-    Ok(SessionPhaseFiles {
-        stdout,
-        stderr,
-        events,
-    })
-}
-
-/// Write `run.terminal.json` (pretty-printed) inside `iter_dir`. Used when
-/// the run-phase tee scanner spots a claude/codex `result` event mid-stream.
-#[allow(dead_code)]
-pub fn write_run_terminal_json(
-    iter_dir: &Path,
+/// Write `<state_id>.terminal.json` (pretty-printed) inside `visit_dir`.
+pub fn write_state_terminal_json(
+    visit_dir: &Path,
+    state_id: &str,
     value: &serde_json::Value,
 ) -> Result<(), CaptureError> {
-    let path = iter_dir.join("run.terminal.json");
+    let path = visit_dir.join(format!("{state_id}.terminal.json"));
     let pretty = serde_json::to_vec_pretty(value).map_err(|err| CaptureError::Write {
         path: path.clone(),
         source: std::io::Error::other(err),
@@ -163,14 +120,14 @@ mod tests {
     use tempfile::TempDir;
 
     #[test]
-    fn create_iter_dir_builds_full_path() {
+    fn create_visit_dir_builds_full_path() {
         let tmp = TempDir::new().unwrap();
-        let path = create_iter_dir(tmp.path(), "ENG-1", Uuid::nil(), 3).unwrap();
+        let path = create_visit_dir(tmp.path(), "ENG-1", Uuid::nil(), 3).unwrap();
         assert!(path.exists());
         let s = path.to_string_lossy();
         assert!(s.contains("ENG-1"));
         assert!(s.contains(&format!("cycle-{}", Uuid::nil())));
-        assert!(s.ends_with("iter-3"));
+        assert!(s.ends_with("visit-3"));
     }
 
     #[test]
@@ -181,58 +138,45 @@ mod tests {
     }
 
     #[test]
-    fn open_phase_files_creates_stdout_and_stderr() {
+    fn open_state_files_creates_stdout_and_stderr() {
         let tmp = TempDir::new().unwrap();
-        let dir = create_iter_dir(tmp.path(), "X", Uuid::nil(), 1).unwrap();
-        let (out, err) = open_phase_files(&dir, PhaseKind::Run).unwrap();
+        let dir = create_visit_dir(tmp.path(), "X", Uuid::nil(), 1).unwrap();
+        let (out, err) = open_state_files(&dir, "judge").unwrap();
         drop(out);
         drop(err);
-        assert!(dir.join("run.stdout").is_file());
-        assert!(dir.join("run.stderr").is_file());
+        assert!(dir.join("judge.stdout").is_file());
+        assert!(dir.join("judge.stderr").is_file());
     }
 
     #[test]
-    fn write_response_json_writes_pretty_payload() {
+    fn write_state_exit_code_writes_text() {
         let tmp = TempDir::new().unwrap();
-        let dir = create_iter_dir(tmp.path(), "X", Uuid::nil(), 1).unwrap();
-        let value = serde_json::json!({"directive":"run","note":"hi"});
-        write_response_json(&dir, PhaseKind::Pre, &value).unwrap();
-        let body = std::fs::read_to_string(dir.join("pre.response.json")).unwrap();
-        assert!(body.contains("\"directive\""));
-        assert!(body.contains("\"hi\""));
-    }
-
-    #[test]
-    fn write_run_exit_code_writes_text() {
-        let tmp = TempDir::new().unwrap();
-        let dir = create_iter_dir(tmp.path(), "X", Uuid::nil(), 1).unwrap();
-        write_run_exit_code(&dir, 7).unwrap();
+        let dir = create_visit_dir(tmp.path(), "X", Uuid::nil(), 1).unwrap();
+        write_state_exit_code(&dir, "impl", 7).unwrap();
         assert_eq!(
-            std::fs::read_to_string(dir.join("run.exit_code")).unwrap(),
+            std::fs::read_to_string(dir.join("impl.exit_code")).unwrap(),
             "7\n"
         );
     }
 
     #[test]
-    fn open_session_phase_files_creates_three_files() {
+    fn write_state_directive_json_pretty() {
         let tmp = TempDir::new().unwrap();
-        let dir = create_iter_dir(tmp.path(), "ENG-1", Uuid::nil(), 1).unwrap();
-        let files = open_session_phase_files(&dir, PhaseKind::Pre).unwrap();
-        drop(files);
-        assert!(dir.join("pre.stdout").is_file());
-        assert!(dir.join("pre.stderr").is_file());
-        assert!(dir.join("pre.events.jsonl").is_file());
+        let dir = create_visit_dir(tmp.path(), "X", Uuid::nil(), 1).unwrap();
+        let value = serde_json::json!({"directive":"end"});
+        write_state_directive_json(&dir, "judge", &value).unwrap();
+        let body = std::fs::read_to_string(dir.join("judge.directive.json")).unwrap();
+        assert!(body.contains("\"directive\""));
     }
 
     #[test]
-    fn write_run_terminal_json_writes_pretty_payload() {
+    fn write_state_terminal_json_pretty() {
         let tmp = TempDir::new().unwrap();
-        let dir = create_iter_dir(tmp.path(), "X", Uuid::nil(), 1).unwrap();
+        let dir = create_visit_dir(tmp.path(), "X", Uuid::nil(), 1).unwrap();
         let value = serde_json::json!({"type":"result","is_error":false});
-        write_run_terminal_json(&dir, &value).unwrap();
-        let body = std::fs::read_to_string(dir.join("run.terminal.json")).unwrap();
-        assert!(body.contains("\"is_error\""));
-        assert!(body.contains("false"));
+        write_state_terminal_json(&dir, "impl", &value).unwrap();
+        let body = std::fs::read_to_string(dir.join("impl.terminal.json")).unwrap();
+        assert!(body.contains("is_error"));
     }
 
     #[test]
@@ -241,7 +185,7 @@ mod tests {
         let blocker = tmp.path().join("blocker");
         std::fs::write(&blocker, b"i am a file").unwrap();
         let bad_root = blocker.join("subdir");
-        match create_iter_dir(&bad_root, "X", Uuid::nil(), 1) {
+        match create_visit_dir(&bad_root, "X", Uuid::nil(), 1) {
             Err(CaptureError::CreateDir { .. }) => {}
             other => panic!("expected CreateDir error, got {other:?}"),
         }

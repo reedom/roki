@@ -55,43 +55,41 @@ async fn readmit_after_revoke_reuses_worktree_same_inode() {
     std::fs::create_dir_all(&session_root).unwrap();
 
     let wt_root = work.path().join("wts");
+    // Slice 8: cycle no longer materializes worktrees. Pre-seed the dir so
+    // the inode-reuse and retention assertions have something to check.
     std::fs::create_dir_all(&wt_root).unwrap();
 
     let ticket_id = "ENG-100";
+    std::fs::create_dir_all(wt_root.join(ticket_id)).unwrap();
 
     // Two short rules: status=todo (cycle 1, materializes worktree) and
     // status=in_progress (cycle 2, after revoke + re-admit).
-    let workflow_path = work.path().join("WORKFLOW.toml");
+    let workflow_path = work.path().join("WORKFLOW.yaml");
     let workflow_body = r#"
-[admission]
-assignee = "u1"
+admission:
+  assignee: u1
+  repos:
+    - ghq: github.com/example/repo
 
-[[admission.repos]]
-ghq = "github.com/example/repo"
-
-[[rule]]
-[rule.when]
-status = "todo"
-[rule.when.labels]
-has_all = []
-[rule.pre]
-cmd = "printf '{\"directive\":\"run\"}'"
-[rule.run]
-cmd = "true"
-[rule.post]
-cmd = "printf '{\"directive\":\"end\",\"outcome\":\"todo_done\"}'"
-
-[[rule]]
-[rule.when]
-status = "in_progress"
-[rule.when.labels]
-has_all = []
-[rule.pre]
-cmd = "printf '{\"directive\":\"run\"}'"
-[rule.run]
-cmd = "true"
-[rule.post]
-cmd = "printf '{\"directive\":\"end\",\"outcome\":\"ip_done\"}'"
+rules:
+  - when:
+      status: todo
+    tasks:
+      - id: pre0
+        run: 'printf ''{\"directive\":\"run\"}'''
+      - id: run0
+        run: 'true'
+      - id: post0
+        run: 'printf ''{\"directive\":\"end\",\"outcome\":\"todo_done\"}'''
+  - when:
+      status: in_progress
+    tasks:
+      - id: pre1
+        run: 'printf ''{\"directive\":\"run\"}'''
+      - id: run1
+        run: 'true'
+      - id: post1
+        run: 'printf ''{\"directive\":\"end\",\"outcome\":\"ip_done\"}'''
 "#;
     std::fs::write(&workflow_path, workflow_body).unwrap();
 
@@ -105,7 +103,7 @@ token = "linear-test-token"
 bind = "127.0.0.1"
 port = {port}
 
-[default.ai.command]
+[default.ai]
 cli = "echo"
 
 [engine]

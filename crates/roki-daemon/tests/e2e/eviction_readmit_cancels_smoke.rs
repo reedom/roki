@@ -66,40 +66,39 @@ async fn re_admission_after_revoke_keeps_cache_for_next_cycle() {
 
     let ticket_id = "ENG-100";
 
+    // Slice 8: cycle no longer materializes worktrees. Pre-seed the dir so
+    // the eviction-retention assertion has something to check.
+    std::fs::create_dir_all(wt_root.join(ticket_id)).unwrap();
+
     // Two rules: status=todo runs slowly (gives B and C time to arrive
     // mid-cycle); status=in_progress runs fast (used by webhook D after
     // the first cycle completes, to prove the cache survived).
-    let workflow_path = work.path().join("WORKFLOW.toml");
+    let workflow_path = work.path().join("WORKFLOW.yaml");
     let workflow_body = r#"
-[admission]
-assignee = "u1"
+admission:
+  assignee: u1
+  repos:
+    - ghq: github.com/example/repo
 
-[[admission.repos]]
-ghq = "github.com/example/repo"
-
-[[rule]]
-[rule.when]
-status = "todo"
-[rule.when.labels]
-has_all = []
-[rule.pre]
-cmd = "printf '{\"directive\":\"run\"}'"
-[rule.run]
-cmd = "sleep 2"
-[rule.post]
-cmd = "printf '{\"directive\":\"end\",\"outcome\":\"todo_done\"}'"
-
-[[rule]]
-[rule.when]
-status = "in_progress"
-[rule.when.labels]
-has_all = []
-[rule.pre]
-cmd = "printf '{\"directive\":\"run\"}'"
-[rule.run]
-cmd = "true"
-[rule.post]
-cmd = "printf '{\"directive\":\"end\",\"outcome\":\"ip_done\"}'"
+rules:
+  - when:
+      status: todo
+    tasks:
+      - id: pre0
+        run: 'printf ''{\"directive\":\"run\"}'''
+      - id: run0
+        run: 'sleep 2'
+      - id: post0
+        run: 'printf ''{\"directive\":\"end\",\"outcome\":\"todo_done\"}'''
+  - when:
+      status: in_progress
+    tasks:
+      - id: pre1
+        run: 'printf ''{\"directive\":\"run\"}'''
+      - id: run1
+        run: 'true'
+      - id: post1
+        run: 'printf ''{\"directive\":\"end\",\"outcome\":\"ip_done\"}'''
 "#;
     std::fs::write(&workflow_path, workflow_body).unwrap();
 
@@ -113,7 +112,7 @@ token = "linear-test-token"
 bind = "127.0.0.1"
 port = {port}
 
-[default.ai.command]
+[default.ai]
 cli = "echo"
 
 [engine]

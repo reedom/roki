@@ -258,13 +258,18 @@ impl<R: CycleRunner + 'static> Dispatcher<R> {
 }
 
 #[cfg(test)]
+#[allow(clippy::field_reassign_with_default)]
 mod tests {
     use super::*;
-    use crate::config::workflow::{AdmissionRepo, AdmissionSection, Rule};
+    use crate::config::workflow::workflow_config_for_test;
     use crate::daemon::ticket_task::{CycleResult, CycleRunner};
     use crate::engine::context::CycleTrigger;
     use crate::engine::dispatch::DispatchTarget;
-    use crate::engine::outcome::{CycleKind, PhaseBody};
+    use crate::engine::outcome::CycleKind;
+    use crate::workflow::canonical::test_helpers as h;
+    use crate::workflow::canonical::{
+        EdgeTarget, RuleEntry, ScalarMatcher, StateMachine, Terminal, WhenClause,
+    };
     use std::sync::Mutex as StdMutex;
     use tempfile::TempDir;
 
@@ -307,24 +312,39 @@ mod tests {
         }
     }
 
-    fn workflow() -> Arc<WorkflowConfig> {
-        Arc::new(WorkflowConfig {
-            admission: AdmissionSection {
-                assignee: "u1".into(),
+    fn dummy_sm() -> StateMachine {
+        let mut sm = h::state_machine();
+        sm.start = "a".into();
+        let mut a = h::state("a", "true");
+        a.on_done = EdgeTarget::Terminal("__success__".into());
+        sm.states.insert("a".into(), a);
+        sm.terminals.insert(
+            "__success__".into(),
+            Terminal {
+                id: "__success__".into(),
+                outcome: "success".into(),
             },
-            repo: Some(AdmissionRepo {
-                ghq: "github.com/example/repo".into(),
-            }),
-            rules: vec![Rule {
-                when_status: "InProgress".into(),
-                when_labels_has_all: vec![],
-                pre: None,
-                run: PhaseBody::InlineCmd { cmd: "true".into() },
-                post: None,
-            }],
-            cleanups: vec![],
-            on_failures: vec![],
-        })
+        );
+        sm
+    }
+
+    fn rule_for(status: &str) -> RuleEntry {
+        let mut when = WhenClause::default();
+        when.status = Some(ScalarMatcher::Eq(status.into()));
+        RuleEntry {
+            when: Some(when),
+            state_machine: dummy_sm(),
+        }
+    }
+
+    fn workflow() -> Arc<WorkflowConfig> {
+        Arc::new(workflow_config_for_test(
+            "u1",
+            Some("github.com/example/repo"),
+            vec![rule_for("InProgress")],
+            vec![],
+            vec![],
+        ))
     }
 
     fn ticket(id: &str, status: &str) -> NormalizedTicket {
@@ -381,21 +401,13 @@ mod tests {
     }
 
     fn workflow_no_repos() -> Arc<WorkflowConfig> {
-        Arc::new(WorkflowConfig {
-            admission: AdmissionSection {
-                assignee: "u1".into(),
-            },
-            repo: None,
-            rules: vec![Rule {
-                when_status: "InProgress".into(),
-                when_labels_has_all: vec![],
-                pre: None,
-                run: PhaseBody::InlineCmd { cmd: "true".into() },
-                post: None,
-            }],
-            cleanups: vec![],
-            on_failures: vec![],
-        })
+        Arc::new(workflow_config_for_test(
+            "u1",
+            None,
+            vec![rule_for("InProgress")],
+            vec![],
+            vec![],
+        ))
     }
 
     fn dispatcher_no_repos(

@@ -1,7 +1,6 @@
-//! End-to-end smoke: a run phase that ignores SIGTERM and emits no stdout
-//! triggers stall detection. The cycle fails (no [[on_failure]] handler is
-//! configured) → the per-ticket task emits failure_unhandled. The persistent
-//! daemon stays alive afterwards; the test SIGTERMs it within the
+//! E2E: a state subprocess that ignores SIGTERM and emits no stdout triggers
+//! stall detection. With no `on_failure:` entry the per-ticket task emits
+//! failure_unhandled; daemon stays alive; the test SIGTERMs it within the
 //! stall window + grace period and asserts exit 0.
 
 use std::net::{SocketAddr, TcpListener};
@@ -44,26 +43,25 @@ async fn run_phase_stall_terminates_within_grace() {
     // writes to /dev/null so it does not inherit the stdout pipe — otherwise
     // sleep would keep the pipe open after sh is SIGKILLed and the daemon's
     // tee_stdout reader would block until sleep exits naturally.
-    let run_cmd = "trap '' TERM; sleep 30 </dev/null >/dev/null 2>&1";
+    // YAML double-quoted scalar; escape any embedded `\` and `"` if added.
+    let run_cmd = r#"trap '' TERM; sleep 30 </dev/null >/dev/null 2>&1"#;
 
-    let workflow_path = work.path().join("WORKFLOW.toml");
+    let workflow_path = work.path().join("WORKFLOW.yaml");
     let workflow_body = format!(
         r#"
-[admission]
-assignee = "u1"
+admission:
+  assignee: u1
+  repos:
+    - ghq: github.com/example/repo
 
-[[admission.repos]]
-ghq = "github.com/example/repo"
-
-[[rule]]
-[rule.when]
-status = "in_progress"
-[rule.when.labels]
-has_all = []
-[rule.run]
-cmd = {run_cmd_quoted}
+rules:
+  - when:
+      status: in_progress
+    tasks:
+      - id: run0
+        run: "{run_cmd}"
 "#,
-        run_cmd_quoted = toml_string(run_cmd),
+        run_cmd = run_cmd,
     );
     std::fs::write(&workflow_path, workflow_body).unwrap();
 
@@ -77,7 +75,7 @@ token = "linear-test-token"
 bind = "127.0.0.1"
 port = {port}
 
-[default.ai.command]
+[default.ai]
 cli = "true"
 stall_seconds = 1
 
@@ -163,24 +161,15 @@ session_root = "{session_root}"
         .find(|e| e.file_name().to_string_lossy().starts_with("cycle-"))
         .expect("cycle-<uuid> dir present");
     let cycle_path = cycle_entry.path();
-    let iter_dir = cycle_path.join("iter-1");
+    let visit_dir = cycle_path.join("visit-1");
     assert!(
-        iter_dir.join("run.stdout").is_file(),
-        "run.stdout preserved"
+        visit_dir.join("run0.stdout").is_file(),
+        "run0.stdout preserved"
     );
     assert!(
-        !iter_dir.join("run.terminal.json").exists(),
-        "run.terminal.json must not exist (no result event emitted)"
+        !visit_dir.join("run0.terminal.json").exists(),
+        "run0.terminal.json must not exist (no result event emitted)"
     );
-}
-
-fn toml_string(s: &str) -> String {
-    let escaped = s
-        .replace('\\', "\\\\")
-        .replace('"', "\\\"")
-        .replace('\n', "\\n")
-        .replace('\r', "\\r");
-    format!("\"{escaped}\"")
 }
 
 async fn wait_for_listener(addr: SocketAddr) {

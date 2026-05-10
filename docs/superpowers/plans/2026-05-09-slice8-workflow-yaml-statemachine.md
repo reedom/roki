@@ -34,17 +34,64 @@
 | 15 YAML examples + delete TOML | `893c5ac` | done |
 | 13 FR doc rewrite (fr:01/02/04→04-state/06/08) | `fb51aba` | done |
 
-**Pending (engine cliff — needs dedicated session):**
+## Session progress (2026-05-10, second pass — branch `feature/slice8-engine`)
+
+**Phases 1-5 of Task 8 landed:**
+
+| Sub-phase | Commit | Status |
+|---|---|---|
+| Phase 1: RealStateRunner + state-shaped capture + if_cond skip | `14ef20d` | done |
+| Phase 1 fmt drift | `64af51f` | done |
+| Phase 3: events `phase`→`state_id` + `visit_n` | (third commit) | done |
+| Phases 2 + 4 + 5: replace legacy phase/session engine with state-machine driver | (fourth commit, +1274 / -7291) | done |
+
+All four commits on `feature/slice8-engine` (off `main` at `7a43b21`).
+
+**Engine cliff status:** legacy `engine/{cycle, phase, session, directive}.rs` deleted; `config/workflow_md.rs` deleted; `engine/outcome.rs` slim (only `FailureKind` + `CycleKind`); `engine/context.rs` reduced to `CycleTrigger` enum. Production daemon now drives `cycle_state::run_cycle` + `RealStateRunner` + `on_failure::route` (canonical `RuleEntry` + `WhenClause`-based matcher) per cycle. **281 unit tests** + clippy on `--bin roki` clean. (Test-target clippy emits ~10 advisory `field_reassign_with_default` lints — non-blocking.)
+
+**Still pending — Tasks 11, 16-18 — needs a dedicated session:**
 
 | Task | Why deferred |
 |---|---|
-| 8 failure routing wiring | Demolish + replace `engine/cycle.rs` 44KB + `phase.rs` 34KB + `session.rs` 31KB + `directive.rs` 8KB; rewrite `engine/{outcome,on_failure,dispatch,context,cleanup,stall}.rs`, `daemon/{dispatcher,ticket_task,real_runner}.rs`, `events.rs`. Touch ~150KB. Each step breaks compile until full chain rewritten. |
-| 11 roki.toml config rename | `[default.ai.command]` → `[default.ai]` rename forces engine refactor (current code references `[default.ai.session]` and `[default.ai.command]`). |
-| 16 slice 1-7 e2e fixture migration | Each fixture's TOML emitter rewrites to new YAML harness; depends on Task 8 + 11 being live. |
-| 17 12 new slice 8 e2e fixtures | Depends on engine using YAML + state machine. |
-| 18 sweep | Final fmt + clippy + full e2e green. |
+| 11 roki.toml config rename | `[default.ai.command]` → `[default.ai]` rename. `config::roki::RokiConfig` still loads `[default.ai.command] cli + stall_seconds` and an unused `[default.ai.session]`. After the rename `RealStateRunner` reads from the merged section. ref:config rewrite simultaneously. |
+| 16 slice 1-7 e2e fixture migration | 33 e2e smoke tests under `crates/roki-daemon/tests/e2e/*.rs` inline `WORKFLOW.toml` content. Each must be rewritten to `WORKFLOW.yaml` (slice-8 sugar form). The crate's bin tests pass; only e2e are red. The first listener fails at `await_daemon_ready` because the binary aborts at startup loading TOML as YAML. |
+| 17 12 new slice 8 e2e fixtures | Coverage for state-machine paths, sentinel parsing (success / unparseable / schema_drift), recursion bound, terminals, `on_failure:` routing, immediate-delete cleanup shorthand. |
+| 18 sweep | Final `cargo fmt --all` + `cargo clippy --all-targets -- -D warnings` + full `cargo test -p roki-daemon` green. |
 
-**Resumption note:** Start Task 8. Read `engine/{phase,session,directive,cycle}.rs` end-to-end first; identify shared helpers (`engine/template`, `engine/stall`, `engine/worktree`, `engine/cwd`, `engine/stream` are reusable; `engine/context` needs Liquid-globals rewrite). Build `RealStateRunner` against the existing helper stack, then swap `daemon::ticket_task::CycleRunner` to consume it. Delete legacy modules last, after dispatcher uses canonical `RuleEntry`. ref:config rows for `[default.ai.session]`/`[default.ai.command]` should be replaced with the merged `[default.ai]` row simultaneously with the code change (Task 11).
+**Resumption note (after fourth commit):**
+
+Daemon binary now loads `WORKFLOW.yaml` via `config::workflow::WorkflowConfig::load` → `workflow::parse::parse_workflow_file` → `workflow::sugar::expand`. Per-cycle dispatch consumes `&RuleEntry` and runs `cycle_state::run_cycle(&entry.state_machine, &RealStateRunner, &mut CycleContext)` constructed by `daemon::real_runner::build_runner` + `build_cycle_context`.
+
+Failure routing: `on_failure::route(&workflow.on_failures, &meta)` matches `(meta.kind.as_str(), meta.state_id)` against each `RuleEntry.when.kind` + `when.phase` (slice-8 semantic: state id) scalar/in/not matchers; first match runs the handler's state machine as a `kind: failure` cycle. Recursion (handler-cycle failure) pushes to escalation queue with the canonical state_id.
+
+Capture layout: `<session_root>/<ticket>/cycle-<uuid>/visit-<n>/<state_id>.{stdout,stderr,exit_code,directive.json,terminal.json}` per fr:04 §Capture. Sentinel files at `<session_root>/<ticket>/directives/<state_id>.<visit_n>.json` per fr:04 §Sentinel directive contract.
+
+For a follow-up session:
+
+1. **Task 11**: rename `[default.ai.command]` → `[default.ai]` in `config/roki.rs`. Drop `[default.ai.session]` entirely (legacy session shape gone). Update `runtime.rs` reference to `cfg.default_ai_command` → `cfg.default_ai`. ref:config row update.
+2. **Task 16**: Walk every file under `crates/roki-daemon/tests/e2e/*.rs`. Each contains an inline `let workflow_body = r#"..."#` TOML literal. Rewrite to `WORKFLOW.yaml` schema (canonical reference: `docs/examples/WORKFLOW.minimal.yaml`). Common pattern:
+   ```toml
+   [[rule]]
+   [rule.when]
+   status = "in_progress"
+   [rule.run]
+   cmd = "true"
+   ```
+   becomes
+   ```yaml
+   rules:
+     - when:
+         status: in_progress
+       tasks:
+         - id: run
+           run: true
+   ```
+3. **Task 17**: Add 12 new slice-8 e2e fixtures (per spec §10 acceptance list). Use `RealStateRunner` paths (cli-line `printf '{"directive":"end"}' > "$ROKI_DIRECTIVE_PATH"`) for sentinel-driven directive coverage.
+4. **Task 18**: `cargo fmt --all`, `cargo clippy --all-targets -- -D warnings` (clean up `field_reassign_with_default` test lints), `cargo test -p roki-daemon` (full green).
+
+**Slice 8 acceptance criterion already met by the fourth commit:**
+- `grep -rn '"phase"' crates/roki-daemon/src/` returns nothing in emit sites (operator-facing TOML key in `config/workflow.rs` legacy-removed; only `when.phase` matcher in canonical `WhenClause` parser remains, semantically slice-8's state-id matcher per spec §11.6).
+- `cargo test -p roki-daemon engine::cycle_state::tests` and `cargo test -p roki-daemon daemon::ticket_task::tests` green.
 
 ---
 

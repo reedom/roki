@@ -49,23 +49,21 @@ async fn duplicate_webhook_unchanged_triple_is_no_op() {
 
     let ticket_id = "ENG-100";
 
-    let workflow_path = work.path().join("WORKFLOW.toml");
+    let workflow_path = work.path().join("WORKFLOW.yaml");
     let workflow_body = r#"
-[admission]
-assignee = "u1"
+admission:
+  assignee: u1
+  repos:
+    - ghq: github.com/example/repo
 
-[[admission.repos]]
-ghq = "github.com/example/repo"
-
-[[rule]]
-[rule.when]
-status = "in_progress"
-[rule.when.labels]
-has_all = []
-[rule.run]
-cmd = "true"
-[rule.post]
-cmd = "printf '{\"directive\":\"end\",\"outcome\":\"done\"}'"
+rules:
+  - when:
+      status: in_progress
+    tasks:
+      - id: run0
+        run: 'true'
+      - id: post0
+        run: 'printf ''{\"directive\":\"end\",\"outcome\":\"done\"}'''
 "#;
     std::fs::write(&workflow_path, workflow_body).unwrap();
 
@@ -79,7 +77,7 @@ token = "linear-test-token"
 bind = "127.0.0.1"
 port = {port}
 
-[default.ai.command]
+[default.ai]
 cli = "echo"
 
 [engine]

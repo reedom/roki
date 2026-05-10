@@ -76,23 +76,21 @@ async fn webhook_during_cold_start_returns_503() {
 
     let ticket_id = "ENG-700";
 
-    let workflow_path = work.path().join("WORKFLOW.toml");
+    let workflow_path = work.path().join("WORKFLOW.yaml");
     let workflow_body = r#"
-[admission]
-assignee = "u1"
+admission:
+  assignee: u1
+  repos:
+    - ghq: github.com/example/repo
 
-[[admission.repos]]
-ghq = "github.com/example/repo"
-
-[[rule]]
-[rule.when]
-status = "todo"
-[rule.when.labels]
-has_all = []
-[rule.run]
-cmd = "true"
-[rule.post]
-cmd = "printf '{\"directive\":\"end\",\"outcome\":\"todo_done\"}'"
+rules:
+  - when:
+      status: todo
+    tasks:
+      - id: run0
+        run: 'true'
+      - id: post0
+        run: 'printf ''{\"directive\":\"end\",\"outcome\":\"todo_done\"}'''
 "#;
     std::fs::write(&workflow_path, workflow_body).unwrap();
 
@@ -106,7 +104,7 @@ token = "linear-test-token"
 bind = "127.0.0.1"
 port = {port}
 
-[default.ai.command]
+[default.ai]
 cli = "echo"
 
 [engine]

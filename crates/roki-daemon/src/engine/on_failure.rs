@@ -1,124 +1,178 @@
+//! `on_failure:` first-match evaluation.
+//!
+//! Slice 8: `on_failure` entries are canonical `RuleEntry` rows whose
+//! `WhenClause` carries `kind` (failure kind, scalar/in/not) and an optional
+//! `phase` (renamed semantically to "state id" — same field, broader
+//! semantics per spec §11.6). Match is on `(meta.kind, meta.state_id)`.
+//!
+//! On a match the daemon spawns a `kind: failure` cycle that runs the
+//! handler's state machine.
+
 #![allow(dead_code)]
 
-//! `[[on_failure]]` first-match evaluation against a `FailureMeta`.
-//!
-//! Per fr:06 §53 + §63, `when.kind` accepts:
-//!   - single value: `when.kind = "stall"`
-//!   - in-array:     `when.kind.in = ["unparseable", "schema_drift"]`
-//!   - not:          `when.kind.not = "iter_exhausted"`
-//!
-//! plus optional `when.phase = "pre" | "run" | "post"`.
-//!
-//! Exactly one of the three `when.kind` forms may be set per entry; mixing
-//! them is a config-load error (`OnFailureKindMatcherConflict`).
+use crate::engine::cycle_state::FailureMetadata;
+#[cfg(test)]
+use crate::engine::outcome::FailureKind;
+use crate::workflow::canonical::{RuleEntry, ScalarMatcher, WhenClause};
 
-use crate::engine::outcome::{FailureKind, FailureMeta, PhaseBody, PhaseKind};
-
-#[derive(Debug, Clone)]
-pub enum KindMatcher {
-    Eq(FailureKind),
-    In(Vec<FailureKind>),
-    Not(FailureKind),
+/// Walk `entries` in declared order; return the first whose `when:` matcher
+/// accepts `meta`. Entries without a `kind:` matcher are skipped — the spec
+/// requires every `on_failure` entry to declare a kind matcher.
+pub fn route<'a>(entries: &'a [RuleEntry], meta: &FailureMetadata) -> Option<&'a RuleEntry> {
+    entries.iter().find(|e| matches_meta(e.when.as_ref(), meta))
 }
 
-#[derive(Debug, Clone)]
-pub struct OnFailure {
-    pub when_kind: KindMatcher,
-    pub when_phase: Option<PhaseKind>,
-    pub pre: Option<PhaseBody>,
-    pub run: PhaseBody,
-    pub post: Option<PhaseBody>,
-}
-
-impl OnFailure {
-    pub fn matches(&self, meta: &FailureMeta) -> bool {
-        let kind_ok = match &self.when_kind {
-            KindMatcher::Eq(k) => *k == meta.kind,
-            KindMatcher::In(ks) => ks.contains(&meta.kind),
-            KindMatcher::Not(k) => *k != meta.kind,
-        };
-        let phase_ok = self.when_phase.is_none_or(|p| p == meta.phase);
-        kind_ok && phase_ok
+fn matches_meta(when: Option<&WhenClause>, meta: &FailureMetadata) -> bool {
+    let Some(w) = when else {
+        return false;
+    };
+    let Some(kind_matcher) = &w.kind else {
+        return false;
+    };
+    if !scalar_matches(kind_matcher, meta.kind.as_str()) {
+        return false;
     }
+    // `when.phase` is the legacy operator-facing key; semantics in slice 8
+    // is "match the state id".
+    if let Some(state_matcher) = &w.phase {
+        if !scalar_matches(state_matcher, &meta.state_id) {
+            return false;
+        }
+    }
+    true
 }
 
-pub fn route<'a>(entries: &'a [OnFailure], meta: &FailureMeta) -> Option<&'a OnFailure> {
-    entries.iter().find(|e| e.matches(meta))
+fn scalar_matches(m: &ScalarMatcher, candidate: &str) -> bool {
+    match m {
+        ScalarMatcher::Eq(s) => s == candidate,
+        ScalarMatcher::Not(s) => s != candidate,
+        ScalarMatcher::In(items) => items.iter().any(|s| s == candidate),
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::engine::outcome::{FailureKind, PhaseKind};
+    use crate::workflow::canonical::test_helpers as h;
+    use crate::workflow::canonical::{StateMachine, Terminal};
+    use std::collections::BTreeMap;
 
-    fn meta(kind: FailureKind, phase: PhaseKind) -> FailureMeta {
-        FailureMeta {
-            failed_cycle_id: uuid::Uuid::nil(),
+    fn meta(kind: FailureKind, state_id: &str) -> FailureMetadata {
+        FailureMetadata {
             kind,
-            phase,
-            iter: 1,
-            exit_code: None,
+            state_id: state_id.into(),
+            visit_n: 1,
             error_text: String::new(),
         }
     }
 
-    fn entry(when_kind: KindMatcher, when_phase: Option<PhaseKind>) -> OnFailure {
-        OnFailure {
-            when_kind,
-            when_phase,
-            pre: None,
-            run: PhaseBody::InlineCmd { cmd: "true".into() },
-            post: None,
+    fn empty_sm() -> StateMachine {
+        let mut sm = h::state_machine();
+        sm.start = "__success__".into();
+        sm.terminals.insert(
+            "__success__".into(),
+            Terminal {
+                id: "__success__".into(),
+                outcome: "noop".into(),
+            },
+        );
+        sm
+    }
+
+    fn entry(when: Option<WhenClause>) -> RuleEntry {
+        RuleEntry {
+            when,
+            state_machine: empty_sm(),
+        }
+    }
+
+    fn when_kind(kind: ScalarMatcher) -> WhenClause {
+        WhenClause {
+            kind: Some(kind),
+            ..WhenClause::default()
+        }
+    }
+
+    fn when_kind_phase(kind: ScalarMatcher, phase: ScalarMatcher) -> WhenClause {
+        WhenClause {
+            kind: Some(kind),
+            phase: Some(phase),
+            ..WhenClause::default()
         }
     }
 
     #[test]
     fn matcher_eq() {
-        let e = entry(KindMatcher::Eq(FailureKind::Stall), None);
-        assert!(e.matches(&meta(FailureKind::Stall, PhaseKind::Run)));
-        assert!(!e.matches(&meta(FailureKind::Unparseable, PhaseKind::Post)));
+        let entries = vec![entry(Some(when_kind(ScalarMatcher::Eq("stall".into()))))];
+        assert!(route(&entries, &meta(FailureKind::Stall, "run")).is_some());
+        assert!(route(&entries, &meta(FailureKind::Unparseable, "post")).is_none());
     }
 
     #[test]
     fn matcher_in() {
-        let e = entry(
-            KindMatcher::In(vec![FailureKind::Unparseable, FailureKind::SchemaDrift]),
-            None,
-        );
-        assert!(e.matches(&meta(FailureKind::Unparseable, PhaseKind::Post)));
-        assert!(e.matches(&meta(FailureKind::SchemaDrift, PhaseKind::Pre)));
-        assert!(!e.matches(&meta(FailureKind::Stall, PhaseKind::Run)));
+        let entries = vec![entry(Some(when_kind(ScalarMatcher::In(vec![
+            "unparseable".into(),
+            "schema_drift".into(),
+        ]))))];
+        assert!(route(&entries, &meta(FailureKind::Unparseable, "post")).is_some());
+        assert!(route(&entries, &meta(FailureKind::SchemaDrift, "pre")).is_some());
+        assert!(route(&entries, &meta(FailureKind::Stall, "run")).is_none());
     }
 
     #[test]
     fn matcher_not() {
-        let e = entry(KindMatcher::Not(FailureKind::IterExhausted), None);
-        assert!(e.matches(&meta(FailureKind::Stall, PhaseKind::Run)));
-        assert!(!e.matches(&meta(FailureKind::IterExhausted, PhaseKind::Post)));
+        let entries = vec![entry(Some(when_kind(ScalarMatcher::Not(
+            "recursion_bound".into(),
+        ))))];
+        assert!(route(&entries, &meta(FailureKind::Stall, "run")).is_some());
+        assert!(route(&entries, &meta(FailureKind::RecursionBound, "post")).is_none());
     }
 
     #[test]
-    fn matcher_phase_optional() {
-        let e = entry(KindMatcher::Eq(FailureKind::Stall), Some(PhaseKind::Run));
-        assert!(e.matches(&meta(FailureKind::Stall, PhaseKind::Run)));
-        assert!(!e.matches(&meta(FailureKind::Stall, PhaseKind::Pre)));
+    fn matcher_phase_state_id_optional() {
+        let entries = vec![entry(Some(when_kind_phase(
+            ScalarMatcher::Eq("stall".into()),
+            ScalarMatcher::Eq("run".into()),
+        )))];
+        assert!(route(&entries, &meta(FailureKind::Stall, "run")).is_some());
+        assert!(route(&entries, &meta(FailureKind::Stall, "pre")).is_none());
     }
 
     #[test]
     fn route_first_match_wins() {
         let entries = vec![
-            entry(KindMatcher::Eq(FailureKind::Stall), Some(PhaseKind::Pre)),
-            entry(KindMatcher::Eq(FailureKind::Stall), None),
+            entry(Some(when_kind_phase(
+                ScalarMatcher::Eq("stall".into()),
+                ScalarMatcher::Eq("pre".into()),
+            ))),
+            entry(Some(when_kind(ScalarMatcher::Eq("stall".into())))),
         ];
-        let m = meta(FailureKind::Stall, PhaseKind::Run);
-        let hit = route(&entries, &m).unwrap();
-        assert!(hit.when_phase.is_none());
+        let hit = route(&entries, &meta(FailureKind::Stall, "run")).unwrap();
+        // Second entry wins because the first's state_id matcher fails.
+        assert!(hit.when.as_ref().unwrap().phase.is_none());
     }
 
     #[test]
     fn route_no_match_returns_none() {
-        let entries = vec![entry(KindMatcher::Eq(FailureKind::Stall), None)];
-        let m = meta(FailureKind::Unparseable, PhaseKind::Post);
-        assert!(route(&entries, &m).is_none());
+        let entries = vec![entry(Some(when_kind(ScalarMatcher::Eq("stall".into()))))];
+        assert!(route(&entries, &meta(FailureKind::Unparseable, "post")).is_none());
+    }
+
+    #[test]
+    fn entry_without_kind_matcher_never_matches() {
+        let entries = vec![entry(Some(WhenClause::default()))];
+        assert!(route(&entries, &meta(FailureKind::Stall, "run")).is_none());
+    }
+
+    #[test]
+    fn entry_without_when_clause_never_matches() {
+        let entries = vec![entry(None)];
+        assert!(route(&entries, &meta(FailureKind::Stall, "run")).is_none());
+    }
+
+    // BTreeMap stays imported (silence unused) by referencing it here.
+    #[test]
+    fn _imports() {
+        let _: BTreeMap<String, Terminal> = BTreeMap::new();
     }
 }

@@ -6,14 +6,13 @@
 // of leaking the relaxation crate-wide.
 #![allow(dead_code)]
 
-//! `roki.toml` loader for the walking-skeleton daemon.
+//! `roki.toml` loader.
 //!
-//! Reads the six canonical sections the skeleton path needs (`[linear]`,
-//! `[linear.webhook]`, `[default.ai.command]`, `[engine]`, `[paths]`,
-//! `[log]`) per [`ref:config`](../../../docs/reference/config.md).
-//! Required-field set per design `config::roki`. Unknown keys and
-//! accepted-without-applying keys (`[default.ai.session]`,
-//! `[linear.webhook].secret`) load silently.
+//! Reads the canonical sections (`[linear]`, `[linear.webhook]`,
+//! `[default.ai]`, `[engine]`, `[paths]`, `[log]`, `[escalation]`) per
+//! [`ref:config`](../../../docs/reference/config.md). Slice 8 dropped
+//! `[default.ai.session]` (no more long-lived AI session shape) and
+//! collapsed `[default.ai.command]` into `[default.ai]`.
 //!
 //! `[linear].token` is held in process memory; the hand-rolled `Debug`
 //! impl on `LinearSection` masks it as `***` so tracing emissions of the
@@ -34,14 +33,11 @@ use crate::error::RokiConfigError;
 pub struct RokiConfig {
     pub linear: LinearSection,
     pub linear_webhook: LinearWebhookSection,
-    pub default_ai_command: DefaultAiCommandSection,
+    pub default_ai: DefaultAiSection,
     pub engine: EngineSection,
     pub paths: PathsSection,
     pub log: LogSection,
     pub escalation: EscalationSection,
-    /// `[default.ai.session]` section. Slice 2 loads it eagerly so cycles
-    /// can resolve the session subprocess cli + stall window.
-    pub default_ai_session: Option<DefaultAiSessionSection>,
 }
 
 /// `[linear]` section. Only `token` is required at the skeleton level.
@@ -70,26 +66,12 @@ pub struct LinearWebhookSection {
     pub secret: Option<String>,
 }
 
-/// `[default.ai.command]` section.
+/// `[default.ai]` section. Slice 8 collapsed `[default.ai.command]` into
+/// this section and dropped `[default.ai.session]` entirely.
 #[derive(Clone, Debug)]
-pub struct DefaultAiCommandSection {
+pub struct DefaultAiSection {
     pub cli: String,
-    /// Stdout-silence threshold in seconds; defaults to 300. Per shape default in
-    /// docs/reference/config.md.
-    pub stall_seconds: u32,
-}
-
-/// `[default.ai.session]` section.
-///
-/// Slice 2 promotes the section from "accepted-without-applying" to a
-/// loaded shape: `cli` stays optional (only required when an actual phase
-/// resolves to session shape, checked at cycle start), `stall_seconds` gets
-/// the canonical default 600.
-#[derive(Clone, Debug)]
-pub struct DefaultAiSessionSection {
-    pub cli: Option<String>,
-    /// Stdout-silence threshold in seconds; defaults to 600. Applied also to the
-    /// iter_exhausted post-stdin-close grace per fr:01 §123-125.
+    /// Stdout-silence threshold in seconds; defaults to `300`.
     pub stall_seconds: u32,
 }
 
@@ -150,12 +132,11 @@ impl fmt::Debug for RokiConfig {
         f.debug_struct("RokiConfig")
             .field("linear", &self.linear)
             .field("linear_webhook", &self.linear_webhook)
-            .field("default_ai_command", &self.default_ai_command)
+            .field("default_ai", &self.default_ai)
             .field("engine", &self.engine)
             .field("paths", &self.paths)
             .field("log", &self.log)
             .field("escalation", &self.escalation)
-            .field("default_ai_session", &self.default_ai_session)
             .finish()
     }
 }
@@ -216,18 +197,17 @@ impl RokiConfig {
                 port: 0,
                 secret: None,
             },
-            default_ai_command: DefaultAiCommandSection {
+            default_ai: DefaultAiSection {
                 cli: "echo".to_string(),
                 stall_seconds: 300,
             },
             engine: EngineSection::default(),
             paths: PathsSection {
-                workflow: session_root.join("WORKFLOW.toml"),
+                workflow: session_root.join("WORKFLOW.yaml"),
                 session_root: session_root.to_path_buf(),
             },
             log: LogSection::default(),
             escalation: EscalationSection::default(),
-            default_ai_session: None,
         }
     }
 }
@@ -270,20 +250,6 @@ struct RawDefaultBlock {
 #[derive(Default, Deserialize)]
 #[serde(default)]
 struct RawDefaultAi {
-    command: Option<RawDefaultAiCommand>,
-    session: Option<RawDefaultAiSession>,
-}
-
-#[derive(Default, Deserialize)]
-#[serde(default)]
-struct RawDefaultAiCommand {
-    cli: Option<String>,
-    stall_seconds: Option<i64>,
-}
-
-#[derive(Default, Deserialize)]
-#[serde(default)]
-struct RawDefaultAiSession {
     cli: Option<String>,
     stall_seconds: Option<i64>,
 }
@@ -323,7 +289,6 @@ impl RawRokiConfig {
         let raw_webhook = raw_linear.webhook.unwrap_or_default();
         let raw_default = self.default_block.unwrap_or_default();
         let raw_default_ai = raw_default.ai.unwrap_or_default();
-        let raw_default_command = raw_default_ai.command.unwrap_or_default();
         let raw_engine = self.engine.unwrap_or_default();
         let raw_paths = self.paths.unwrap_or_default();
         let raw_log = self.log.unwrap_or_default();
@@ -338,31 +303,15 @@ impl RawRokiConfig {
             secret: raw_webhook.secret,
         };
 
-        let cmd_stall = parse_stall_seconds(
+        let stall = parse_stall_seconds(
             path,
-            "default.ai.command.stall_seconds",
-            raw_default_command.stall_seconds,
+            "default.ai.stall_seconds",
+            raw_default_ai.stall_seconds,
             300,
         )?;
-        let default_ai_command = DefaultAiCommandSection {
-            cli: required_string(path, "default.ai.command.cli", raw_default_command.cli)?,
-            stall_seconds: cmd_stall,
-        };
-
-        let default_ai_session = match raw_default_ai.session {
-            None => None,
-            Some(raw_session) => {
-                let session_stall = parse_stall_seconds(
-                    path,
-                    "default.ai.session.stall_seconds",
-                    raw_session.stall_seconds,
-                    600,
-                )?;
-                Some(DefaultAiSessionSection {
-                    cli: raw_session.cli,
-                    stall_seconds: session_stall,
-                })
-            }
+        let default_ai = DefaultAiSection {
+            cli: required_string(path, "default.ai.cli", raw_default_ai.cli)?,
+            stall_seconds: stall,
         };
 
         let paths_section = PathsSection {
@@ -385,12 +334,11 @@ impl RawRokiConfig {
         Ok(RokiConfig {
             linear,
             linear_webhook,
-            default_ai_command,
+            default_ai,
             engine,
             paths: paths_section,
             log,
             escalation,
-            default_ai_session,
         })
     }
 }
@@ -516,17 +464,14 @@ bind = "127.0.0.1"
 port = 8080
 secret = "wh_secret"
 
-[default.ai.command]
+[default.ai]
 cli = "claude --print"
-
-[default.ai.session]
-cli = "claude-code"
 
 [engine]
 max_iterations = 5
 
 [paths]
-workflow = "/etc/roki/WORKFLOW.toml"
+workflow = "/etc/roki/WORKFLOW.yaml"
 session_root = "/var/roki/sessions"
 
 [log]
@@ -545,10 +490,10 @@ destination = "stdout"
         assert_eq!(cfg.linear_webhook.bind, "127.0.0.1");
         assert_eq!(cfg.linear_webhook.port, 8080);
         assert_eq!(cfg.linear_webhook.secret.as_deref(), Some("wh_secret"));
-        assert_eq!(cfg.default_ai_command.cli, "claude --print");
+        assert_eq!(cfg.default_ai.cli, "claude --print");
         assert_eq!(
             cfg.paths.workflow,
-            std::path::PathBuf::from("/etc/roki/WORKFLOW.toml")
+            std::path::PathBuf::from("/etc/roki/WORKFLOW.yaml")
         );
         assert_eq!(
             cfg.paths.session_root,
@@ -567,11 +512,11 @@ destination = "stdout"
 bind = "127.0.0.1"
 port = 8080
 
-[default.ai.command]
+[default.ai]
 cli = "claude --print"
 
 [paths]
-workflow = "/etc/roki/WORKFLOW.toml"
+workflow = "/etc/roki/WORKFLOW.yaml"
 session_root = "/var/roki/sessions"
 
 [engine]
@@ -599,11 +544,11 @@ token = "tok"
 [linear.webhook]
 port = 8080
 
-[default.ai.command]
+[default.ai]
 cli = "claude --print"
 
 [paths]
-workflow = "/etc/roki/WORKFLOW.toml"
+workflow = "/etc/roki/WORKFLOW.yaml"
 session_root = "/var/roki/sessions"
 
 [engine]
@@ -630,19 +575,6 @@ session_root = "/var/roki/sessions"
         let cfg = RokiConfig::load(&path).expect("unknown sections must not fail loading");
         // Required fields still populated.
         assert_eq!(cfg.linear.token, "lin_api_secret_value");
-    }
-
-    #[test]
-    fn accepted_without_applying_default_ai_session_loads_ok() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = write_toml(&dir, HAPPY_PATH_TOML);
-
-        let cfg = RokiConfig::load(&path).expect("loads ok");
-        let session = cfg
-            .default_ai_session
-            .as_ref()
-            .expect("default.ai.session table present");
-        assert_eq!(session.cli.as_deref(), Some("claude-code"));
     }
 
     #[test]
@@ -701,7 +633,7 @@ token = "x"
 bind = "127.0.0.1"
 port = 8000
 
-[default.ai.command]
+[default.ai]
 cli = "echo"
 
 [engine]
@@ -729,25 +661,20 @@ token = "t"
 bind = "127.0.0.1"
 port = 7000
 
-[default.ai.command]
+[default.ai]
 cli = "claude --print"
-
-[default.ai.session]
-cli = "claude --interactive"
 
 [engine]
 
 [paths]
-workflow = "./WORKFLOW.toml"
+workflow = "./WORKFLOW.yaml"
 session_root = "./.roki/sessions"
 "#;
         let dir = tempfile::TempDir::new().unwrap();
         let path = dir.path().join("roki.toml");
         std::fs::write(&path, toml).unwrap();
         let cfg = RokiConfig::load(&path).unwrap();
-        assert_eq!(cfg.default_ai_command.stall_seconds, 300);
-        let session = cfg.default_ai_session.as_ref().expect("session present");
-        assert_eq!(session.stall_seconds, 600);
+        assert_eq!(cfg.default_ai.stall_seconds, 300);
     }
 
     #[test]
@@ -760,14 +687,14 @@ token = "t"
 bind = "127.0.0.1"
 port = 7000
 
-[default.ai.command]
+[default.ai]
 cli = "claude --print"
 stall_seconds = 0
 
 [engine]
 
 [paths]
-workflow = "./WORKFLOW.toml"
+workflow = "./WORKFLOW.yaml"
 session_root = "./.roki/sessions"
 "#;
         let dir = tempfile::TempDir::new().unwrap();
@@ -776,42 +703,7 @@ session_root = "./.roki/sessions"
         let err = RokiConfig::load(&path).unwrap_err();
         match err {
             RokiConfigError::TypeMismatch { key, .. } => {
-                assert_eq!(key, "default.ai.command.stall_seconds");
-            }
-            other => panic!("expected TypeMismatch, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn stall_seconds_session_zero_is_rejected() {
-        let toml = r#"
-[linear]
-token = "t"
-
-[linear.webhook]
-bind = "127.0.0.1"
-port = 7000
-
-[default.ai.command]
-cli = "claude --print"
-
-[default.ai.session]
-cli = "claude --interactive"
-stall_seconds = 0
-
-[engine]
-
-[paths]
-workflow = "./WORKFLOW.toml"
-session_root = "./.roki/sessions"
-"#;
-        let dir = tempfile::TempDir::new().unwrap();
-        let path = dir.path().join("roki.toml");
-        std::fs::write(&path, toml).unwrap();
-        let err = RokiConfig::load(&path).unwrap_err();
-        match err {
-            RokiConfigError::TypeMismatch { key, .. } => {
-                assert_eq!(key, "default.ai.session.stall_seconds");
+                assert_eq!(key, "default.ai.stall_seconds");
             }
             other => panic!("expected TypeMismatch, got {other:?}"),
         }
@@ -828,7 +720,7 @@ token = "x"
 bind = "127.0.0.1"
 port = 8000
 
-[default.ai.command]
+[default.ai]
 cli = "echo"
 
 [engine]
@@ -859,7 +751,7 @@ token = "x"
 bind = "127.0.0.1"
 port = 8000
 
-[default.ai.command]
+[default.ai]
 cli = "echo"
 
 [engine]
@@ -888,7 +780,7 @@ token = "x"
 bind = "127.0.0.1"
 port = 8000
 
-[default.ai.command]
+[default.ai]
 cli = "echo"
 
 [engine]
@@ -919,7 +811,7 @@ token = "x"
 bind = "127.0.0.1"
 port = 8000
 
-[default.ai.command]
+[default.ai]
 cli = "echo"
 
 [engine]

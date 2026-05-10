@@ -81,8 +81,28 @@ where
             });
         }
 
-        // Liquid `if:` skip lands in Task 8 alongside the real subprocess
-        // runner. For now, treat `if_cond.is_some()` as always-true.
+        // Liquid `if:` skip — when the expression evaluates falsy the state
+        // does not spawn a subprocess; the cycle advances to `on_done` with
+        // empty captures (spec §2.4 cycle runtime loop). Render error → the
+        // skip evaluation reports `template_error` like a body render error.
+        if let Some(expr) = &state.if_cond {
+            let liquid_globals = build_skip_globals(state, ctx, visit_n);
+            match crate::engine::template::eval_cond(expr, &liquid_globals) {
+                Ok(true) => { /* fall through and run the state */ }
+                Ok(false) => {
+                    current_id = resolve_target(state.on_done.clone());
+                    continue;
+                }
+                Err(err) => {
+                    return Err(FailureMetadata {
+                        kind: FailureKind::TemplateError,
+                        state_id: current_id.clone(),
+                        visit_n,
+                        error_text: format!("if_cond render: {err}"),
+                    });
+                }
+            }
+        }
 
         let outcome = runner.run_state(state, ctx).await;
         match outcome {
@@ -113,13 +133,74 @@ fn resolve_target(target: EdgeTarget) -> StateId {
     }
 }
 
+/// Build the Liquid globals object used to evaluate `state.if_cond`. Mirrors
+/// the per-state shape produced by `engine::real_state_runner` so operators
+/// see the same data in both surfaces. Kept minimal here — the production
+/// runner builds the full object including past task captures and ROKI_*
+/// scalars; the skip evaluator only needs `cycle.iter`, `state.id`,
+/// `state.visit_n`, and any `tasks.*` already accumulated.
+fn build_skip_globals(
+    state: &crate::workflow::canonical::State,
+    ctx: &CycleContext,
+    visit_n: u32,
+) -> liquid::Object {
+    use liquid::model::Value;
+
+    let mut globals: liquid::Object = ctx
+        .globals
+        .iter()
+        .map(|(k, v)| {
+            (
+                k.clone().into(),
+                liquid::model::to_value(v).unwrap_or(Value::Nil),
+            )
+        })
+        .collect();
+
+    if let Some(Value::Object(cycle)) = globals.get_mut("cycle") {
+        cycle.insert("iter".into(), Value::scalar(ctx.iter as i64));
+    }
+
+    let mut state_obj = liquid::Object::new();
+    state_obj.insert("id".into(), Value::scalar(state.id.clone()));
+    state_obj.insert("visit_n".into(), Value::scalar(visit_n as i64));
+    globals.insert("state".into(), Value::Object(state_obj));
+
+    let mut tasks_obj = liquid::Object::new();
+    for (id, captures) in &ctx.task_captures {
+        let mut entry = liquid::Object::new();
+        entry.insert("exit_code".into(), Value::scalar(captures.exit_code as i64));
+        entry.insert(
+            "duration_seconds".into(),
+            Value::scalar(captures.duration_seconds as i64),
+        );
+        if let Some(d) = &captures.directive {
+            let mut dobj = liquid::Object::new();
+            dobj.insert("directive".into(), Value::scalar(d.directive.clone()));
+            if let Some(o) = &d.outcome {
+                dobj.insert("outcome".into(), Value::scalar(o.clone()));
+            }
+            for (k, v) in &d.extra {
+                dobj.insert(
+                    k.clone().into(),
+                    liquid::model::to_value(v).unwrap_or(Value::Nil),
+                );
+            }
+            entry.insert("directive".into(), Value::Object(dobj));
+        }
+        tasks_obj.insert(id.clone().into(), Value::Object(entry));
+    }
+    globals.insert("tasks".into(), Value::Object(tasks_obj));
+
+    globals
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::engine::state_runtime::{empty_captures, MockStateRunner, TaskCaptures};
+    use crate::engine::state_runtime::{MockStateRunner, TaskCaptures, empty_captures};
+    use crate::workflow::canonical::Terminal;
     use crate::workflow::canonical::test_helpers as h;
-    use crate::workflow::canonical::{State, StateBody, Terminal};
-    use std::collections::BTreeMap;
 
     fn linear_chain(ids: &[&str]) -> StateMachine {
         let mut sm = h::state_machine();
@@ -195,16 +276,14 @@ mod tests {
 
     #[tokio::test]
     async fn directive_outcome_field_overrides_terminal_outcome() {
-        use serde_json::Map;
         use crate::engine::sentinel::DirectivePayload;
+        use serde_json::Map;
 
         let mut sm = h::state_machine();
         sm.start = "a".into();
         let mut a = h::state("a", "x");
-        a.directives.insert(
-            "end".into(),
-            EdgeTarget::Terminal("__success__".into()),
-        );
+        a.directives
+            .insert("end".into(), EdgeTarget::Terminal("__success__".into()));
         sm.states.insert("a".into(), a);
         sm.terminals.insert(
             "__success__".into(),
@@ -275,6 +354,80 @@ mod tests {
         assert_eq!(result.outcome, "cleaned");
         assert_eq!(result.iterations, 0);
         assert!(runner.call_log().is_empty());
+    }
+
+    #[tokio::test]
+    async fn if_cond_falsy_skips_state_to_on_done() {
+        let mut sm = h::state_machine();
+        sm.start = "guard".into();
+        let mut guard = h::state("guard", "x");
+        guard.if_cond = Some("ghost".into()); // missing var → falsy
+        guard.on_done = EdgeTarget::Terminal("__success__".into());
+        sm.states.insert("guard".into(), guard);
+        sm.terminals.insert(
+            "__success__".into(),
+            Terminal {
+                id: "__success__".into(),
+                outcome: "skipped".into(),
+            },
+        );
+
+        let runner = MockStateRunner::new();
+        let mut ctx = CycleContext::default();
+        let result = run_cycle(&sm, &runner, &mut ctx).await.unwrap();
+        assert_eq!(result.terminal_id, "__success__");
+        // Skip means the runner is never called.
+        assert!(runner.call_log().is_empty());
+        // visit_n still increments because the state was entered.
+        assert_eq!(ctx.iter, 1);
+    }
+
+    #[tokio::test]
+    async fn if_cond_truthy_runs_state() {
+        let mut sm = h::state_machine();
+        sm.start = "guard".into();
+        let mut guard = h::state("guard", "x");
+        guard.if_cond = Some("flag".into());
+        guard.on_done = EdgeTarget::Terminal("__success__".into());
+        sm.states.insert("guard".into(), guard);
+        sm.terminals.insert(
+            "__success__".into(),
+            Terminal {
+                id: "__success__".into(),
+                outcome: "ran".into(),
+            },
+        );
+
+        let runner = MockStateRunner::new();
+        let mut ctx = CycleContext::default();
+        ctx.globals
+            .insert("flag".into(), serde_json::Value::String("yes".into()));
+        let result = run_cycle(&sm, &runner, &mut ctx).await.unwrap();
+        assert_eq!(result.terminal_id, "__success__");
+        assert_eq!(runner.call_log(), vec![("guard".into(), 1)]);
+    }
+
+    #[tokio::test]
+    async fn if_cond_render_error_returns_template_error() {
+        let mut sm = h::state_machine();
+        sm.start = "guard".into();
+        let mut guard = h::state("guard", "x");
+        // Unmatched braces → Liquid parser error inside the wrapper.
+        guard.if_cond = Some("flag and {%".into());
+        sm.states.insert("guard".into(), guard);
+        sm.terminals.insert(
+            "__success__".into(),
+            Terminal {
+                id: "__success__".into(),
+                outcome: "success".into(),
+            },
+        );
+
+        let runner = MockStateRunner::new();
+        let mut ctx = CycleContext::default();
+        let err = run_cycle(&sm, &runner, &mut ctx).await.unwrap_err();
+        assert_eq!(err.kind, FailureKind::TemplateError);
+        assert_eq!(err.state_id, "guard");
     }
 
     #[tokio::test]

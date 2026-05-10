@@ -48,23 +48,22 @@ async fn cleanup_shorthand_deletes_ticket_dir() {
         "pre-condition: ticket dir must exist before daemon runs"
     );
 
-    let workflow_path = work.path().join("WORKFLOW.toml");
+    let workflow_path = work.path().join("WORKFLOW.yaml");
     let workflow_body = r#"
-[admission]
-assignee = "u1"
+admission:
+  assignee: u1
+  repos:
+    - ghq: github.com/example/repo
 
-[[admission.repos]]
-ghq = "github.com/example/repo"
+rules:
+  - when:
+      status: in_progress
+    tasks:
+      - id: r
+        run: 'true'
 
-[[rule]]
-[rule.when]
-status = "in_progress"
-[rule.when.labels]
-has_all = []
-[rule.run]
-cmd = "true"
-
-[[cleanup]]
+cleanup:
+  - {}
 "#;
     std::fs::write(&workflow_path, workflow_body).unwrap();
 
@@ -78,7 +77,7 @@ token = "linear-test-token"
 bind = "127.0.0.1"
 port = {port}
 
-[default.ai.command]
+[default.ai]
 cli = "echo"
 
 [engine]

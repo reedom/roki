@@ -52,25 +52,23 @@ async fn sigint_drains_in_flight_cycle_within_window() {
 
     let ticket_id = "ENG-100";
 
-    let workflow_path = work.path().join("WORKFLOW.toml");
+    let workflow_path = work.path().join("WORKFLOW.yaml");
     // Single rule: matches in_progress; run sleeps 300ms so we can SIGINT
     // while the cycle is in-flight.
     let workflow_body = r#"
-[admission]
-assignee = "u1"
+admission:
+  assignee: u1
+  repos:
+    - ghq: github.com/example/repo
 
-[[admission.repos]]
-ghq = "github.com/example/repo"
-
-[[rule]]
-[rule.when]
-status = "in_progress"
-[rule.when.labels]
-has_all = []
-[rule.run]
-cmd = "sh -c 'sleep 0.3'"
-[rule.post]
-cmd = "printf '{\"directive\":\"end\"}'"
+rules:
+  - when:
+      status: in_progress
+    tasks:
+      - id: run0
+        run: 'sh -c ''sleep 0.3'''
+      - id: post0
+        run: 'printf ''{\"directive\":\"end\"}'''
 "#;
     std::fs::write(&workflow_path, workflow_body).unwrap();
 
@@ -84,7 +82,7 @@ token = "linear-test-token"
 bind = "127.0.0.1"
 port = {port}
 
-[default.ai.command]
+[default.ai]
 cli = "echo"
 
 [engine]

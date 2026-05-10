@@ -70,7 +70,7 @@ pub fn accept(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::workflow::{AdmissionRepo, AdmissionSection, WorkflowConfig};
+    use crate::config::workflow::{WorkflowConfig, workflow_config_for_test};
 
     fn ticket(assignee: Option<&str>) -> NormalizedTicket {
         NormalizedTicket::new(
@@ -84,15 +84,7 @@ mod tests {
     }
 
     fn workflow_with(assignee: &str, repo: Option<&str>) -> WorkflowConfig {
-        WorkflowConfig {
-            admission: AdmissionSection {
-                assignee: assignee.to_string(),
-            },
-            repo: repo.map(|g| AdmissionRepo { ghq: g.to_string() }),
-            rules: Vec::new(),
-            cleanups: Vec::new(),
-            on_failures: Vec::new(),
-        }
+        workflow_config_for_test(assignee, repo, vec![], vec![], vec![])
     }
 
     #[test]

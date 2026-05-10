@@ -147,19 +147,11 @@ pub(crate) async fn run_inner(config_path: &Path, mode: DispatchMode) -> Result<
         },
     ));
 
-    // 7. Build executor.
-    let executor = Arc::new(crate::engine::CommandPhaseExecutor {
-        default_cli: cfg.default_ai_command.cli.clone(),
-        stall: crate::engine::phase::StallWindow::CommandDefault(
-            cfg.default_ai_command.stall_seconds,
-        ),
-    });
-
-    // 8. Build runner.
+    // 7. Build runner. Slice 8: the runner constructs a `RealStateRunner`
+    //    per cycle internally, sourced from `cfg.default_ai`.
     let runner = Arc::new(RealCycleRunner {
         workflow: workflow.clone(),
         cfg: cfg.clone(),
-        executor,
         escalation: escalation.clone(),
     });
 

@@ -79,33 +79,30 @@ async fn cold_start_cleanup_mode_dispatches_only_cleanup_match() {
     let wt_root = work.path().join("wts");
     std::fs::create_dir_all(&wt_root).unwrap();
 
-    let workflow_path = work.path().join("WORKFLOW.toml");
+    let workflow_path = work.path().join("WORKFLOW.yaml");
     let workflow_body = r#"
-[admission]
-assignee = "u1"
+admission:
+  assignee: u1
+  repos:
+    - ghq: github.com/example/repo
 
-[[admission.repos]]
-ghq = "github.com/example/repo"
+rules:
+  - when:
+      status: todo
+    tasks:
+      - id: run0
+        run: 'true'
+      - id: post0
+        run: 'printf ''{\"directive\":\"end\",\"outcome\":\"todo_done\"}'''
 
-[[rule]]
-[rule.when]
-status = "todo"
-[rule.when.labels]
-has_all = []
-[rule.run]
-cmd = "true"
-[rule.post]
-cmd = "printf '{\"directive\":\"end\",\"outcome\":\"todo_done\"}'"
-
-[[cleanup]]
-[cleanup.when]
-status = "done"
-[cleanup.when.labels]
-has_all = []
-[cleanup.run]
-cmd = "echo cleanup-run"
-[cleanup.post]
-cmd = "printf '{\"directive\":\"end\",\"outcome\":\"cleanup_done\"}'"
+cleanup:
+  - when:
+      status: done
+    tasks:
+      - id: crun0
+        run: 'echo cleanup-run'
+      - id: cpost0
+        run: 'printf ''{\"directive\":\"end\",\"outcome\":\"cleanup_done\"}'''
 "#;
     std::fs::write(&workflow_path, workflow_body).unwrap();
 
@@ -119,7 +116,7 @@ token = "linear-test-token"
 bind = "127.0.0.1"
 port = {port}
 
-[default.ai.command]
+[default.ai]
 cli = "echo"
 
 [engine]

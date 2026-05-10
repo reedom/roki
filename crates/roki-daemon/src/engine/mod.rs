@@ -1,32 +1,26 @@
-//! Engine submodule: directive-driven cycle execution.
+//! Engine submodule: state-machine cycle execution.
 //!
 //! Layered bottom-up:
-//! - `outcome` — type vocabulary (PhaseKind, PhaseBody, directives, FailureKind).
-//! - `directive` — last-JSON-object scan + per-phase legal-set validation.
-//! - `template` — Liquid render for argv and stdin body.
-//! - `context` — PhaseContext (Liquid object + ROKI_* env builder).
-//! - `phase` — PhaseExecutor trait + the production CommandPhaseExecutor.
-//! - `cycle` — run_cycle: iteration loop, transitions, iter cap.
+//! - `outcome` — `FailureKind`, `CycleKind` vocabulary.
+//! - `sentinel` — per-state directive-file control channel.
+//! - `template` — Liquid render against a globals map.
+//! - `state_runtime` — `StateRunner` trait + `CycleContext` + mock impl.
+//! - `cycle_state` — drives a `StateMachine` to completion.
+//! - `real_state_runner` — production `StateRunner` (subprocess spawn).
+//! - `on_failure` — first-match routing of failure metadata.
+//! - `cleanup` — worktree + session_tempdir teardown.
 
 pub mod cleanup;
 pub mod context;
 pub mod cwd;
-pub mod cycle;
 pub mod cycle_state;
-pub mod directive;
 pub mod dispatch;
 pub mod on_failure;
 pub mod outcome;
-pub mod phase;
+pub mod real_state_runner;
 pub mod sentinel;
-pub mod session;
-pub mod state_runtime;
 pub mod stall;
+pub mod state_runtime;
 pub mod stream;
 pub mod template;
 pub mod worktree;
-
-pub use cycle::{CycleOutcome, run_cycle};
-pub use phase::CommandPhaseExecutor;
-#[allow(unused_imports)]
-pub use session::{SessionConfig, SessionSupervisor};

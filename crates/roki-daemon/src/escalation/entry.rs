@@ -1,21 +1,26 @@
 //! In-memory escalation queue entry (fr:06 §Escalation queue).
 //!
 //! Cycle-bound entries (`failure-handler cycle that itself failed`,
-//! `cleanup-time fs error`) carry concrete `ticket_id`, `cycle_id`, `phase`.
-//! Cycle-less entries (`daemon-internal error with no cycle association`,
-//! e.g. cold-start orphan reconcile fs error) leave all three as `None`.
+//! `cleanup-time fs error`) carry concrete `ticket_id`, `cycle_id`,
+//! `state_id`. Cycle-less entries (`daemon-internal error with no cycle
+//! association`, e.g. cold-start orphan reconcile fs error) leave all three
+//! as `None`.
 
 use time::OffsetDateTime;
 use uuid::Uuid;
 
-use crate::engine::outcome::{FailureKind, PhaseKind};
+use crate::engine::outcome::FailureKind;
 
 #[derive(Debug, Clone)]
 pub struct EscalationEntry {
     pub ticket_id: Option<String>,
     pub cycle_id: Option<Uuid>,
     pub failure_kind: FailureKind,
-    pub phase: Option<PhaseKind>,
+    /// State-machine id of the failing state. `None` for daemon-internal
+    /// failures with no associated state (replaces the legacy `phase` field;
+    /// legacy phase names ("pre", "run", "post") flow through here as
+    /// strings until the legacy cycle driver is removed).
+    pub state_id: Option<String>,
     pub timestamp: OffsetDateTime,
     pub error_text: String,
 }
@@ -25,14 +30,14 @@ impl EscalationEntry {
         ticket_id: String,
         cycle_id: Uuid,
         failure_kind: FailureKind,
-        phase: PhaseKind,
+        state_id: String,
         error_text: String,
     ) -> Self {
         Self {
             ticket_id: Some(ticket_id),
             cycle_id: Some(cycle_id),
             failure_kind,
-            phase: Some(phase),
+            state_id: Some(state_id),
             timestamp: OffsetDateTime::now_utc(),
             error_text: sanitize(&error_text),
         }
@@ -43,7 +48,7 @@ impl EscalationEntry {
             ticket_id: None,
             cycle_id: None,
             failure_kind,
-            phase: None,
+            state_id: None,
             timestamp: OffsetDateTime::now_utc(),
             error_text: sanitize(&error_text),
         }
@@ -81,12 +86,12 @@ mod tests {
             "TEAM-1".to_string(),
             id,
             FailureKind::FsPoison,
-            PhaseKind::Post,
+            "post".to_string(),
             "msg".to_string(),
         );
         assert_eq!(e.ticket_id.as_deref(), Some("TEAM-1"));
         assert_eq!(e.cycle_id, Some(id));
-        assert_eq!(e.phase, Some(PhaseKind::Post));
+        assert_eq!(e.state_id.as_deref(), Some("post"));
         assert_eq!(e.failure_kind, FailureKind::FsPoison);
     }
 
@@ -95,6 +100,6 @@ mod tests {
         let e = EscalationEntry::daemon(FailureKind::FsPoison, "boom".to_string());
         assert!(e.ticket_id.is_none());
         assert!(e.cycle_id.is_none());
-        assert!(e.phase.is_none());
+        assert!(e.state_id.is_none());
     }
 }

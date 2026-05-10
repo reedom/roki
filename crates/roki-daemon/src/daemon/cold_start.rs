@@ -60,18 +60,42 @@ pub struct ColdStart<R: CycleRunner + 'static> {
 ///   omits `when.status` (per fr:07 step 2). The caller emits
 ///   `status_filter_dropped` in that case.
 pub fn compute_status_union(workflow: &WorkflowConfig) -> (BTreeSet<String>, Option<String>) {
+    use crate::workflow::canonical::ScalarMatcher;
     let mut union: BTreeSet<String> = BTreeSet::new();
 
-    // Rules always have explicit when_status (Rule::when_status is String, validated at load).
+    // Rules contribute their `when.status` matcher's positive values.
     for r in &workflow.rules {
-        union.insert(r.when_status.clone());
+        let Some(when) = &r.when else { continue };
+        let Some(status) = &when.status else { continue };
+        match status {
+            ScalarMatcher::Eq(s) => {
+                union.insert(s.clone());
+            }
+            ScalarMatcher::In(values) => {
+                for v in values {
+                    union.insert(v.clone());
+                }
+            }
+            ScalarMatcher::Not(_) => {
+                // `not:` excludes one status; nothing to seed.
+            }
+        }
     }
 
-    // Cleanups may omit when_status. If any does, drop the filter.
+    // Cleanups may omit `when.status` entirely; that drops the filter.
     for (idx, c) in workflow.cleanups.iter().enumerate() {
-        match &c.when_status {
-            Some(s) => {
+        let status = c.when.as_ref().and_then(|w| w.status.as_ref());
+        match status {
+            Some(ScalarMatcher::Eq(s)) => {
                 union.insert(s.clone());
+            }
+            Some(ScalarMatcher::In(values)) => {
+                for v in values {
+                    union.insert(v.clone());
+                }
+            }
+            Some(ScalarMatcher::Not(_)) => {
+                return (BTreeSet::new(), Some(format!("cleanup[{idx}]")));
             }
             None => {
                 return (BTreeSet::new(), Some(format!("cleanup[{idx}]")));
@@ -244,46 +268,66 @@ fn classify_webhook_skip_reason(err: &crate::error::AdmissionError) -> WebhookSk
 }
 
 #[cfg(test)]
+#[allow(clippy::field_reassign_with_default)]
 mod tests {
     use super::*;
-    use crate::config::workflow::{AdmissionRepo, AdmissionSection, Cleanup, Rule, WorkflowConfig};
-    use crate::engine::outcome::PhaseBody;
+    use crate::config::workflow::{WorkflowConfig, workflow_config_for_test};
+    use crate::workflow::canonical::test_helpers as h;
+    use crate::workflow::canonical::{
+        RuleEntry, ScalarMatcher, StateMachine, Terminal, WhenClause,
+    };
 
-    fn workflow_with(
-        rules: Vec<Option<&str>>, // None means rule omits when_status (impossible — Rule.when_status is String)
-        cleanups: Vec<Option<&str>>,
-    ) -> WorkflowConfig {
-        let rules = rules
-            .into_iter()
-            .map(|s| Rule {
-                when_status: s.unwrap_or("").to_string(),
-                when_labels_has_all: vec![],
-                pre: None,
-                run: PhaseBody::InlineCmd { cmd: "true".into() },
-                post: None,
-            })
-            .collect();
-        let cleanups = cleanups
-            .into_iter()
-            .map(|s| Cleanup {
-                when_status: s.map(String::from),
-                when_labels_has_all: vec![],
-                pre: None,
-                run: None,
-                post: None,
-            })
-            .collect();
-        WorkflowConfig {
-            admission: AdmissionSection {
-                assignee: "me".into(),
+    fn dummy_sm() -> StateMachine {
+        let mut sm = h::state_machine();
+        sm.start = "a".into();
+        sm.states.insert("a".into(), h::state("a", "true"));
+        sm.terminals.insert(
+            "__success__".into(),
+            Terminal {
+                id: "__success__".into(),
+                outcome: "success".into(),
             },
-            repo: Some(AdmissionRepo {
-                ghq: "github.com/example/r".into(),
-            }),
-            rules,
-            cleanups,
-            on_failures: vec![],
-        }
+        );
+        sm
+    }
+
+    fn shorthand_sm() -> StateMachine {
+        let mut sm = h::state_machine();
+        sm.start = "__success__".into();
+        sm.terminals.insert(
+            "__success__".into(),
+            Terminal {
+                id: "__success__".into(),
+                outcome: "cleaned".into(),
+            },
+        );
+        sm
+    }
+
+    fn workflow_with(rules: Vec<Option<&str>>, cleanups: Vec<Option<&str>>) -> WorkflowConfig {
+        let rules: Vec<RuleEntry> = rules
+            .into_iter()
+            .map(|s| RuleEntry {
+                when: s.map(|status| {
+                    let mut w = WhenClause::default();
+                    w.status = Some(ScalarMatcher::Eq(status.into()));
+                    w
+                }),
+                state_machine: dummy_sm(),
+            })
+            .collect();
+        let cleanups: Vec<RuleEntry> = cleanups
+            .into_iter()
+            .map(|s| RuleEntry {
+                when: s.map(|status| {
+                    let mut w = WhenClause::default();
+                    w.status = Some(ScalarMatcher::Eq(status.into()));
+                    w
+                }),
+                state_machine: shorthand_sm(),
+            })
+            .collect();
+        workflow_config_for_test("me", Some("github.com/example/r"), rules, cleanups, vec![])
     }
 
     #[test]

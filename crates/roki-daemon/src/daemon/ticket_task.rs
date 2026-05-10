@@ -45,7 +45,7 @@ pub enum StepOutcome {
 }
 
 /// Trait the ticket task uses to invoke a cycle. Production wires this to
-/// `engine::cycle::run_cycle` via `RealCycleRunner` (Task 8); unit tests
+/// `engine::cycle_state::run_cycle` via `RealCycleRunner`; unit tests
 /// substitute a mock to exercise the loop deterministically.
 #[async_trait::async_trait]
 pub trait CycleRunner: Send + Sync {
@@ -65,7 +65,7 @@ pub enum CycleResult {
         iters: u32,
     },
     Failed {
-        meta: crate::engine::outcome::FailureMeta,
+        meta: crate::daemon::real_runner::LegacyFailureMeta,
         kind: CycleKind,
     },
     /// Cleanup-shorthand path — the runner already performed the
@@ -168,18 +168,7 @@ pub async fn step_once<R: CycleRunner>(
     let (kind, target_owned) = match target {
         DispatchTarget::NoMatch => return StepOutcome::NoMatch,
         DispatchTarget::CleanupShorthand => (CycleKind::Cleanup, DispatchTarget::CleanupShorthand),
-        DispatchTarget::Cycle {
-            kind,
-            rule,
-            cleanup,
-        } => (
-            kind,
-            DispatchTarget::Cycle {
-                kind,
-                rule,
-                cleanup,
-            },
-        ),
+        DispatchTarget::Cycle { kind, rule } => (kind, DispatchTarget::Cycle { kind, rule }),
     };
 
     let synthetic = synthesize_admitted(ticket_id, &snapshot);
@@ -267,13 +256,17 @@ fn synthesize_admitted(ticket_id: &str, snap: &crate::daemon::cache::CacheEntry)
 }
 
 #[cfg(test)]
+#[allow(clippy::field_reassign_with_default)]
 mod tests {
     use super::*;
     use std::sync::Mutex as StdMutex;
     use tempfile::TempDir;
 
-    use crate::config::workflow::{AdmissionRepo, AdmissionSection, Cleanup, Rule, WorkflowConfig};
-    use crate::engine::outcome::PhaseBody;
+    use crate::config::workflow::{WorkflowConfig, workflow_config_for_test};
+    use crate::workflow::canonical::test_helpers as h;
+    use crate::workflow::canonical::{
+        EdgeTarget, RuleEntry, ScalarMatcher, StateMachine, Terminal, WhenClause,
+    };
 
     struct MockCycleRunner {
         next: StdMutex<Vec<CycleResult>>,
@@ -313,44 +306,58 @@ mod tests {
         }
     }
 
-    fn workflow_with_rule(status: &str) -> WorkflowConfig {
-        WorkflowConfig {
-            admission: AdmissionSection {
-                assignee: "u1".into(),
+    fn dummy_sm() -> StateMachine {
+        let mut sm = h::state_machine();
+        sm.start = "a".into();
+        let mut a = h::state("a", "true");
+        a.on_done = EdgeTarget::Terminal("__success__".into());
+        sm.states.insert("a".into(), a);
+        sm.terminals.insert(
+            "__success__".into(),
+            Terminal {
+                id: "__success__".into(),
+                outcome: "success".into(),
             },
-            repo: Some(AdmissionRepo {
-                ghq: "github.com/example/repo".into(),
-            }),
-            rules: vec![Rule {
-                when_status: status.into(),
-                when_labels_has_all: vec![],
-                pre: None,
-                run: PhaseBody::InlineCmd { cmd: "true".into() },
-                post: None,
-            }],
-            cleanups: vec![],
-            on_failures: vec![],
+        );
+        sm
+    }
+
+    fn rule_for(status: &str) -> RuleEntry {
+        let mut when = WhenClause::default();
+        when.status = Some(ScalarMatcher::Eq(status.into()));
+        RuleEntry {
+            when: Some(when),
+            state_machine: dummy_sm(),
         }
     }
 
-    fn workflow_with_cleanup(status: &str) -> WorkflowConfig {
-        WorkflowConfig {
-            admission: AdmissionSection {
-                assignee: "u1".into(),
-            },
-            repo: Some(AdmissionRepo {
-                ghq: "github.com/example/repo".into(),
-            }),
-            rules: vec![],
-            cleanups: vec![Cleanup {
-                when_status: Some(status.into()),
-                when_labels_has_all: vec![],
-                pre: None,
-                run: Some(PhaseBody::InlineCmd { cmd: "true".into() }),
-                post: None,
-            }],
-            on_failures: vec![],
+    fn cleanup_for(status: &str) -> RuleEntry {
+        let mut when = WhenClause::default();
+        when.status = Some(ScalarMatcher::Eq(status.into()));
+        RuleEntry {
+            when: Some(when),
+            state_machine: dummy_sm(),
         }
+    }
+
+    fn workflow_with_rule(status: &str) -> WorkflowConfig {
+        workflow_config_for_test(
+            "u1",
+            Some("github.com/example/repo"),
+            vec![rule_for(status)],
+            vec![],
+            vec![],
+        )
+    }
+
+    fn workflow_with_cleanup(status: &str) -> WorkflowConfig {
+        workflow_config_for_test(
+            "u1",
+            Some("github.com/example/repo"),
+            vec![],
+            vec![cleanup_for(status)],
+            vec![],
+        )
     }
 
     fn admitted(id: &str, status: &str) -> AdmittedTicket {

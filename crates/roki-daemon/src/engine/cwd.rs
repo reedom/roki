@@ -12,13 +12,15 @@
 
 use std::path::PathBuf;
 
+use tokio::process::Command;
+
 use crate::engine::worktree;
 use crate::error::PhaseInfraError;
 
 pub async fn resolve(ghq: &str, ticket_id: &str) -> Result<PathBuf, PhaseInfraError> {
     match worktree::exists(ghq, ticket_id).await {
         Ok(Some(path)) => Ok(path),
-        Ok(None) => crate::engine::phase::resolve_ghq_base(ghq).await,
+        Ok(None) => resolve_ghq_base(ghq).await,
         Err(err) => {
             let exit_code = err.exit_code();
             Err(PhaseInfraError::WorktreeError {
@@ -27,6 +29,44 @@ pub async fn resolve(ghq: &str, ticket_id: &str) -> Result<PathBuf, PhaseInfraEr
             })
         }
     }
+}
+
+/// Resolve the absolute path of the operator's checkout via
+/// `ghq list -p <ghq>`. Returns `RepoNotFound` when ghq has no entry.
+///
+/// Test-support seam: when `ROKI_GHQ_BASE_OVERRIDE` is set to a non-empty
+/// value, the override path is returned verbatim; production env never has
+/// it set.
+pub async fn resolve_ghq_base(ghq: &str) -> Result<PathBuf, PhaseInfraError> {
+    if let Ok(override_path) = std::env::var("ROKI_GHQ_BASE_OVERRIDE") {
+        if !override_path.is_empty() {
+            return Ok(PathBuf::from(override_path));
+        }
+    }
+    let out = Command::new("ghq")
+        .arg("list")
+        .arg("-p")
+        .arg(ghq)
+        .output()
+        .await
+        .map_err(|source| PhaseInfraError::Spawn {
+            cmd: format!("ghq list -p {ghq}"),
+            source,
+        })?;
+    if !out.status.success() {
+        return Err(PhaseInfraError::RepoNotFound {
+            ghq: ghq.to_string(),
+        });
+    }
+    let line = String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .next()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| PhaseInfraError::RepoNotFound {
+            ghq: ghq.to_string(),
+        })?;
+    Ok(PathBuf::from(line))
 }
 
 #[cfg(test)]

@@ -42,34 +42,33 @@ async fn recursion_bound_pushes_escalation_added() {
 
     let ticket_id = "ENG-300";
 
-    let workflow_path = work.path().join("WORKFLOW.toml");
-    // The rule's post phase exits non-zero → ProcessCrash. The on_failure
-    // handler's post phase also exits non-zero → another ProcessCrash from
-    // inside a Failure cycle. The recursion bound fires and emits
-    // failure_unhandled marker=recursion_bound.
+    let workflow_path = work.path().join("WORKFLOW.yaml");
+    // rule's post0 SIGKILLs → ProcessCrash. on_failure matches; the handler's
+    // fpost0 also SIGKILLs → second ProcessCrash inside a Failure cycle.
+    // Recursion bound fires; daemon emits escalation_added marker=recursion_bound.
     let workflow_body = r#"
-[admission]
-assignee = "u1"
+admission:
+  assignee: u1
+  repos:
+    - ghq: github.com/example/repo
 
-[[admission.repos]]
-ghq = "github.com/example/repo"
+rules:
+  - when:
+      status: in_progress
+    tasks:
+      - id: run0
+        run: 'true'
+      - id: post0
+        run: 'kill -KILL $$'
 
-[[rule]]
-[rule.when]
-status = "in_progress"
-[rule.when.labels]
-has_all = []
-[rule.run]
-cmd = "true"
-[rule.post]
-cmd = "exit 7"
-
-[[on_failure]]
-when.kind = "process_crash"
-[on_failure.run]
-cmd = "true"
-[on_failure.post]
-cmd = "exit 9"
+on_failure:
+  - when:
+      kind: process_crash
+    tasks:
+      - id: frun0
+        run: 'true'
+      - id: fpost0
+        run: 'kill -KILL $$'
 "#;
     std::fs::write(&workflow_path, workflow_body).unwrap();
 
@@ -83,7 +82,7 @@ token = "linear-test-token"
 bind = "127.0.0.1"
 port = {port}
 
-[default.ai.command]
+[default.ai]
 cli = "echo"
 
 [engine]
@@ -182,7 +181,7 @@ session_root = "{session_root}"
     assert!(entry.contains("\"ticket_id\":"), "{entry}");
     assert!(entry.contains("\"cycle_id\":"), "{entry}");
     assert!(entry.contains("\"kind\":"), "{entry}");
-    assert!(entry.contains("\"phase\":"), "{entry}");
+    assert!(entry.contains("\"state_id\":"), "{entry}");
 
     // Per-ticket events file: should contain NO failure_unhandled and NO
     // escalation_added (escalation_added lands on the daemon-scoped log only).

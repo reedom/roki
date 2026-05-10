@@ -1,17 +1,15 @@
-//! Liquid render of argv strings and stdin bodies.
+//! Liquid render of argv strings, stdin bodies, and `if:` conditions.
 //!
-//! The same `render_str` API serves all render channels: argv (the
-//! pre-shell-words cli line), stdin body (path body, inline prompt), and
-//! the inline cmd string. Failures map to `FailureKind::TemplateError` at
-//! the call site (`engine::phase`).
+//! Slice 8 callers pass an already-built `liquid::Object` to
+//! `render_str_with_globals` / `eval_cond`. The legacy `render_str(template,
+//! &PhaseContext)` overload is gone; `engine::real_state_runner` constructs
+//! the per-state globals object inline.
 
 use liquid::model::{DisplayCow, KStringCow, ObjectView, State, Value, ValueView};
 use thiserror::Error;
 
-use super::context::{PhaseContext, to_liquid_object};
-
 /// Render error wrapper. The engine maps this to `FailureKind::TemplateError`
-/// when surfacing it through `PhaseOutcome`.
+/// when surfacing it through state outcomes.
 #[derive(Debug, Error)]
 pub enum TemplateError {
     #[error("template parse failed: {0}")]
@@ -21,13 +19,17 @@ pub enum TemplateError {
 }
 
 /// A thin `ObjectView` wrapper around a populated `liquid::Object` that also
-/// exposes a fixed set of optional top-level keys (`pre`, `post`, `run`) as
-/// `NilSection` when those keys are absent from the underlying map.
+/// exposes a fixed set of optional top-level keys as `NilSection` when those
+/// keys are absent from the underlying map.
 ///
 /// Liquid 0.26 raises "Unknown variable" for any top-level key that is
-/// missing from globals. By always advertising these three keys we prevent
-/// that error; `NilSection` then absorbs any sub-key access and returns `Nil`
+/// missing from globals. By always advertising these keys we prevent that
+/// error; `NilSection` then absorbs any sub-key access and returns `Nil`
 /// (empty string) rather than raising "Unknown index".
+///
+/// Sentinel keys span both the legacy phase model (`pre`, `post`, `run`) and
+/// the slice-8 state-machine model (`state`, `failure`, `tasks`). The unified
+/// list lets one render path serve both contexts during the migration.
 struct LenientGlobals {
     inner: liquid::Object,
     /// Sentinel sections advertised as present when absent from `inner`.
@@ -39,7 +41,7 @@ impl LenientGlobals {
     fn new(inner: liquid::Object) -> Self {
         Self {
             inner,
-            sentinel_keys: &["pre", "post", "run"],
+            sentinel_keys: &["pre", "post", "run", "state", "failure", "tasks"],
             nil_section: NilSection::new(),
         }
     }
@@ -199,130 +201,41 @@ impl ObjectView for NilSection {
     }
 }
 
-/// Render `template` against `ctx`'s Liquid object. Missing variables expand
-/// to the Liquid default (empty string) per Shopify Liquid semantics.
-pub fn render_str(template: &str, ctx: &PhaseContext) -> Result<String, TemplateError> {
+/// Render `template` against an already-built Liquid object. Used by the
+/// slice-8 state runner to pass a `CycleContext`-derived globals map.
+pub fn render_str_with_globals(
+    template: &str,
+    globals: &liquid::Object,
+) -> Result<String, TemplateError> {
     let parser = liquid::ParserBuilder::with_stdlib()
         .build()
         .map_err(|err| TemplateError::Parse(err.to_string()))?;
     let parsed = parser
         .parse(template)
         .map_err(|err| TemplateError::Parse(err.to_string()))?;
-    // LenientGlobals wraps the context object and exposes `pre`, `post`, `run`
-    // as NilSection when absent, preventing "Unknown variable" / "Unknown index"
-    // errors for optional sections that have not yet been populated.
-    let globals = LenientGlobals::new(to_liquid_object(ctx));
+    let lenient = LenientGlobals::new(globals.clone());
     parsed
-        .render(&globals)
+        .render(&lenient)
         .map_err(|err| TemplateError::Render(err.to_string()))
+}
+
+/// Evaluate a Liquid expression as a boolean. The expression is wrapped in
+/// `{% if <expr> %}1{% endif %}`; the render result is `"1"` for truthy and
+/// `""` for falsy. Used by the cycle driver for `state.if_cond` skip.
+pub fn eval_cond(expr: &str, globals: &liquid::Object) -> Result<bool, TemplateError> {
+    let wrapped = format!("{{% if {expr} %}}1{{% endif %}}");
+    let rendered = render_str_with_globals(&wrapped, globals)?;
+    Ok(rendered == "1")
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::admission::AdmittedTicket;
-    use crate::config::roki::*;
-    use crate::engine::context::CycleTrigger;
-    use crate::engine::outcome::CycleKind;
-    use crate::linear::ticket::NormalizedTicket;
-    use std::path::PathBuf;
-    use uuid::Uuid;
-
-    fn admitted() -> AdmittedTicket {
-        AdmittedTicket {
-            ticket: NormalizedTicket::new(
-                "ENG-7".to_string(),
-                Some("u1".to_string()),
-                "review".to_string(),
-                vec!["needs-impl".to_string()],
-                "Implement widget".to_string(),
-                "Body".to_string(),
-            ),
-            ghq: "github.com/acme/widget".to_string(),
-        }
-    }
-
-    fn cfg() -> RokiConfig {
-        RokiConfig {
-            linear: LinearSection {
-                token: "x".to_string(),
-            },
-            linear_webhook: LinearWebhookSection {
-                bind: "127.0.0.1".to_string(),
-                port: 8000,
-                secret: None,
-            },
-            default_ai_command: DefaultAiCommandSection {
-                cli: "echo".to_string(),
-                stall_seconds: 300,
-            },
-            engine: EngineSection {
-                max_iterations: 10,
-                shutdown_window_seconds: 30,
-            },
-            paths: PathsSection {
-                workflow: PathBuf::from("/tmp/w"),
-                session_root: PathBuf::from("/tmp/s"),
-            },
-            log: LogSection::default(),
-            escalation: EscalationSection::default(),
-            default_ai_session: None,
-        }
-    }
-
-    #[test]
-    fn renders_ticket_id_and_iter() {
-        let mut ctx = super::PhaseContext::new(
-            &admitted(),
-            Uuid::nil(),
-            &cfg(),
-            CycleKind::Rule,
-            CycleTrigger::Runtime,
-        );
-        ctx.set_iter(2);
-        let out = render_str("ticket {{ ticket.id }} iter {{ cycle.iter }}", &ctx).unwrap();
-        assert_eq!(out, "ticket ENG-7 iter 2");
-    }
-
-    #[test]
-    fn renders_pre_payload_field() {
-        let mut ctx = super::PhaseContext::new(
-            &admitted(),
-            Uuid::nil(),
-            &cfg(),
-            CycleKind::Rule,
-            CycleTrigger::Runtime,
-        );
-        ctx.set_pre(serde_json::json!({"directive":"run","note":"hello"}));
-        let out = render_str("pre note: {{ pre.note }}", &ctx).unwrap();
-        assert_eq!(out, "pre note: hello");
-    }
-
-    #[test]
-    fn missing_variable_expands_to_empty_string() {
-        let ctx = super::PhaseContext::new(
-            &admitted(),
-            Uuid::nil(),
-            &cfg(),
-            CycleKind::Rule,
-            CycleTrigger::Runtime,
-        );
-        // `pre` is None at iter 0 before any pre runs; the dereference returns nil.
-        let out = render_str("got [{{ pre.note }}]", &ctx).unwrap();
-        assert_eq!(out, "got []");
-    }
 
     #[test]
     fn parse_error_returns_template_error() {
-        let ctx = super::PhaseContext::new(
-            &admitted(),
-            Uuid::nil(),
-            &cfg(),
-            CycleKind::Rule,
-            CycleTrigger::Runtime,
-        );
-        // Unmatched `{%` confuses the parser.
-        let result = render_str("{% if foo %}", &ctx);
+        let obj = liquid::Object::new();
+        let result = render_str_with_globals("{% if foo %}", &obj);
         match result {
             Err(TemplateError::Parse(_)) => {}
             other => panic!("expected Parse error, got {other:?}"),
@@ -330,20 +243,63 @@ mod tests {
     }
 
     #[test]
-    fn renders_run_exit_code_when_set() {
-        let mut ctx = super::PhaseContext::new(
-            &admitted(),
-            Uuid::nil(),
-            &cfg(),
-            CycleKind::Rule,
-            CycleTrigger::Runtime,
-        );
-        ctx.set_run(5, 12, None);
-        let out = render_str(
-            "exit={{ run.exit_code }} dur={{ run.duration_seconds }}",
-            &ctx,
-        )
-        .unwrap();
-        assert_eq!(out, "exit=5 dur=12");
+    fn render_with_globals_renders_state_namespace() {
+        let mut obj = liquid::Object::new();
+        let mut state = liquid::Object::new();
+        state.insert("id".into(), liquid::model::Value::scalar("judge"));
+        state.insert("visit_n".into(), liquid::model::Value::scalar(2_i64));
+        obj.insert("state".into(), liquid::model::Value::Object(state));
+        let out = render_str_with_globals("state {{ state.id }} visit {{ state.visit_n }}", &obj)
+            .unwrap();
+        assert_eq!(out, "state judge visit 2");
+    }
+
+    #[test]
+    fn render_with_globals_treats_absent_state_as_nil() {
+        let obj = liquid::Object::new();
+        let out = render_str_with_globals("[{{ state.id }}]", &obj).unwrap();
+        assert_eq!(out, "[]");
+    }
+
+    #[test]
+    fn render_with_globals_treats_absent_failure_and_tasks_as_nil() {
+        let obj = liquid::Object::new();
+        let out = render_str_with_globals("[{{ failure.kind }}|{{ tasks.judge.exit_code }}]", &obj)
+            .unwrap();
+        assert_eq!(out, "[|]");
+    }
+
+    #[test]
+    fn eval_cond_truthy_string_returns_true() {
+        let mut obj = liquid::Object::new();
+        obj.insert("flag".into(), liquid::model::Value::scalar("yes"));
+        assert!(eval_cond("flag", &obj).unwrap());
+    }
+
+    #[test]
+    fn eval_cond_falsy_when_var_absent() {
+        let obj = liquid::Object::new();
+        // Liquid treats absent variables as nil → falsy in `{% if %}`.
+        assert!(!eval_cond("ghost", &obj).unwrap());
+    }
+
+    #[test]
+    fn eval_cond_compares_values() {
+        let mut obj = liquid::Object::new();
+        let mut tasks = liquid::Object::new();
+        let mut judge = liquid::Object::new();
+        judge.insert("exit_code".into(), liquid::model::Value::scalar(0_i64));
+        tasks.insert("judge".into(), liquid::model::Value::Object(judge));
+        obj.insert("tasks".into(), liquid::model::Value::Object(tasks));
+        assert!(eval_cond("tasks.judge.exit_code == 0", &obj).unwrap());
+        assert!(!eval_cond("tasks.judge.exit_code == 1", &obj).unwrap());
+    }
+
+    #[test]
+    fn eval_cond_parse_error_returns_template_error() {
+        let obj = liquid::Object::new();
+        // Unmatched braces inside the expression confuse the parser.
+        let result = eval_cond("flag and {%", &obj);
+        assert!(result.is_err());
     }
 }
