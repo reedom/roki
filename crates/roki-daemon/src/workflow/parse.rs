@@ -106,12 +106,12 @@ pub struct RawLabelsMatcher {
     pub has_none: Option<Vec<String>>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum RawTextMatcher {
-    Regex(String),
-    StartsWith(String),
-    Contains(String),
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
+pub struct RawTextMatcher {
+    pub regex: Option<String>,
+    pub starts_with: Option<String>,
+    pub contains: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]

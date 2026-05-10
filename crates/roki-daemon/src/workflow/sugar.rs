@@ -364,10 +364,14 @@ fn convert_labels_matcher(raw: RawLabelsMatcher) -> LabelsMatcher {
 }
 
 fn convert_text_matcher(raw: RawTextMatcher) -> TextMatcher {
-    match raw {
-        RawTextMatcher::Regex(s) => TextMatcher::Regex(s),
-        RawTextMatcher::StartsWith(s) => TextMatcher::StartsWith(s),
-        RawTextMatcher::Contains(s) => TextMatcher::Contains(s),
+    if let Some(s) = raw.regex {
+        TextMatcher::Regex(s)
+    } else if let Some(s) = raw.starts_with {
+        TextMatcher::StartsWith(s)
+    } else if let Some(s) = raw.contains {
+        TextMatcher::Contains(s)
+    } else {
+        TextMatcher::Contains(String::new())
     }
 }
 

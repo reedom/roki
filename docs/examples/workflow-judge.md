@@ -1,40 +1,40 @@
 ---
-session: session
-# cli omitted → falls back to roki.toml [default.ai.session].cli
-# stall_seconds omitted → falls back to roki.toml [default.ai.session].stall_seconds
+# cli omitted → falls back to roki.toml [default.ai].cli
+# stall_seconds omitted → falls back to roki.toml [default.ai].stall_seconds
 ---
 
-You are the **pre** phase for Linear ticket `{{ ticket.id }}` on cycle iteration `{{ cycle.iter }}` of `{{ config.max_iterations }}`.
+You are the **judge** state for Linear ticket `{{ ticket.id }}` on cycle visit `{{ state.visits }}` (total iter `{{ cycle.iter }}` of `{{ config.max_iterations }}`).
 
 Title: {{ ticket.title }}
 Status: {{ ticket.status }}
 Labels: {{ ticket.labels | join: ", " }}
 Repo (admission-resolved): {{ repo.ghq }}
 
-{% raw %}{% if cycle.iter == 1 %}{% endraw %}
-This is the first iteration. Decide whether the ticket is actionable as written.
+{% raw %}{% if state.visits == 1 %}{% endraw %}
+This is the first visit. Decide whether the ticket is actionable as written.
 {% raw %}{% else %}{% endraw %}
-This is iteration {{ cycle.iter }}. Most recent post outcome: `{{ post.outcome }}`.
-Most recent run exit code: `{{ run.exit_code }}`.
+This is visit {{ state.visits }}.
 {% raw %}{% endif %}{% endraw %}
 
 {% raw %}{% if cycle.iter >= config.max_iterations %}{% endraw %}
-**This is your final iteration.** The daemon will refuse to start another. Wrap
-up: write a Linear comment with the final state, then output a terminal
-directive ending the cycle.
+**Recursion bound is near.** The daemon will refuse another visit on this state's
+SCC once `max_visits` trips. Write a Linear comment with the final state, then
+emit a terminal directive ending the cycle.
 {% raw %}{% endif %}{% endraw %}
 
-Examine the ticket. If actionable, output exactly:
-
-```
-{"directive":"run"}
-```
+Examine the ticket. If actionable, exit clean (code 0) so the engine takes
+this state's `on_done` edge.
 
 If unable to proceed (missing context, blocked by a dependency, etc.), write a
-Linear comment via Linear MCP explaining why, then output:
+Linear comment via Linear MCP explaining why, then atomically write to
+`$ROKI_DIRECTIVE_PATH`:
 
-```
-{"directive":"end","outcome":"needs_operator"}
+```json
+{"directive":"skip","outcome":"needs_operator"}
 ```
 
-Legal directive values for pre: `run` / `end`.
+`skip` resolves to `__no_action__` by default; the cycle terminates with
+`outcome: needs_operator` (sentinel-overridden) instead of running impl.
+
+Other built-in directive names: `end` (→ __success__), `retry` (→ self),
+`fail` (→ __failure__), `cancel` (→ __cancelled__).

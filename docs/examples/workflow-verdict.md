@@ -1,63 +1,54 @@
 ---
-session: session
-# Reuses the same long-lived session subprocess as the matching pre phase
-# (one process per cycle). cli / stall_seconds inherit from
-# roki.toml [default.ai.session] unless overridden here.
+# cli / stall_seconds inherit from roki.toml [default.ai] unless overridden here.
 ---
 
-You are the **post** phase for Linear ticket `{{ ticket.id }}` on cycle iteration `{{ cycle.iter }}`.
+You are the **verdict** state for Linear ticket `{{ ticket.id }}` on cycle iter `{{ cycle.iter }}`.
 
-Pre-phase outcome: `{{ pre.outcome }}`
-Run exit code: `{{ run.exit_code }}`
-Run duration: `{{ run.duration_seconds }}` seconds
-{% raw %}{% if run.terminal.subtype %}{% endraw %}
-Run terminal subtype: `{{ run.terminal.subtype }}`
+Impl exit code: `{{ tasks.impl.exit_code }}`
+Impl duration: `{{ tasks.impl.duration_seconds }}` seconds
+{% raw %}{% if tasks.impl.terminal.subtype %}{% endraw %}
+Impl terminal subtype: `{{ tasks.impl.terminal.subtype }}`
 {% raw %}{% endif %}{% endraw %}
 
 # Decide the next step
 
-{% raw %}{% if run.exit_code == 0 %}{% endraw %}
-Run exited cleanly. Review the changes (`git diff`, `git log -1 --stat`).
-If the work is complete and acceptance criteria are satisfied, write a
-Linear comment summarizing the change, then output:
+{% raw %}{% if tasks.impl.exit_code == 0 %}{% endraw %}
+Impl exited cleanly. Review the changes (`git diff`, `git log -1 --stat`).
+If the work is complete and acceptance criteria are satisfied, exit clean
+(`on_done` → `__success__`). Optionally atomically write
+`{"directive":"end","outcome":"success"}` to `$ROKI_DIRECTIVE_PATH` to set
+an explicit outcome label.
 
-```
-{"directive":"end","outcome":"success"}
-```
+If more visits to impl are needed (e.g. additional acceptance criteria
+remain), atomically write:
 
-If more iterations are needed (e.g. additional acceptance criteria remain),
-output:
-
-```
-{"directive":"run"}
+```json
+{"directive":"retry"}
 ```
 
-to re-run the run phase, or:
-
-```
-{"directive":"pre"}
-```
-
-to restart from pre with a fresh judgment.
+to `$ROKI_DIRECTIVE_PATH` (verdict's directives map binds `retry: impl`).
 {% raw %}{% else %}{% endraw %}
-Run exited non-zero (`{{ run.exit_code }}`). Read the run logs:
+Impl exited non-zero (`{{ tasks.impl.exit_code }}`). Read its logs:
 
 ```bash
-roki log --phase run --stream stderr --tail 100
+roki log --cycle {{ cycle.id }} --state impl --stream stderr --tail 100
 ```
 
-{% raw %}{% if cycle.iter < config.max_iterations %}{% endraw %}
-Diagnose. If recoverable, output `{"directive":"run"}` to retry. If you need
-to revise the approach, output `{"directive":"pre"}` to restart from pre.
+{% raw %}{% if state.visits < state.max_visits %}{% endraw %}
+Diagnose. If recoverable, write `{"directive":"retry"}` to re-enter impl.
 {% raw %}{% else %}{% endraw %}
-This is the final iteration. Output `{"directive":"end","outcome":"failure"}`
-and write a Linear comment with the diagnostic.
+Recursion bound reached. Write `{"directive":"end","outcome":"failure"}`
+and post a Linear comment with the diagnostic.
 {% raw %}{% endif %}{% endraw %}
 {% raw %}{% endif %}{% endraw %}
 
 # Directive contract
 
-Legal directive values for post: `pre` / `run` / `end`.
-Operator-defined fields you add (e.g. `outcome`, anything else) are exposed
-as `{{ post.* }}` Liquid variables / `ROKI_POST_*` env vars to the next
-iteration's pre / run.
+Built-in directive defaults: `end` → `__success__`, `skip` → `__no_action__`,
+`retry` → self, `fail` → `__failure__`, `cancel` → `__cancelled__`. Override
+per-state via the `directives:` map.
+
+Operator-defined fields beyond `directive` (e.g. `outcome`, `verdict`, etc.)
+are exposed downstream as `{{ tasks.<this_state>.directive.<key> }}` Liquid
+variables and `ROKI_TASK_<ID>_DIRECTIVE_<KEY>` env vars (top-level scalars
+only).

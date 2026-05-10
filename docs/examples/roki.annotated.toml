@@ -8,7 +8,7 @@
 #   "literal-value"                  — written inline (not recommended for secrets)
 #
 # roki.toml is NOT hot-reloaded; changes require a daemon restart.
-# WORKFLOW.toml + workflow/*.md ARE hot-reloaded.
+# WORKFLOW.yaml + workflow/*.md are restart-only in slice 8 (hot reload deferred).
 
 # ============================================================
 # [linear] — Linear access (required)
@@ -66,17 +66,19 @@ stall_seconds = 300   # default 300
 # [engine] — Cycle engine knobs
 # ============================================================
 [engine]
-# Cap on iterations per cycle. When a post directive `pre`/`run` arrives at the
-# cap, the daemon refuses to start the next iteration and routes the cycle
-# through `[[on_failure]] when.kind = "iter_exhausted"`.
+# Cap on state visits across a cycle. When a state's visit count exceeds its
+# `max_visits`, the daemon refuses the next visit and routes the cycle through
+# `on_failure: when.kind = recursion_bound` (or directly to the escalation
+# queue for failure cycles that themselves recurse). Pass 5 of sugar
+# expansion auto-injects this default on SCC entry nodes that declare none.
 max_iterations = 10   # default 10
 
 # ============================================================
 # [paths] — Filesystem layout (required)
 # ============================================================
 [paths]
-# WORKFLOW.toml location. Hot-reloaded.
-workflow = "./WORKFLOW.toml"
+# WORKFLOW.yaml location. Restart-only in slice 8.
+workflow = "./WORKFLOW.yaml"
 
 # Per-ticket session tempdir + per-iter capture root. Used by the daemon for
 # log capture only; never used as a phase subprocess cwd.

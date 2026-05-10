@@ -1,0 +1,264 @@
+# Annotated reference: every element of WORKFLOW.yaml, with comments.
+# Schema canonical: docs/reference/config.md
+# Engine contract: docs/fr/01-engine-model.md
+# Minimal working: docs/examples/WORKFLOW.minimal.yaml
+#
+# Restart-only in slice 8 (hot reload deferred). workflow/*.md files referenced
+# from a state's `uses:` are also restart-only.
+#
+# Evaluation order on every Linear diff:
+#   1. admission.repos first-match → resolves ticket to a repo (sticky)
+#   2. cleanup        first-match (auto-deletes worktree + session_tempdir)
+#   3. rules          first-match
+# Failures route through on_failure first-match independently.
+
+# ============================================================
+# admission — coarse webhook filter (required, single block)
+# ============================================================
+admission:
+  # Linear assignee to admit. "me" resolves to the API token holder.
+  # Refuses startup if the resolution fails.
+  assignee: me
+
+  # First-match. Ordered. when.* is optional — entries without when.* act as a
+  # fallback for tickets matching no other repo entry. Resolution runs once
+  # per cache entry at first admission; the resolved repo and per-repo workflow
+  # path are sticky for the lifetime of the cache entry.
+  repos:
+    # Per-repo YAML override: this entry's rules / cleanup / on_failure are
+    # read from the named file instead of the top-level lists below. Top-level
+    # admission stays in WORKFLOW.yaml.
+    - ghq: github.com/your-org/repo-bar
+      when:
+        labels: { has_any: [repo:bar] }
+      workflow: repos/bar.yaml
+
+    # Title regex matcher for repo discrimination.
+    - ghq: github.com/your-org/repo-baz
+      when:
+        title: { regex: '^\[baz\]' }
+
+    # Title prefix matcher (admission.repos only).
+    - ghq: github.com/your-org/repo-frontend
+      when:
+        title: { starts_with: '[ui]' }
+
+    # Title / body substring matcher (admission.repos only).
+    - ghq: github.com/your-org/repo-infra
+      when:
+        title: { contains: infra }
+        body: { contains: deployment }
+
+    # Fallback (no when.*): catches tickets that match no other repo entry.
+    - ghq: github.com/your-org/repo-default
+
+# ============================================================
+# rules — cycle-spawning rules (0+, ordered, first-match)
+# ============================================================
+# A matched rule starts a `rule`-kind cycle. State machine declared via either
+# the `tasks:` sugar form (linear chain) or the canonical `start:` / `states:`
+# / `terminals:` form. Mixed forms allowed (sugar `tasks:` + extra inline
+# `states:` block); validation rejects edges to undeclared targets.
+rules:
+  # Sugar: linear chain "judge → impl → verdict → __success__".
+  # Default edges: tasks[i].on_done = tasks[i+1].id (last → __success__);
+  # tasks[i].on_fail = rule-level on_fail or __failure__.
+  - when:
+      status: Todo
+      labels: { has_all: [roki:ready] }
+    tasks:
+      - id: judge
+        run: |
+          claude -p --output-format stream-json --max-turns 5 << 'EOF'
+          You are the pre-phase for ticket {{ ticket.id }} ({{ ticket.title }}).
+          Inspect the ticket. If actionable, write `{"directive":"end"}` to
+          $ROKI_DIRECTIVE_PATH and exit; otherwise write `{"directive":"skip"}`.
+          EOF
+      - id: impl
+        uses: workflow/impl.md
+        max_visits: 10                          # cap retries via directive=retry
+      - id: verdict
+        run: |
+          claude -p --output-format stream-json --max-turns 5 << 'EOF'
+          You are the post-phase. Read tasks.impl.exit_code:
+          {{ tasks.impl.exit_code }}. If non-zero, write
+          `{"directive":"retry"}`; otherwise `{"directive":"end"}`.
+          EOF
+        directives:
+          retry: impl                            # re-enter impl on retry
+
+  # Canonical form for explicit state machine. Use when sugar's
+  # default-chain isn't expressive enough.
+  - when:
+      status: InProgress
+      labels:
+        has_all: [roki:ready]
+        has_none: [roki:blocked]
+    start: judge
+    states:
+      judge:
+        run: claude -p --output-format stream-json --max-turns 5
+        on_done: impl
+        on_fail: handle_failure
+        directives:
+          skip: __no_action__
+      impl:
+        uses: workflow/impl.md
+        on_done: verdict
+        on_fail: handle_failure
+      verdict:
+        uses: workflow/verdict.md
+        on_done: __success__
+        on_fail: handle_failure
+        directives:
+          retry: impl
+        max_visits: 5
+      handle_failure:
+        run: claude -p '/post-mortem' --output-format stream-json --max-turns 3
+        on_done: __failure__
+        on_fail: __failure__
+    terminals:
+      __success__: { outcome: success }
+      __failure__: { outcome: failure }
+
+  # Negation + rule-level assignee + repo matchers + rule-level on_fail.
+  - when:
+      status: { not: Done }
+      assignee: me
+      repo: github.com/your-org/repo-bar
+      labels:
+        has_any: [roki:experimental]
+        has_none: [roki:hold]
+    tasks:
+      - id: experimental
+        run: claude -p --output-format stream-json --max-turns 50
+    on_fail: handle_experimental_failure
+    states:
+      handle_experimental_failure:
+        run: claude -p '/diagnose-experimental' --output-format stream-json
+        on_done: __failure__
+        on_fail: __failure__
+
+# ============================================================
+# cleanup — cleanup-cycle rules (0+, ordered, first-match)
+# ============================================================
+# Evaluated before rules. A matched cleanup runs as a `cleanup`-kind cycle,
+# then the daemon deletes worktree + session_tempdir and evicts the ticket.
+cleanup:
+  # With state machine — runs ceremony before delete.
+  - when:
+      status: { in: [Done, Cancelled] }
+    tasks:
+      - id: comment
+        run: |
+          claude -p --output-format stream-json --max-turns 3 << 'EOF'
+          Final ceremony. Post a Linear comment via Linear MCP summarizing
+          the cycle. Write `{"directive":"end"}`.
+          EOF
+
+  # Shorthand: empty body → immediate-delete (no cycle).
+  - when:
+      labels: { has_none: [roki:ready] }
+
+# ============================================================
+# on_failure — failure-handler rules (0+, ordered, first-match)
+# ============================================================
+# Triggered when a cycle hits a daemon-detected failure. The matched entry
+# runs as a `failure`-kind cycle with `{{ failure.* }}` populated. Recursive
+# failures land in the escalation queue.
+#
+# Legal failure kinds:
+#   process_crash   subprocess SIGSEGV / non-zero exit + sentinel absent
+#   unparseable     sentinel present but JSON parse failed / `directive` missing
+#   schema_drift    `directive` value not in state.directives ∪ defaults
+#   fs_poison       worktree / session-tempdir / sentinel-dir setup error
+#   stall           stall window exceeded; daemon SIGTERMed the subprocess
+#   recursion_bound state visited more than max_visits times
+#   template_error  Liquid render of run/uses/if failed before launch
+on_failure:
+  - when:
+      kind: { in: [unparseable, schema_drift] }
+    tasks:
+      - id: post_mortem
+        run: claude -p '/post-mortem {{ failure.failed_cycle_id }}' --output-format stream-json
+
+  # Match on phase (= state id that emitted the failure).
+  - when:
+      kind: stall
+      phase: impl
+    tasks:
+      - id: stall_handler
+        run: |
+          claude -p --output-format stream-json << 'EOF'
+          The impl state stalled. Read failed cycle's logs:
+            roki log --cycle {{ failure.failed_cycle_id }} --state impl --stream stderr --tail 100
+          Diagnose, write a Linear comment, then write
+          `{"directive":"end","outcome":"stall_handled"}`.
+          EOF
+
+  # Catch-all (no when.*) — any failure not matched above lands here.
+  - tasks:
+      - id: catch_all
+        run: |
+          claude -p --output-format stream-json << 'EOF'
+          Unexpected failure: {{ failure.kind }} in state {{ failure.state_id }}.
+          Failed cycle: {{ failure.failed_cycle_id }}. Read its logs and write
+          Linear feedback. Write `{"directive":"end","outcome":"failure_logged"}`.
+          EOF
+
+# ============================================================
+# Recognized fields and condition vocabulary
+# ============================================================
+# Fields:
+#   status / labels / assignee — Linear ticket state
+#   repo                       — admission-resolved ghq path (rule-level only)
+#   kind / phase               — failure context (on_failure only); phase is
+#                                the state id that emitted the failure
+#   title / body               — Linear ticket strings (admission.repos only)
+#
+# Operators (each entry's when.* keys AND together; OR by writing more entries):
+#   when.<field>: <scalar>            — equality
+#   when.<field>: { not: <scalar> }   — negation
+#   when.<field>: { in: [...] }       — set membership
+#   when.labels: { has_all: [...] }
+#   when.labels: { has_any: [...] }
+#   when.labels: { has_none: [...] }
+#   when.title: { regex: "..." }      — admission.repos only
+#   when.title: { starts_with: "..." } — admission.repos only
+#   when.title: { contains: "..." }   — admission.repos only
+#   when.body: { contains: "..." }    — admission.repos only
+#
+# Liquid template variables exposed to state bodies and run cli lines:
+#   {{ ticket.id }} {{ ticket.title }} {{ ticket.body }} {{ ticket.labels }}
+#   {{ ticket.assignee }} {{ ticket.status }}
+#   {{ repo.ghq }}
+#   {{ cycle.id }} {{ cycle.kind }} {{ cycle.trigger }} {{ cycle.iter }}
+#   {{ config.max_iterations }}
+#   {{ state.id }} {{ state.visits }}
+#   {{ tasks.<id>.exit_code }} {{ tasks.<id>.duration_seconds }}
+#   {{ tasks.<id>.directive }}              (full sentinel JSON)
+#   {{ tasks.<id>.directive.<key> }}        (individual sentinel fields)
+#   {{ tasks.<id>.terminal }}               (parsed claude/codex stream-json result)
+#   {{ failure.kind }} {{ failure.failed_cycle_id }} {{ failure.state_id }}
+#   {{ failure.visit_n }} {{ failure.exit_code }} {{ failure.error_text }}
+#
+# Built-in directive names (default targets, overridable per state):
+#   end → __success__
+#   skip → __no_action__
+#   retry → self
+#   fail → __failure__
+#   cancel → __cancelled__
+#
+# Reserved terminal ids (auto-injected when referenced and not declared):
+#   __success__ outcome=success
+#   __failure__ outcome=failure
+#   __no_action__ outcome=no_action
+#   __cancelled__ outcome=cancelled  (operator-target only; daemon never auto-fires)
+
+# ============================================================
+# Per-repo YAML override
+# ============================================================
+# Referenced via admission.repos[].workflow: <path>. The file replaces this
+# repo's rules / cleanup / on_failure lists entirely. Top-level admission
+# stays in WORKFLOW.yaml. Schema is identical minus admission. Example:
+#   docs/examples/repos/bar.yaml

@@ -1,21 +1,20 @@
 ---
-session: command
-# cli omitted → falls back to roki.toml [default.ai.command].cli
-# stall_seconds omitted → falls back to roki.toml [default.ai.command].stall_seconds
+# cli omitted → falls back to roki.toml [default.ai].cli
+# stall_seconds omitted → falls back to roki.toml [default.ai].stall_seconds
 ---
 
-You are the **run** phase for Linear ticket `{{ ticket.id }}` (cycle iteration `{{ cycle.iter }}`).
+You are the **impl** state for Linear ticket `{{ ticket.id }}` (cycle visit `{{ state.visits }}`, total cycle iter `{{ cycle.iter }}`).
 
 Title: {{ ticket.title }}
 Repo: {{ repo.ghq }}
 Working directory: the daemon launched you with cwd set to the per-ticket worktree (or the ghq base path if the worktree was not yet materialized — treat that as read-only).
 
-{% raw %}{% if pre.outcome %}{% endraw %}
-Pre-phase outcome: `{{ pre.outcome }}`
+{% raw %}{% if tasks.judge.directive.verdict %}{% endraw %}
+Judge state's verdict: `{{ tasks.judge.directive.verdict }}`
 {% raw %}{% endif %}{% endraw %}
 
-{% raw %}{% if cycle.iter > 1 and run.exit_code %}{% endraw %}
-Previous iteration's run exit code: `{{ run.exit_code }}`. Diagnose any
+{% raw %}{% if state.visits > 1 and tasks.impl.exit_code %}{% endraw %}
+Previous visit's exit code: `{{ tasks.impl.exit_code }}`. Diagnose any
 regression before proceeding.
 {% raw %}{% endif %}{% endraw %}
 
@@ -35,6 +34,7 @@ installation: `Bash`, `Edit`, `Write`, `MultiEdit`, `Read`, `Glob`, `Grep`,
 # Boundary
 
 You are a one-shot subprocess. The daemon does not interpret reasoning text.
-The cycle engine routes the next phase based on the post directive (which
-will read your `run.exit_code` and `run.terminal.*`). Run is not expected to
-emit a JSON directive; clean exit (code 0) signals success.
+Clean exit (code 0) signals success and the engine takes the state's `on_done`
+edge. Non-zero exit takes the `on_fail` edge. To request a directive (skip,
+retry, end), atomically write the JSON object to `$ROKI_DIRECTIVE_PATH` before
+exit.

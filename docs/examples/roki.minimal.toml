@@ -17,5 +17,5 @@ cli = "claude --input-format stream-json --output-format stream-json --model cla
 cli = "claude -p --output-format stream-json --max-turns 100"
 
 [paths]
-workflow = "./WORKFLOW.toml"
+workflow = "./WORKFLOW.yaml"
 session_root = "~/.cache/roki/sessions"

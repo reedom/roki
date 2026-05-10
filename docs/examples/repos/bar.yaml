@@ -1,0 +1,21 @@
+# Per-repo override file referenced from the top-level WORKFLOW.yaml via
+# `admission.repos[].workflow: repos/bar.yaml`. Schema matches the top-level
+# WORKFLOW.yaml minus the `admission:` block (admission lives only at the top
+# level). Top-level admission still gates webhooks; this file owns dispatch
+# inside the bar repo.
+#
+# Path resolution: states' `uses:` paths are resolved relative to THIS file's
+# directory (docs/examples/repos/), not the top-level WORKFLOW.yaml.
+
+rules:
+  - when:
+      status: Todo
+      labels: { has_all: [roki:ready] }
+    tasks:
+      - id: impl
+        run: claude -p 'bar-specific impl' --output-format stream-json --max-turns 100
+
+cleanup:
+  - when:
+      status: { in: [Done, Cancelled] }
+    # Empty body — immediate delete, no cycle.

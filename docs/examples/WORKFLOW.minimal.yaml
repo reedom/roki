@@ -1,0 +1,23 @@
+# Minimal WORKFLOW.yaml — smallest configuration that boots.
+# Annotated reference: docs/examples/WORKFLOW.annotated.yaml
+# Schema canonical: docs/reference/config.md
+# Engine contract: docs/fr/01-engine-model.md
+
+admission:
+  # Linear assignee to admit. "me" resolves to the API token holder.
+  assignee: me
+  # At least one repos[] entry is required so a ticket has a repo to dispatch
+  # to. The daemon resolves repos[] first-match per cache entry at first
+  # admission; the resolved repo is sticky for the lifetime of the cache entry.
+  repos:
+    - ghq: github.com/your-org/your-repo
+
+# One rule entry. when.* keys AND together; OR via more entries. tasks: sugar
+# expands to a state machine with default-chained on_done edges.
+rules:
+  - when:
+      status: Todo
+      labels: { has_all: [roki:ready] }
+    tasks:
+      - id: impl
+        run: claude -p --output-format stream-json --max-turns 100
