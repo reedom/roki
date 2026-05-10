@@ -153,7 +153,7 @@ A new webhook arriving while the same ticket has an in-flight cycle:
 2. Defers rule re-evaluation until the in-flight cycle terminates.
 3. After the cycle terminates, the daemon evaluates lists against the latest cached state. The retained webhooks are not replayed individually; only the final state matters.
 
-The single exception is admission-filter failure mid-cycle (assignee revoked, repo allowlist match lost): the in-flight cycle still runs to its natural end. After it terminates, the daemon evicts the cache entry but **retains** worktree + session_tempdir for re-admission reuse; reclamation is by `[[cleanup]]` cycle on re-admission or by cold-start orphan reconcile when the ticket is no longer enumerable. Operators that want forced-termination behavior on a Linear status change author a `[[cleanup]]` entry whose run phase issues a SIGTERM-equivalent action against whatever subprocess they care about (or simply omits all phases for immediate delete).
+The single exception is admission-filter failure mid-cycle (assignee revoked, repo allowlist match lost): the in-flight cycle still runs to its natural end. After it terminates, the daemon evicts the cache entry but **retains** worktree + session_tempdir for re-admission reuse; reclamation is by `cleanup:` cycle on re-admission or by cold-start orphan reconcile when the ticket is no longer enumerable. Operators that want forced-termination behavior on a Linear status change author a `cleanup:` entry whose state body issues a SIGTERM-equivalent action against whatever subprocess they care about (or omits the body entirely for immediate delete).
 
 ### Stall detection
 
@@ -222,4 +222,4 @@ On daemon process start, the engine runs the same evaluation flow but with `cycl
 - **Roadmap**: `roadmap.md` > Boundary Strategy.
 - **Requirements**: pending — the spec rebuild will introduce IDs covering rule-list evaluation order, the directive schema, the iteration cap, and failure handling. Until then this FR carries the contract directly.
 - **Design**: pending — the new spec set's design.md files will reference back to this FR.
-- **Related FR**: [02-configuration](02-configuration.md), [03-linear-admission](03-linear-admission.md), [07-recovery](07-recovery.md), [05-worktree-and-session](05-worktree-and-session.md), [04-phase-execution](04-state-execution.md), [08-observability-logs](08-observability-logs.md), [06-failure-handling](06-failure-handling.md), [09-log-access-cli](09-log-access-cli.md).
+- **Related FR**: [02-configuration](02-configuration.md), [03-linear-admission](03-linear-admission.md), [07-recovery](07-recovery.md), [05-worktree-and-session](05-worktree-and-session.md), [04-state-execution](04-state-execution.md), [08-observability-logs](08-observability-logs.md), [06-failure-handling](06-failure-handling.md), [09-log-access-cli](09-log-access-cli.md).

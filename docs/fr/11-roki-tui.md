@@ -45,9 +45,9 @@ CLI flags (`roki-tui --tickets-cadence ... --events-cadence ... --escalations-ca
 The TUI renders four views; the operator switches between them with documented keys:
 
 - **Tickets**: list of admitted tickets (id, repo, status, labels, assignee, in-flight cycle id, last event timestamp). Sortable by last event time.
-- **Ticket detail**: cycle history for the selected ticket (cycle id, kind, trigger, started_at, ended_at, terminal directive or failure kind), plus a tail view that streams the most recent iter's run stdout via `GET /api/tickets/{id}/cycles/{cycle_id}/iters/{n}/run/stdout`.
+- **Ticket detail**: cycle history for the selected ticket (cycle id, kind, trigger, started_at, ended_at, terminal id, total visits), plus a tail view that streams the most recent visit's stdout via `GET /api/tickets/{id}/cycles/{cycle_id}/visits/{n}/{state_id}/stdout` (`{state_id}` defaults to the cycle's last-spawned state).
 - **Events**: cross-ticket structured event stream (live tail of the event ring buffer). Filterable by kind, ticket, cycle.
-- **Escalations**: outstanding escalation queue entries (kind, phase, ticket id, cycle id, error text). Local-only acknowledgement clears the visual highlight without notifying the daemon.
+- **Escalations**: outstanding escalation queue entries (kind, state_id, ticket id, cycle id, error text). Local-only acknowledgement clears the visual highlight without notifying the daemon.
 
 There is no daemon-side state-machine view: every ticket is either `idle` or `cycling`, and the in-flight cycle id (when present) is the live indicator.
 
@@ -67,7 +67,7 @@ There is no daemon-side state-machine view: every ticket is either `idle` or `cy
 
 ### Log inspection
 
-The ticket-detail view exposes "open in `roki log`" shortcuts that print the appropriate `roki log --ticket <id> --cycle <uuid> --iter <n> --phase <phase> --stream <stream>` command line for the operator to copy. The TUI does not embed the full log content beyond the run-stdout tail in the detail view; operators inspecting full captures use `roki log` outside the TUI.
+The ticket-detail view exposes "open in `roki log`" shortcuts that print the appropriate `roki log --ticket <id> --cycle <uuid> --iter <n> --state <state_id> --stream <stream>` command line for the operator to copy. The TUI does not embed the full log content beyond the latest-visit-stdout tail in the detail view; operators inspecting full captures use `roki log` outside the TUI.
 
 ### Terminal compatibility
 

@@ -33,12 +33,12 @@ docs/fr/
 
 | File | Topic |
 |---|---|
-| [01-engine-model.md](01-engine-model.md) | Cycle and phase loop, directive schema, failure kinds |
-| [02-configuration.md](02-configuration.md) | `roki.toml` + `WORKFLOW.toml` + `workflow/*.md` schemas, hot reload |
+| [01-engine-model.md](01-engine-model.md) | Cycle, state machine driver, sentinel directive schema, failure kinds |
+| [02-configuration.md](02-configuration.md) | `roki.toml` + `WORKFLOW.yaml` + `workflow/*.md` schemas, hot reload |
 | [03-linear-admission.md](03-linear-admission.md) | Webhook intake, signature verification, admission filter, diff observation, refresh nudge |
-| [04-state-execution.md](04-state-execution.md) | Subprocess launch, capture, directive parsing, stall, tool boundary |
+| [04-state-execution.md](04-state-execution.md) | State subprocess launch, capture, sentinel parsing, stall, tool boundary |
 | [05-worktree-and-session.md](05-worktree-and-session.md) | Per-ticket session tempdir + lazy worktree lifecycle |
-| [06-failure-handling.md](06-failure-handling.md) | `[[on_failure]]` cycle, escalation queue |
+| [06-failure-handling.md](06-failure-handling.md) | `on_failure:` cycle, escalation queue |
 | [07-recovery.md](07-recovery.md) | In-memory diff cache + cold-start enumeration |
 | [08-observability-logs.md](08-observability-logs.md) | Three-tier observability (event log / per-ticket capture / ring buffer) |
 | [09-log-access-cli.md](09-log-access-cli.md) | `roki log`, `roki events`, `roki repo` |
@@ -77,7 +77,7 @@ FR pages link to those tables and **do not restate** them.
 | Reference | Canonical home |
 |---|---|
 | CLI flag list | [`docs/reference/cli.md`](../reference/cli.md) |
-| Configuration schema (`roki.toml` / `WORKFLOW.toml` / `workflow/*.md`) | [`docs/reference/config.md`](../reference/config.md) |
+| Configuration schema (`roki.toml` / `WORKFLOW.yaml` / `workflow/*.md`) | [`docs/reference/config.md`](../reference/config.md) |
 | Public artifact paths / schemas | [`docs/reference/artifacts.md`](../reference/artifacts.md) |
 | Structured log event list | [`docs/reference/log-events.md`](../reference/log-events.md) |
 

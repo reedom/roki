@@ -21,7 +21,7 @@ refs:
 
 ## Purpose
 
-Without it, an operator's only view of daemon state is `tail | grep` on the structured event log. The HTTP API fills that gap with four guarantees: (a) default off — network exposure is intentional; (b) loopback default to prevent accidental exposure; (c) read-only projection so the diff cache cannot diverge; (d) sanitization so terminal escapes / markup in agent strings cannot damage downstream consumers. Endpoint set: tickets + cycles + iters + events + escalations + healthz + refresh.
+Without it, an operator's only view of daemon state is `tail | grep` on the structured event log. The HTTP API fills that gap with four guarantees: (a) default off — network exposure is intentional; (b) loopback default to prevent accidental exposure; (c) read-only projection so the diff cache cannot diverge; (d) sanitization so terminal escapes / markup in agent strings cannot damage downstream consumers. Endpoint set: tickets + cycles + visits + events + escalations + healthz + refresh.
 
 ## User-visible Behavior
 
@@ -65,12 +65,12 @@ Per-ticket detail.
 
 Cycle history for the ticket.
 
-- **Response body** (per entry): cycle id, kind (`rule` / `cleanup` / `failure`), trigger (`runtime` / `cold_start`), started_at, ended_at, terminal directive or failure kind.
+- **Response body** (per entry): cycle id, kind (`rule` / `cleanup` / `failure`), trigger (`runtime` / `cold_start`), started_at, ended_at, terminal id (or failure kind on abort), total visits.
 - **Source**: scan of the ticket's session tempdir under `[paths].session_root` (cycle metadata files).
 
-#### `GET /api/tickets/{id}/cycles/{cycle_id}/iters/{n}/{phase}/{stream}`
+#### `GET /api/tickets/{id}/cycles/{cycle_id}/visits/{n}/{state_id}/{stream}`
 
-HTTP wrapper around `roki log` ([09-log-access-cli §`roki log`](09-log-access-cli.md)). `phase` ∈ `pre` / `run` / `post`. `stream` ∈ `stdout` / `stderr` / `response` / `terminal` / `events` / `exit_code`. `n` is an absolute iter number; relative iter (`-1`, etc.) is not supported on the HTTP path because URLs prefer absolute.
+HTTP wrapper around `roki log` ([09-log-access-cli §`roki log`](09-log-access-cli.md)). `state_id` is an operator-declared id from `WORKFLOW.yaml`. `stream` ∈ `stdout` / `stderr` / `directive` / `terminal` / `events` / `exit_code`. `n` is an absolute visit number (cycle-wide visit ordering per [09-log-access-cli §Storage layout](09-log-access-cli.md)); relative visit (`-1`, etc.) is not supported on the HTTP path because URLs prefer absolute.
 
 #### `GET /api/events`
 
@@ -83,7 +83,7 @@ WebSocket / SSE push is deferred. Live tail is achieved by polling `since=<lates
 
 #### `GET /api/escalations`
 
-Escalation queue dump ([06-failure-handling §Escalation queue](06-failure-handling.md)). The queue surfaces daemon-stuck failures only — failure-handler cycles that themselves failed and daemon-internal errors with no cycle association. Per entry: ticket id (or null for cycle-less daemon errors), cycle id (or null), kind, phase (or null for cycle-less daemon errors), timestamp, error text. The list is bounded by ring size.
+Escalation queue dump ([06-failure-handling §Escalation queue](06-failure-handling.md)). The queue surfaces daemon-stuck failures only — failure-handler cycles that themselves failed, cleanup-time fs errors, and daemon-internal errors with no cycle association. Per entry: ticket id (nullable), cycle id (nullable), kind, state_id (nullable), visit_n (nullable), timestamp, error text. The list is bounded by ring size.
 
 #### `POST /api/refresh`
 
@@ -97,7 +97,7 @@ Linear refresh nudge.
 
 ### Sanitization (common to all endpoints)
 
-- **HTML escape**: every string field originating from a phase subprocess (last directive payload field, last error text, escalation entry text) and from Linear (ticket title / description / label) is escaped before serialization.
+- **HTML escape**: every string field originating from a state subprocess (last directive payload field, last error text, escalation entry text) and from Linear (ticket title / description / label) is escaped before serialization.
 - **ANSI strip**: terminal escape sequences are stripped from agent / Linear-derived strings.
 - **Defense in depth on the TUI side**: `roki-tui` also strips ANSI / control characters from received strings ([11-roki-tui](11-roki-tui.md)).
 - **Sanitize failure** (invalid UTF-8, etc.) → replace the string with a sanitized placeholder marker and log the offending field name.
@@ -130,7 +130,7 @@ Linear refresh nudge.
 - **Schema drift impossible**: server and clients import the same crate, so a breaking change makes both sides fail to compile.
 - **Layered sanitization**: stripped on both server and TUI.
 - **Self-observable**: the API's own usage count is exposed in `/healthz`.
-- **Backed by the in-memory ring + on-disk capture**: events are answered from the ring; per-iter captures are answered from disk via the same storage abstraction `roki log` uses.
+- **Backed by the in-memory ring + on-disk capture**: events are answered from the ring; per-visit captures are answered from disk via the same storage abstraction `roki log` uses.
 
 ## Boundaries
 

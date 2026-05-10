@@ -17,7 +17,7 @@ refs:
 
 ## Purpose
 
-Admit assigned tickets without drops, never touch others' tickets, and respect Linear's GraphQL rate limit (per-token bucket plus complexity budget; 429 surfaces both raw-rate and complexity-budget exhaustion) and Linear's no-aggressive-polling recommendation. Linear writes from inside a phase subprocess go through whatever MCP / CLI the operator's cli line provides; the daemon process itself never writes.
+Admit assigned tickets without drops, never touch others' tickets, and respect Linear's GraphQL rate limit (per-token bucket plus complexity budget; 429 surfaces both raw-rate and complexity-budget exhaustion) and Linear's no-aggressive-polling recommendation. Linear writes from inside a state subprocess go through whatever MCP / CLI the operator's cli line provides; the daemon process itself never writes.
 
 ## User-visible Behavior
 
@@ -36,7 +36,7 @@ Before any cache update ([07-recovery §Diff cache](07-recovery.md)), the daemon
 1. **Assignee gate**: `ticket.assignee == [admission].assignee`. The literal `me` resolves to the API token holder. Failure → silent eviction (logged but not surfaced to Linear).
 2. **Repo resolution**: `[[admission.repos]]` first-match → resolves the ticket's ghq repo identifier and its per-repo `workflow` path (or fall back to the top-level WORKFLOW.yaml entries). No match → silent eviction (`reason: repo_unresolvable`).
 
-Tickets that fail admission are not added to the cache. If the ticket was previously cached and the new webhook fails admission (assignee change, repo matcher no longer hits), the cache entry is evicted after any in-flight cycle terminates naturally. The worktree and session tempdir are **retained** until the ticket reaches a terminal state — reclaimed by a ``cleanup:` entries` cycle on re-admission or by cold-start orphan reconcile ([07-recovery §Cold start](07-recovery.md)) when the ticket is no longer enumerable.
+Tickets that fail admission are not added to the cache. If the ticket was previously cached and the new webhook fails admission (assignee change, repo matcher no longer hits), the cache entry is evicted after any in-flight cycle terminates naturally. The worktree and session tempdir are **retained** until the ticket reaches a terminal state — reclaimed by a ``cleanup`` cycle on re-admission or by cold-start orphan reconcile ([07-recovery §Cold start](07-recovery.md)) when the ticket is no longer enumerable.
 
 ### Polling fallback
 
@@ -47,7 +47,7 @@ The webhook receiver is mandatory (`[linear.webhook]` is required in `roki.toml`
 
 Both share the assignee filter and the same status narrowing rules:
 
-- If **every** ``rules:` entries` and ``cleanup:` entries` entry across WORKFLOW.yaml plus every per-repo TOML declares an explicit `when.status`, the union of those values becomes a Linear-side status filter (small, bounded query).
+- If **every** ``rules`` and ``cleanup`` entry across WORKFLOW.yaml plus every per-repo TOML declares an explicit `when.status`, the union of those values becomes a Linear-side status filter (small, bounded query).
 - If **any** entry omits `when.status` (i.e. matches any state), the status filter is dropped and the query enumerates every ticket the assignee owns. The daemon emits an info log at startup naming the entry that triggered the drop, so operators concerned about Linear API budget can add an explicit `when.status` and shrink the query.
 
 Cadence is governed by `roki.toml [linear].polling.cadence_seconds` (canonical default and validation rules in [`docs/reference/config.md`](../reference/config.md)). The cap is enforced even when a refresh nudge arrives (see below). Outage-driven polling stops automatically once webhook delivery resumes (Linear delivers a fresh webhook the daemon successfully verifies); nudge-driven polls are one-shot and do not enter the cadence loop.
@@ -68,8 +68,8 @@ The diff cache decides what counts as a change ([07-recovery §Diff cache](07-re
 When the assignee on a previously admitted ticket changes to someone other than `[admission].assignee`:
 
 1. If a cycle is currently in flight, it runs to natural end (queue mode); afterward the diff cache evicts the entry.
-2. The worktree and session tempdir are **retained** until the ticket reaches a terminal state — reclaimed by a ``cleanup:` entries` cycle on re-admission or by cold-start orphan reconcile ([07-recovery §Cold start](07-recovery.md)) when the ticket is no longer enumerable. Re-admission while the eviction is pending cancels it.
-3. No Linear write is performed by the daemon. Operators that want a Linear comment on reassignment author a ``cleanup:` entries` entry whose run phase performs the write.
+2. The worktree and session tempdir are **retained** until the ticket reaches a terminal state — reclaimed by a ``cleanup`` cycle on re-admission or by cold-start orphan reconcile ([07-recovery §Cold start](07-recovery.md)) when the ticket is no longer enumerable. Re-admission while the eviction is pending cancels it.
+3. No Linear write is performed by the daemon. Operators that want a Linear comment on reassignment author a ``cleanup`` entry whose state performs the write.
 
 There is no separate `Cleaning` state in the daemon ([07-recovery](07-recovery.md)).
 
@@ -85,14 +85,14 @@ Operators (TUI, external scripts, observability components) can request an out-o
 
 - **Webhook receiver**: a single endpoint at the workspace level. HMAC signature verification (`Linear-Signature` header, hex HMAC-SHA256 of raw body, constant-time compare) and the 60 s `webhookTimestamp` freshness check are mandatory.
 - **Normalized issue model**: minimally contains issue id, title, description, current state, label set, assignee user id, repo identifier (resolved by admission). Later layers only see the normalized model.
-- **Read-only**: no Linear write is ever issued from the daemon process. Writes are confined to phase subprocesses that operators authorize through their cli line.
+- **Read-only**: no Linear write is ever issued from the daemon process. Writes are confined to state subprocesses that operators authorize through their cli line.
 - **Polling fallback**: implements the cap + 429 backoff contract above, sharing rate-limit accounting with webhook-driven calls.
 - **Refresh nudge**: an out-of-cycle poll request that respects the cap and backoff state.
 - **Single-flight**: the diff cache ensures at most one cycle per ticket at a time. Concurrent observations of the same ticket at the same instant are serialized through the cache; the cycle dispatch step runs only once.
 
 ## Boundaries
 
-- **No Linear writes from the daemon process** at all. Writes belong to phase subprocesses (operator-controlled cli lines).
+- **No Linear writes from the daemon process** at all. Writes belong to state subprocesses (operator-controlled cli lines).
 - **Generic team / label / project filters** are out of scope. The daemon's Linear-side filter is exactly assignee plus the union of `when.status` values used by WORKFLOW.yaml entries.
 - **Trackers other than Linear** (Jira, etc.) are out of scope.
 - **The daemon does not mirror observed Linear states into a state machine.** Linear states are looked up via the tracker each time and held only as the latest cached triple.
