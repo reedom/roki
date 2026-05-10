@@ -188,22 +188,29 @@ impl CycleKind {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FailureKind {
     /// Pre/Post: stdout has no JSON object, or the last JSON object lacks
-    /// `directive`.
+    /// `directive`. Slice 8: sentinel file present but JSON parse failed or
+    /// `directive` field missing.
     Unparseable,
     /// Pre/Post: `directive` value outside the legal set for the phase.
+    /// Slice 8: sentinel `directive` value not in `state.directives` ∪
+    /// built-in defaults.
     SchemaDrift,
     /// Pre/Post: non-zero exit and stdout has no parseable JSON object.
+    /// Slice 8: subprocess killed by signal without sentinel write.
     ProcessCrash,
     /// Liquid render of argv or stdin body failed before launch.
     TemplateError,
     /// Post returned `pre` or `run` while `iter == max_iterations`.
+    /// Slice 8: deprecated; replaced by `RecursionBound` (kept here while
+    /// the old engine module is still wired).
     IterExhausted,
+    /// Slice 8: state visited more than `state.max_visits` times.
+    RecursionBound,
     /// Stdout silent for `stall_seconds`; supervisor SIGTERMed (and SIGKILLed
     /// after grace if necessary). Applies to both shapes.
     Stall,
     /// Filesystem error creating or recovering session_tempdir before phase
-    /// launch. Worktree-side fs errors land here too once worktree creation
-    /// lands; for slice 3 only session_tempdir is in scope.
+    /// launch.
     FsPoison,
 }
 
@@ -215,6 +222,7 @@ impl FailureKind {
             FailureKind::ProcessCrash => "process_crash",
             FailureKind::TemplateError => "template_error",
             FailureKind::IterExhausted => "iter_exhausted",
+            FailureKind::RecursionBound => "recursion_bound",
             FailureKind::Stall => "stall",
             FailureKind::FsPoison => "fs_poison",
         }
