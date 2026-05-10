@@ -14,6 +14,40 @@
 
 ---
 
+## Session progress (2026-05-10)
+
+**Completed:** Tasks 0-7, 9-10, 12-15 (13 of 18). All committed on `feature/workflow`. 375 binary unit tests pass; pre-existing slice 1-7 e2e suite still green (no engine wiring touched yet).
+
+| Task | Commit | Status |
+|---|---|---|
+| 0 spec/plan | `65a4121`, `0c63f38`, `c6a9dec`, `5877e4a` | done |
+| 1 canonical types | `5c0b4d4` | done |
+| 2 parse | `6ca56e7` | done |
+| 3 sugar 5-pass | `66dc5ee` | done |
+| 4 validate | `2b4806f` | done |
+| 5 sentinel | `cad2161` | done |
+| 6 state_runtime | `09f0477` | done |
+| 7 cycle_state | `4bb58a2` | done |
+| 9+10 CLI validate+graph | `a63234c` | done |
+| 12 ref:config | `6edcb2c` | done |
+| 14 ref:cli + ref:log-events | `2ba94ec` | done |
+| 15 YAML examples + delete TOML | `893c5ac` | done |
+| 13 FR doc rewrite (fr:01/02/04→04-state/06/08) | `fb51aba` | done |
+
+**Pending (engine cliff — needs dedicated session):**
+
+| Task | Why deferred |
+|---|---|
+| 8 failure routing wiring | Demolish + replace `engine/cycle.rs` 44KB + `phase.rs` 34KB + `session.rs` 31KB + `directive.rs` 8KB; rewrite `engine/{outcome,on_failure,dispatch,context,cleanup,stall}.rs`, `daemon/{dispatcher,ticket_task,real_runner}.rs`, `events.rs`. Touch ~150KB. Each step breaks compile until full chain rewritten. |
+| 11 roki.toml config rename | `[default.ai.command]` → `[default.ai]` rename forces engine refactor (current code references `[default.ai.session]` and `[default.ai.command]`). |
+| 16 slice 1-7 e2e fixture migration | Each fixture's TOML emitter rewrites to new YAML harness; depends on Task 8 + 11 being live. |
+| 17 12 new slice 8 e2e fixtures | Depends on engine using YAML + state machine. |
+| 18 sweep | Final fmt + clippy + full e2e green. |
+
+**Resumption note:** Start Task 8. Read `engine/{phase,session,directive,cycle}.rs` end-to-end first; identify shared helpers (`engine/template`, `engine/stall`, `engine/worktree`, `engine/cwd`, `engine/stream` are reusable; `engine/context` needs Liquid-globals rewrite). Build `RealStateRunner` against the existing helper stack, then swap `daemon::ticket_task::CycleRunner` to consume it. Delete legacy modules last, after dispatcher uses canonical `RuleEntry`. ref:config rows for `[default.ai.session]`/`[default.ai.command]` should be replaced with the merged `[default.ai]` row simultaneously with the code change (Task 11).
+
+---
+
 ## File Structure
 
 ### Created
