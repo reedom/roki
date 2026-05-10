@@ -501,7 +501,7 @@ fn serde_object_to_liquid(map: &Map<String, Value>) -> liquid::Object {
 /// Build the `ROKI_*` env pairs for one state subprocess. Always exports
 /// `ROKI_DIRECTIVE_PATH`. Top-level scalars from `ctx.globals.ticket`,
 /// `repo`, `cycle`, and `config` are flattened into `ROKI_<NAMESPACE>_<KEY>`.
-/// `ROKI_STATE_ID` and `ROKI_STATE_VISIT_N` reflect the current invocation.
+/// `ROKI_STATE_ID` and `ROKI_STATE_VISITS` reflect the current invocation.
 /// Past task captures are flattened into
 /// `ROKI_TASK_<STATE_ID>_{EXIT_CODE,DURATION_SECONDS,...}` per spec §6.
 fn build_env(
@@ -516,7 +516,7 @@ fn build_env(
         sentinel_path.to_string_lossy().into_owned(),
     ));
     pairs.push(("ROKI_STATE_ID".into(), state.id.clone()));
-    pairs.push(("ROKI_STATE_VISIT_N".into(), visit_n.to_string()));
+    pairs.push(("ROKI_STATE_VISITS".into(), visit_n.to_string()));
 
     for (ns_key, ns_value) in &ctx.globals {
         if let Value::Object(map) = ns_value {
@@ -953,7 +953,7 @@ mod tests {
         let names: Vec<&str> = env.iter().map(|(k, _)| k.as_str()).collect();
         assert!(names.contains(&"ROKI_DIRECTIVE_PATH"));
         assert!(names.contains(&"ROKI_STATE_ID"));
-        assert!(names.contains(&"ROKI_STATE_VISIT_N"));
+        assert!(names.contains(&"ROKI_STATE_VISITS"));
         assert!(names.contains(&"ROKI_TICKET_ID"));
         assert!(names.contains(&"ROKI_CYCLE_KIND"));
         assert!(names.contains(&"ROKI_CYCLE_ITER"));

@@ -167,6 +167,32 @@ impl WorkflowConfig {
         })
     }
 
+    /// Rules applicable to a ticket from the given ghq path. When the repo
+    /// declared `[[admission.repos]] workflow:`, the override file replaces
+    /// the top-level `rules:` entirely (fr:02 §Per-repo workflow split).
+    pub fn rules_for(&self, ghq: &str) -> &[RuleEntry] {
+        match self.repo_overrides.get(ghq) {
+            Some(set) => &set.rules,
+            None => &self.rules,
+        }
+    }
+
+    /// Same per-repo selection as [`Self::rules_for`], for `cleanup:` lists.
+    pub fn cleanups_for(&self, ghq: &str) -> &[RuleEntry] {
+        match self.repo_overrides.get(ghq) {
+            Some(set) => &set.cleanups,
+            None => &self.cleanups,
+        }
+    }
+
+    /// Same per-repo selection as [`Self::rules_for`], for `on_failure:` lists.
+    pub fn on_failures_for(&self, ghq: &str) -> &[RuleEntry] {
+        match self.repo_overrides.get(ghq) {
+            Some(set) => &set.on_failures,
+            None => &self.on_failures,
+        }
+    }
+
     /// Produce a [`WorkflowFile`] view of this config. Used by code paths that
     /// already speak canonical types (e.g. the `roki workflow validate` CLI).
     pub fn to_workflow_file(&self) -> WorkflowFile {

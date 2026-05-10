@@ -160,8 +160,8 @@ impl RealCycleRunner {
             return HandlerDecision::Unhandled;
         }
 
-        let Some(handler) = crate::engine::on_failure::route(&self.workflow.on_failures, meta)
-        else {
+        let on_failures = self.workflow.on_failures_for(&admitted.ghq);
+        let Some(handler) = crate::engine::on_failure::route(on_failures, meta) else {
             let _ = events.emit(&Event::FailureUnhandled {
                 ts: now_rfc3339(),
                 cycle_id: failed_cycle_id.to_string(),
