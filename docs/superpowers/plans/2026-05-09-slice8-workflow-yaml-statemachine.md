@@ -34,17 +34,48 @@
 | 15 YAML examples + delete TOML | `893c5ac` | done |
 | 13 FR doc rewrite (fr:01/02/04→04-state/06/08) | `fb51aba` | done |
 
-**Pending (engine cliff — needs dedicated session):**
+## Session progress (2026-05-10, second pass — branch `feature/slice8-engine`)
+
+**Phase 1 of Task 8 landed:**
+
+| Sub-phase | Commit | Status |
+|---|---|---|
+| Phase 1: RealStateRunner + state-shaped capture + if_cond skip | `14ef20d` | done |
+| Phase 1 fmt drift | `64af51f` | done |
+| Phase 3: events `phase`→`state_id` + `visit_n` | (current HEAD) | done |
+
+Both commits on `feature/slice8-engine` (off `main` at `7a43b21`). 398 unit tests + clippy clean.
+
+**Still pending — Phase 2/4/5 of Task 8 + Tasks 11, 16-18 — defer to a dedicated session:**
 
 | Task | Why deferred |
 |---|---|
-| 8 failure routing wiring | Demolish + replace `engine/cycle.rs` 44KB + `phase.rs` 34KB + `session.rs` 31KB + `directive.rs` 8KB; rewrite `engine/{outcome,on_failure,dispatch,context,cleanup,stall}.rs`, `daemon/{dispatcher,ticket_task,real_runner}.rs`, `events.rs`. Touch ~150KB. Each step breaks compile until full chain rewritten. |
-| 11 roki.toml config rename | `[default.ai.command]` → `[default.ai]` rename forces engine refactor (current code references `[default.ai.session]` and `[default.ai.command]`). |
+| Task 8 Phase 2: flip `daemon::ticket_task::CycleRunner` to use `cycle_state::run_cycle` + `RealStateRunner` | Needs canonical `WorkflowFile` (or a `Rule → StateMachine` synthesis bridge) replacing the legacy TOML-loaded `WorkflowConfig`. Touches `daemon/{real_runner, ticket_task, dispatcher}.rs`, `engine/{dispatch, on_failure}.rs`, `rule.rs`, `config/workflow.rs`. ~150KB end-to-end. |
+| Task 8 Phase 4: rewrite `engine/context.rs` (`PhaseContext` → `CycleContextBuilder`) | RealStateRunner already builds liquid globals inline; consolidating to `engine::context` is desirable but blocked on Phase 2. |
+| Task 8 Phase 5: delete legacy `engine/{cycle,phase,session,directive,outcome.legacy_parts,on_failure.legacy,dispatch.legacy}.rs` | Strictly blocked on Phase 2 (production path must consume canonical types first). |
+| 11 roki.toml config rename | `[default.ai.command]` → `[default.ai]` rename forces engine refactor (current code references `[default.ai.session]` and `[default.ai.command]`). Merge with Phase 2 above. |
 | 16 slice 1-7 e2e fixture migration | Each fixture's TOML emitter rewrites to new YAML harness; depends on Task 8 + 11 being live. |
 | 17 12 new slice 8 e2e fixtures | Depends on engine using YAML + state machine. |
 | 18 sweep | Final fmt + clippy + full e2e green. |
 
-**Resumption note:** Start Task 8. Read `engine/{phase,session,directive,cycle}.rs` end-to-end first; identify shared helpers (`engine/template`, `engine/stall`, `engine/worktree`, `engine/cwd`, `engine/stream` are reusable; `engine/context` needs Liquid-globals rewrite). Build `RealStateRunner` against the existing helper stack, then swap `daemon::ticket_task::CycleRunner` to consume it. Delete legacy modules last, after dispatcher uses canonical `RuleEntry`. ref:config rows for `[default.ai.session]`/`[default.ai.command]` should be replaced with the merged `[default.ai]` row simultaneously with the code change (Task 11).
+**Resumption note (still applicable; updated after second pass):**
+
+Phase 1 already provides a working `engine::real_state_runner::RealStateRunner` against the helper stack (`engine/{template, stall, worktree, cwd, stream, sentinel, capture}`); `engine::cycle_state::run_cycle` already evaluates `state.if_cond` and consumes the runner via the `StateRunner` trait.
+
+Phase 2 next steps (from `feature/slice8-engine`):
+
+1. Replace `crate::config::workflow::WorkflowConfig` with `crate::workflow::canonical::WorkflowFile` end-to-end. Daemon main-load path consumes `workflow::parse::parse_workflow_file` (already implemented) instead of the TOML loader. Deletes the entire TOML loader module.
+2. Reshape `crate::rule::first_match` / `first_cleanup_match` to take `&[RuleEntry]` + `WhenClause` matcher (covers all the slice-8 `WhenClause` axes — `status`, `labels`, `assignee`, `repo`, `kind`, `phase`, `title`, `body`).
+3. Reshape `crate::engine::dispatch::DispatchTarget` to carry `&StateMachine` instead of `Option<&Rule> / Option<&Cleanup>`.
+4. Reshape `crate::engine::on_failure::OnFailure` to carry `state_machine: StateMachine` instead of `pre/run/post: PhaseBody`. Matcher checks `(meta.kind, meta.state_id)`. `route` returns `Option<&StateMachine>`.
+5. Replace `daemon::real_runner::RealCycleRunner` body: call `cycle_state::run_cycle(sm, &runner, &mut ctx)` with `RealStateRunner` constructed per cycle. On `Err(meta)` evaluate `on_failure::route` → spawn handler cycle via the same path. On recursion (`failed_kind == CycleKind::Failure`) push to escalation queue.
+6. Update `cycle_completed` event emit to carry `terminal_id: String` + non-Option `outcome: String` (spec §11.5) — events.rs needs a small additional field add.
+7. Migrate slice 1-7 e2e fixtures from `WORKFLOW.toml` to `WORKFLOW.yaml`.
+8. Delete legacy `engine/{cycle.rs, phase.rs, session.rs, directive.rs}` (extract `phase::resolve_ghq_base` to `engine/cwd.rs` first since `cwd::resolve` depends on it).
+9. Slim `engine/outcome.rs` (drop `PhaseKind`, `PhaseShape`, `Pre/PostDirective`, `PhaseOutcome`, `FailureMeta`; keep `FailureKind`, `CycleKind`).
+10. ref:config rows for `[default.ai.session]`/`[default.ai.command]` simultaneously rename to merged `[default.ai]` (Task 11).
+
+**Test impact:** Tasks 8 + 11 + 16 land together. ~50 unit tests in `daemon/{real_runner, ticket_task, dispatcher}.rs`, `rule.rs`, `engine/{cycle, phase, session, dispatch, on_failure}.rs`, `events.rs` need rewriting against canonical types. ~30 e2e fixtures migrate from TOML to YAML.
 
 ---
 

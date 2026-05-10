@@ -52,7 +52,8 @@ pub async fn delete_immediate(
         cycle_id: cycle_id.to_string(),
         cycle_kind: "cleanup".into(),
         iters: 0,
-        outcome: None,
+        terminal_id: Some("__success__".into()),
+        outcome: Some("cleaned".into()),
     });
     let _ = events.emit(&Event::WorktreeDeleteRequested {
         ts: now_rfc3339(),

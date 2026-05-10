@@ -1,14 +1,12 @@
-//! Liquid render of argv strings and stdin bodies.
+//! Liquid render of argv strings, stdin bodies, and `if:` conditions.
 //!
-//! The same `render_str` API serves all render channels: argv (the
-//! pre-shell-words cli line), stdin body (path body, inline prompt), and
-//! the inline cmd string. Failures map to `FailureKind::TemplateError` at
-//! the call site (`engine::phase`).
+//! Slice 8 callers pass an already-built `liquid::Object` to
+//! `render_str_with_globals` / `eval_cond`. The legacy `render_str(template,
+//! &PhaseContext)` overload is gone; `engine::real_state_runner` constructs
+//! the per-state globals object inline.
 
 use liquid::model::{DisplayCow, KStringCow, ObjectView, State, Value, ValueView};
 use thiserror::Error;
-
-use super::context::{PhaseContext, to_liquid_object};
 
 /// Render error wrapper. The engine maps this to `FailureKind::TemplateError`
 /// when surfacing it through `PhaseOutcome`.
@@ -203,15 +201,8 @@ impl ObjectView for NilSection {
     }
 }
 
-/// Render `template` against `ctx`'s Liquid object. Missing variables expand
-/// to the Liquid default (empty string) per Shopify Liquid semantics.
-pub fn render_str(template: &str, ctx: &PhaseContext) -> Result<String, TemplateError> {
-    render_str_with_globals(template, &to_liquid_object(ctx))
-}
-
 /// Render `template` against an already-built Liquid object. Used by the
-/// slice-8 state runner to pass a `CycleContext`-derived globals map without
-/// going through `PhaseContext`.
+/// slice-8 state runner to pass a `CycleContext`-derived globals map.
 pub fn render_str_with_globals(
     template: &str,
     globals: &liquid::Object,
@@ -240,109 +231,11 @@ pub fn eval_cond(expr: &str, globals: &liquid::Object) -> Result<bool, TemplateE
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::admission::AdmittedTicket;
-    use crate::config::roki::*;
-    use crate::engine::context::CycleTrigger;
-    use crate::engine::outcome::CycleKind;
-    use crate::linear::ticket::NormalizedTicket;
-    use std::path::PathBuf;
-    use uuid::Uuid;
-
-    fn admitted() -> AdmittedTicket {
-        AdmittedTicket {
-            ticket: NormalizedTicket::new(
-                "ENG-7".to_string(),
-                Some("u1".to_string()),
-                "review".to_string(),
-                vec!["needs-impl".to_string()],
-                "Implement widget".to_string(),
-                "Body".to_string(),
-            ),
-            ghq: "github.com/acme/widget".to_string(),
-        }
-    }
-
-    fn cfg() -> RokiConfig {
-        RokiConfig {
-            linear: LinearSection {
-                token: "x".to_string(),
-            },
-            linear_webhook: LinearWebhookSection {
-                bind: "127.0.0.1".to_string(),
-                port: 8000,
-                secret: None,
-            },
-            default_ai_command: DefaultAiCommandSection {
-                cli: "echo".to_string(),
-                stall_seconds: 300,
-            },
-            engine: EngineSection {
-                max_iterations: 10,
-                shutdown_window_seconds: 30,
-            },
-            paths: PathsSection {
-                workflow: PathBuf::from("/tmp/w"),
-                session_root: PathBuf::from("/tmp/s"),
-            },
-            log: LogSection::default(),
-            escalation: EscalationSection::default(),
-            default_ai_session: None,
-        }
-    }
-
-    #[test]
-    fn renders_ticket_id_and_iter() {
-        let mut ctx = super::PhaseContext::new(
-            &admitted(),
-            Uuid::nil(),
-            &cfg(),
-            CycleKind::Rule,
-            CycleTrigger::Runtime,
-        );
-        ctx.set_iter(2);
-        let out = render_str("ticket {{ ticket.id }} iter {{ cycle.iter }}", &ctx).unwrap();
-        assert_eq!(out, "ticket ENG-7 iter 2");
-    }
-
-    #[test]
-    fn renders_pre_payload_field() {
-        let mut ctx = super::PhaseContext::new(
-            &admitted(),
-            Uuid::nil(),
-            &cfg(),
-            CycleKind::Rule,
-            CycleTrigger::Runtime,
-        );
-        ctx.set_pre(serde_json::json!({"directive":"run","note":"hello"}));
-        let out = render_str("pre note: {{ pre.note }}", &ctx).unwrap();
-        assert_eq!(out, "pre note: hello");
-    }
-
-    #[test]
-    fn missing_variable_expands_to_empty_string() {
-        let ctx = super::PhaseContext::new(
-            &admitted(),
-            Uuid::nil(),
-            &cfg(),
-            CycleKind::Rule,
-            CycleTrigger::Runtime,
-        );
-        // `pre` is None at iter 0 before any pre runs; the dereference returns nil.
-        let out = render_str("got [{{ pre.note }}]", &ctx).unwrap();
-        assert_eq!(out, "got []");
-    }
 
     #[test]
     fn parse_error_returns_template_error() {
-        let ctx = super::PhaseContext::new(
-            &admitted(),
-            Uuid::nil(),
-            &cfg(),
-            CycleKind::Rule,
-            CycleTrigger::Runtime,
-        );
-        // Unmatched `{%` confuses the parser.
-        let result = render_str("{% if foo %}", &ctx);
+        let obj = liquid::Object::new();
+        let result = render_str_with_globals("{% if foo %}", &obj);
         match result {
             Err(TemplateError::Parse(_)) => {}
             other => panic!("expected Parse error, got {other:?}"),
@@ -408,23 +301,5 @@ mod tests {
         // Unmatched braces inside the expression confuse the parser.
         let result = eval_cond("flag and {%", &obj);
         assert!(result.is_err());
-    }
-
-    #[test]
-    fn renders_run_exit_code_when_set() {
-        let mut ctx = super::PhaseContext::new(
-            &admitted(),
-            Uuid::nil(),
-            &cfg(),
-            CycleKind::Rule,
-            CycleTrigger::Runtime,
-        );
-        ctx.set_run(5, 12, None);
-        let out = render_str(
-            "exit={{ run.exit_code }} dur={{ run.duration_seconds }}",
-            &ctx,
-        )
-        .unwrap();
-        assert_eq!(out, "exit=5 dur=12");
     }
 }

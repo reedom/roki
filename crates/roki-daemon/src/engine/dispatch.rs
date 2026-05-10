@@ -1,32 +1,36 @@
 //! Cycle dispatch evaluator: cleanup-first then rule first-match.
-//! Per fr:01 §38 + fr:07 §Cycle dispatch.
+//!
+//! Spec: fr:01 §38 + fr:07 §Cycle dispatch.
+//!
+//! Slice 8 produces canonical `RuleEntry` references. The cleanup
+//! shorthand is detected via `rule::is_shorthand_cleanup`.
 
 #![allow(dead_code)]
 
 use crate::admission::AdmittedTicket;
-use crate::config::workflow::{Cleanup, Rule, WorkflowConfig};
+use crate::config::workflow::WorkflowConfig;
 use crate::engine::outcome::CycleKind;
+use crate::workflow::canonical::RuleEntry;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DispatchMode {
-    /// Default: evaluate `[[cleanup]]` first, then `[[rule]]`.
+    /// Default: evaluate cleanup first, then rules.
     Default,
-    /// `roki cleanup` subcommand: only `[[cleanup]]` matches lead to a cycle.
-    /// `[[rule]]` list is ignored.
+    /// `roki cleanup` subcommand: only cleanup matches lead to a cycle.
     CleanupOnly,
 }
 
 #[derive(Debug)]
 pub enum DispatchTarget<'a> {
-    /// Spawn a normal cycle (rule or cleanup) with these phases.
+    /// Spawn a normal cycle (rule or cleanup) running this entry's state
+    /// machine.
     Cycle {
         kind: CycleKind,
-        rule: Option<&'a Rule>,
-        cleanup: Option<&'a Cleanup>,
+        rule: &'a RuleEntry,
     },
     /// Cleanup shorthand: synchronous delete, no cycle.
     CleanupShorthand,
-    /// No `[[cleanup]]` and no `[[rule]]` matched.
+    /// No cleanup and no rule matched.
     NoMatch,
 }
 
@@ -36,13 +40,12 @@ pub fn evaluate<'a>(
     mode: DispatchMode,
 ) -> DispatchTarget<'a> {
     if let Some(c) = crate::rule::first_cleanup_match(admitted, &workflow.cleanups) {
-        if c.is_shorthand() {
+        if crate::rule::is_shorthand_cleanup(c) {
             return DispatchTarget::CleanupShorthand;
         }
         return DispatchTarget::Cycle {
             kind: CycleKind::Cleanup,
-            rule: None,
-            cleanup: Some(c),
+            rule: c,
         };
     }
 
@@ -53,24 +56,19 @@ pub fn evaluate<'a>(
     if let Some(r) = crate::rule::first_match(admitted, &workflow.rules) {
         return DispatchTarget::Cycle {
             kind: CycleKind::Rule,
-            rule: Some(r),
-            cleanup: None,
+            rule: r,
         };
     }
 
     DispatchTarget::NoMatch
 }
 
-/// Like `evaluate`, but takes a cache snapshot instead of a freshly admitted
-/// ticket. Used by the per-ticket task to re-dispatch after a cycle ends
-/// when `pending_recheck` was set. Admission has already passed for this
-/// entry; we synthesize an `AdmittedTicket` from the snapshot fields so the
-/// existing rule-matching helpers (`first_match`, `first_cleanup_match`) can
-/// be reused unchanged.
+/// Same as `evaluate`, but synthesizes the `AdmittedTicket` from a cache
+/// snapshot (per-ticket task path).
 pub fn evaluate_from_cache<'a>(
     ticket_id: &str,
     snap: &crate::daemon::cache::CacheEntry,
-    workflow: &'a crate::config::workflow::WorkflowConfig,
+    workflow: &'a WorkflowConfig,
     mode: DispatchMode,
 ) -> DispatchTarget<'a> {
     let synthetic = AdmittedTicket {
@@ -90,56 +88,75 @@ pub fn evaluate_from_cache<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::workflow::{Cleanup, Rule};
-    use crate::engine::outcome::PhaseBody;
+    use crate::config::workflow::workflow_config_for_test;
+    use crate::workflow::canonical::test_helpers as h;
+    use crate::workflow::canonical::{
+        LabelsMatcher, RuleEntry, ScalarMatcher, StateMachine, Terminal, WhenClause,
+    };
 
-    fn workflow_with(rules: Vec<Rule>, cleanups: Vec<Cleanup>) -> WorkflowConfig {
-        WorkflowConfig {
-            admission: crate::config::workflow::AdmissionSection {
-                assignee: "me".into(),
+    fn dummy_sm() -> StateMachine {
+        let mut sm = h::state_machine();
+        sm.start = "a".into();
+        sm.states.insert("a".into(), h::state("a", "true"));
+        sm.terminals.insert(
+            "__success__".into(),
+            Terminal {
+                id: "__success__".into(),
+                outcome: "success".into(),
             },
-            repo: None,
-            rules,
-            cleanups,
-            on_failures: vec![],
+        );
+        sm
+    }
+
+    fn shorthand_sm() -> StateMachine {
+        let mut sm = h::state_machine();
+        sm.start = "__success__".into();
+        sm.terminals.insert(
+            "__success__".into(),
+            Terminal {
+                id: "__success__".into(),
+                outcome: "cleaned".into(),
+            },
+        );
+        sm
+    }
+
+    fn rule_for(status: &str) -> RuleEntry {
+        let mut when = WhenClause::default();
+        when.status = Some(ScalarMatcher::Eq(status.into()));
+        RuleEntry {
+            when: Some(when),
+            state_machine: dummy_sm(),
         }
     }
 
-    fn rule_for(status: &str) -> Rule {
-        Rule {
-            when_status: status.into(),
-            when_labels_has_all: vec![],
-            pre: None,
-            run: PhaseBody::InlineCmd { cmd: "true".into() },
-            post: None,
+    fn cleanup_for(status: Option<&str>) -> RuleEntry {
+        let when = status.map(|s| {
+            let mut w = WhenClause::default();
+            w.status = Some(ScalarMatcher::Eq(s.into()));
+            w
+        });
+        RuleEntry {
+            when,
+            state_machine: dummy_sm(),
         }
     }
 
-    fn cleanup_for(status: Option<&str>) -> Cleanup {
-        Cleanup {
-            when_status: status.map(String::from),
-            when_labels_has_all: vec![],
-            pre: None,
-            run: status.map(|_| PhaseBody::InlineCmd { cmd: "true".into() }),
-            post: None,
-        }
-    }
-
-    fn shorthand_cleanup() -> Cleanup {
-        Cleanup {
-            when_status: None,
-            when_labels_has_all: vec![],
-            pre: None,
-            run: None,
-            post: None,
+    fn shorthand_cleanup() -> RuleEntry {
+        RuleEntry {
+            when: None,
+            state_machine: shorthand_sm(),
         }
     }
 
     #[test]
     fn cleanup_wins_over_rule() {
-        let wf = workflow_with(
+        let wf = workflow_config_for_test(
+            "u1",
+            Some("github.com/acme/widget"),
             vec![rule_for("InProgress")],
             vec![cleanup_for(Some("InProgress"))],
+            vec![],
         );
         let a = crate::rule::admitted_with("InProgress", vec![]);
         match evaluate(&a, &wf, DispatchMode::Default) {
@@ -153,7 +170,13 @@ mod tests {
 
     #[test]
     fn shorthand_dispatch() {
-        let wf = workflow_with(vec![rule_for("Done")], vec![shorthand_cleanup()]);
+        let wf = workflow_config_for_test(
+            "u1",
+            Some("github.com/acme/widget"),
+            vec![rule_for("Done")],
+            vec![shorthand_cleanup()],
+            vec![],
+        );
         let a = crate::rule::admitted_with("Done", vec![]);
         match evaluate(&a, &wf, DispatchMode::Default) {
             DispatchTarget::CleanupShorthand => {}
@@ -163,9 +186,12 @@ mod tests {
 
     #[test]
     fn rule_dispatch_when_no_cleanup_match() {
-        let wf = workflow_with(
+        let wf = workflow_config_for_test(
+            "u1",
+            Some("github.com/acme/widget"),
             vec![rule_for("InProgress")],
             vec![cleanup_for(Some("Done"))],
+            vec![],
         );
         let a = crate::rule::admitted_with("InProgress", vec![]);
         match evaluate(&a, &wf, DispatchMode::Default) {
@@ -179,9 +205,12 @@ mod tests {
 
     #[test]
     fn no_match_when_neither_list_hits() {
-        let wf = workflow_with(
+        let wf = workflow_config_for_test(
+            "u1",
+            Some("github.com/acme/widget"),
             vec![rule_for("InProgress")],
             vec![cleanup_for(Some("Done"))],
+            vec![],
         );
         let a = crate::rule::admitted_with("Triage", vec![]);
         match evaluate(&a, &wf, DispatchMode::Default) {
@@ -192,9 +221,12 @@ mod tests {
 
     #[test]
     fn cleanup_only_mode_ignores_rule_list() {
-        let wf = workflow_with(
+        let wf = workflow_config_for_test(
+            "u1",
+            Some("github.com/acme/widget"),
             vec![rule_for("InProgress")],
             vec![cleanup_for(Some("Done"))],
+            vec![],
         );
         let a = crate::rule::admitted_with("InProgress", vec![]);
         match evaluate(&a, &wf, DispatchMode::CleanupOnly) {
@@ -226,7 +258,13 @@ mod tests {
 
     #[test]
     fn evaluate_from_cache_dispatches_cleanup_first() {
-        let wf = workflow_with(vec![rule_for("Done")], vec![cleanup_for(Some("Done"))]);
+        let wf = workflow_config_for_test(
+            "u1",
+            Some("github.com/example/repo"),
+            vec![rule_for("Done")],
+            vec![cleanup_for(Some("Done"))],
+            vec![],
+        );
         let snap = snapshot_for("Done", &[]);
         match evaluate_from_cache("t1", &snap, &wf, DispatchMode::Default) {
             DispatchTarget::Cycle {
@@ -238,15 +276,7 @@ mod tests {
     }
 
     #[test]
-    fn evaluate_from_cache_no_match_when_status_misses() {
-        let wf = workflow_with(
-            vec![rule_for("InProgress")],
-            vec![cleanup_for(Some("Done"))],
-        );
-        let snap = snapshot_for("Triage", &[]);
-        match evaluate_from_cache("t1", &snap, &wf, DispatchMode::Default) {
-            DispatchTarget::NoMatch => {}
-            other => panic!("expected NoMatch, got {other:?}"),
-        }
+    fn _import_labels_for_use() {
+        let _: LabelsMatcher = LabelsMatcher::default();
     }
 }

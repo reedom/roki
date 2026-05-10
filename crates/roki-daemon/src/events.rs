@@ -73,18 +73,21 @@ pub struct FailureMetaSer {
 }
 
 impl FailureMetaSer {
-    pub fn from_meta(meta: &crate::engine::outcome::FailureMeta) -> Self {
+    /// Slice 8: build from the canonical state-machine failure metadata.
+    pub fn from_state_metadata(meta: &crate::engine::cycle_state::FailureMetadata) -> Self {
         Self {
             kind: meta.kind.as_str().to_string(),
-            state_id: Some(meta.phase.as_str().to_string()),
-            visit_n: meta.iter,
-            exit_code: meta.exit_code,
+            state_id: Some(meta.state_id.clone()),
+            visit_n: meta.visit_n,
+            exit_code: None,
             error_text: meta.error_text.clone(),
         }
     }
 
-    /// Slice 8: build from the canonical state-machine failure metadata.
-    pub fn from_state_metadata(meta: &crate::engine::cycle_state::FailureMetadata) -> Self {
+    /// Build from the legacy meta surfaced by the per-ticket task in
+    /// `CycleResult::Failed`. Used by `daemon::dispatcher` when a runtime
+    /// teardown path needs an event entry for an already-emitted failure.
+    pub fn from_legacy(meta: &crate::daemon::real_runner::LegacyFailureMeta) -> Self {
         Self {
             kind: meta.kind.as_str().to_string(),
             state_id: Some(meta.state_id.clone()),
@@ -103,6 +106,11 @@ pub enum Event {
         cycle_id: String,
         cycle_kind: String,
         iters: u32,
+        /// Slice 8: state-machine terminal id reached by this cycle.
+        /// Absent for the cleanup-shorthand path where no cycle ran.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        terminal_id: Option<String>,
+        /// Slice 8: terminal outcome label (or directive-supplied override).
         outcome: Option<String>,
     },
     FailureUnhandled {
@@ -271,6 +279,7 @@ mod tests {
             cycle_id: uuid::Uuid::nil().to_string(),
             cycle_kind: "rule".into(),
             iters: 1,
+            terminal_id: Some("__success__".into()),
             outcome: Some("success".into()),
         })
         .unwrap();

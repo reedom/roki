@@ -1,170 +1,14 @@
-//! Engine type vocabulary.
+//! Engine type vocabulary for slice 8.
 //!
-//! Variant naming mirrors the FR 01 directive schema: pre returns
-//! `run` / `end`; post returns `pre` / `run` / `end`. `FailureKind` enumerates
-//! every directive-level failure the engine can route in slice 1.
+//! Slice 8 dropped the legacy pre/run/post `PhaseKind`, the session/command
+//! `PhaseShape`, the stdout-scan `Pre/PostDirective` types, and the
+//! `IterExhausted` failure kind. The state machine now expresses control
+//! flow; this module keeps only what the failure-routing layer needs.
 
 #![allow(dead_code)]
 
-use std::path::PathBuf;
-
-use serde::Deserialize;
-
-/// Which phase position the engine is executing.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum PhaseKind {
-    Pre,
-    Run,
-    Post,
-}
-
-impl PhaseKind {
-    /// Lowercase canonical name used for capture file prefixes and tracing.
-    pub fn as_str(self) -> &'static str {
-        match self {
-            PhaseKind::Pre => "pre",
-            PhaseKind::Run => "run",
-            PhaseKind::Post => "post",
-        }
-    }
-}
-
-/// Subprocess wire shape per phase.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum PhaseShape {
-    /// Long-lived AI subprocess reused across all pre/post turns of the cycle.
-    Session,
-    /// One-shot subprocess per phase invocation.
-    Command,
-}
-
-impl PhaseShape {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            PhaseShape::Session => "session",
-            PhaseShape::Command => "command",
-        }
-    }
-}
-
-/// Operator-authored body for one phase.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum PhaseBody {
-    /// Inline `cmd = "<shell line>"`. Rendered, then run as `sh -c <rendered>`.
-    /// stdin is closed immediately.
-    InlineCmd { cmd: String },
-    /// Inline `prompt = "<text>"`. Rendered as the stdin body. Argv comes from
-    /// `[default.ai.command].cli` (or a frontmatter override, but inline form
-    /// has no frontmatter, so always the default).
-    InlinePrompt { prompt: String },
-    /// `path = "workflow/<file>.md"`. Resolved at config-load time against
-    /// the workflow file's parent directory.
-    Path {
-        path: PathBuf,
-        cli_override: Option<String>,
-        /// Resolved from the .md frontmatter `session:` field.
-        /// Defaults to `Session` when the field is absent.
-        shape: PhaseShape,
-        /// Resolved from the .md frontmatter `stall_seconds:` field.
-        /// `None` means "fall back to the shape default in `[default.ai.*].stall_seconds`".
-        stall_seconds: Option<u32>,
-    },
-}
-
-impl PhaseBody {
-    /// Wire shape this phase body resolves to.
-    pub fn shape(&self) -> PhaseShape {
-        match self {
-            PhaseBody::InlineCmd { .. } => PhaseShape::Command,
-            PhaseBody::InlinePrompt { .. } => PhaseShape::Session,
-            PhaseBody::Path { shape, .. } => *shape,
-        }
-    }
-
-    /// Per-file `stall_seconds` override, or `None` for shape-default.
-    pub fn stall_seconds_override(&self) -> Option<u32> {
-        match self {
-            PhaseBody::InlineCmd { .. } | PhaseBody::InlinePrompt { .. } => None,
-            PhaseBody::Path { stall_seconds, .. } => *stall_seconds,
-        }
-    }
-}
-
-/// Pre-phase legal directive set: `run` or `end`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum PreDirective {
-    Run,
-    End,
-}
-
-impl PreDirective {
-    pub fn try_from_str(value: &str) -> Option<Self> {
-        match value {
-            "run" => Some(PreDirective::Run),
-            "end" => Some(PreDirective::End),
-            _ => None,
-        }
-    }
-}
-
-/// Post-phase legal directive set: `pre`, `run`, or `end`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum PostDirective {
-    Pre,
-    Run,
-    End,
-}
-
-impl PostDirective {
-    pub fn try_from_str(value: &str) -> Option<Self> {
-        match value {
-            "pre" => Some(PostDirective::Pre),
-            "run" => Some(PostDirective::Run),
-            "end" => Some(PostDirective::End),
-            _ => None,
-        }
-    }
-}
-
-/// One phase invocation's outcome forwarded to `engine::cycle`.
-#[derive(Debug, Clone)]
-pub enum PhaseOutcome {
-    PreDirective {
-        directive: PreDirective,
-        payload: serde_json::Value,
-    },
-    PostDirective {
-        directive: PostDirective,
-        payload: serde_json::Value,
-    },
-    RunDone {
-        exit_code: i32,
-        duration_seconds: u64,
-    },
-    Failure {
-        kind: FailureKind,
-    },
-}
-
-impl PhaseOutcome {
-    /// Static name of the variant. Used in `PhaseInfraError::ExecutorContract`
-    /// when the cycle driver receives an outcome variant the phase does not
-    /// produce, so the operator log identifies which variant tripped the
-    /// executor contract.
-    pub fn variant_name(&self) -> &'static str {
-        match self {
-            PhaseOutcome::PreDirective { .. } => "PreDirective",
-            PhaseOutcome::PostDirective { .. } => "PostDirective",
-            PhaseOutcome::RunDone { .. } => "RunDone",
-            PhaseOutcome::Failure { .. } => "Failure",
-        }
-    }
-}
-
-/// Which list a cycle was dispatched from. Surfaced as
-/// `cycle.kind` / `ROKI_CYCLE_KIND` per fr:01 §Cycle kinds.
+/// Which list a cycle was dispatched from. Surfaced as `cycle.kind`
+/// / `ROKI_CYCLE_KIND` per fr:01 §Cycle kinds.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CycleKind {
     Rule,
@@ -182,35 +26,28 @@ impl CycleKind {
     }
 }
 
-/// Directive-level failure kinds. Distinct from `PhaseInfraError`, which
-/// represents infrastructure-level failures that escape the cycle as a
-/// `Result::Err`.
+/// Daemon-detected failure kinds. Routed to `on_failure:` rules and
+/// surfaced through the `failure.*` Liquid namespace.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FailureKind {
-    /// Pre/Post: stdout has no JSON object, or the last JSON object lacks
-    /// `directive`. Slice 8: sentinel file present but JSON parse failed or
-    /// `directive` field missing.
+    /// Sentinel file present but JSON parse failed or `directive` field
+    /// missing.
     Unparseable,
-    /// Pre/Post: `directive` value outside the legal set for the phase.
-    /// Slice 8: sentinel `directive` value not in `state.directives` ∪
-    /// built-in defaults.
+    /// Sentinel `directive` value not in `state.directives` ∪ built-in
+    /// defaults.
     SchemaDrift,
-    /// Pre/Post: non-zero exit and stdout has no parseable JSON object.
-    /// Slice 8: subprocess killed by signal without sentinel write.
+    /// Subprocess killed by signal without sentinel write.
     ProcessCrash,
-    /// Liquid render of argv or stdin body failed before launch.
-    TemplateError,
-    /// Post returned `pre` or `run` while `iter == max_iterations`.
-    /// Slice 8: deprecated; replaced by `RecursionBound` (kept here while
-    /// the old engine module is still wired).
-    IterExhausted,
-    /// Slice 8: state visited more than `state.max_visits` times.
-    RecursionBound,
-    /// Stdout silent for `stall_seconds`; supervisor SIGTERMed (and SIGKILLed
-    /// after grace if necessary). Applies to both shapes.
-    Stall,
-    /// Filesystem error creating or recovering session_tempdir before phase
+    /// Liquid render of cli line, body, or `if:` condition failed before
     /// launch.
+    TemplateError,
+    /// State visited more than `state.max_visits` times.
+    RecursionBound,
+    /// Stdout silent for the configured stall window; daemon SIGTERMed
+    /// the subprocess.
+    Stall,
+    /// Filesystem error creating session_tempdir / sentinel-dir / worktree
+    /// before subprocess launch.
     FsPoison,
 }
 
@@ -221,7 +58,6 @@ impl FailureKind {
             FailureKind::SchemaDrift => "schema_drift",
             FailureKind::ProcessCrash => "process_crash",
             FailureKind::TemplateError => "template_error",
-            FailureKind::IterExhausted => "iter_exhausted",
             FailureKind::RecursionBound => "recursion_bound",
             FailureKind::Stall => "stall",
             FailureKind::FsPoison => "fs_poison",
@@ -229,54 +65,9 @@ impl FailureKind {
     }
 }
 
-/// Full failure record routed to `[[on_failure]]` and exposed as
-/// `{{ failure.* }}` per fr:01 §107.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct FailureMeta {
-    /// UUID of the cycle that failed (NOT the handler cycle).
-    pub failed_cycle_id: uuid::Uuid,
-    pub kind: FailureKind,
-    pub phase: PhaseKind,
-    pub iter: u32,
-    /// Subprocess exit code when applicable; `None` for stall/template_error/
-    /// fs_poison/iter_exhausted detected before exit.
-    pub exit_code: Option<i32>,
-    /// Operator-facing description: head + tail of stderr, or a synthesized
-    /// message for non-subprocess failures (template render, fs error, etc.).
-    pub error_text: String,
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn pre_directive_legal_set_excludes_pre() {
-        assert!(PreDirective::try_from_str("run").is_some());
-        assert!(PreDirective::try_from_str("end").is_some());
-        assert!(PreDirective::try_from_str("pre").is_none());
-        assert!(PreDirective::try_from_str("halt").is_none());
-    }
-
-    #[test]
-    fn post_directive_legal_set_covers_pre_run_end() {
-        assert!(PostDirective::try_from_str("pre").is_some());
-        assert!(PostDirective::try_from_str("run").is_some());
-        assert!(PostDirective::try_from_str("end").is_some());
-        assert!(PostDirective::try_from_str("halt").is_none());
-    }
-
-    #[test]
-    fn phase_kind_str_round_trip() {
-        assert_eq!(PhaseKind::Pre.as_str(), "pre");
-        assert_eq!(PhaseKind::Run.as_str(), "run");
-        assert_eq!(PhaseKind::Post.as_str(), "post");
-    }
-
-    #[test]
-    fn failure_kind_stall_str_round_trip() {
-        assert_eq!(FailureKind::Stall.as_str(), "stall");
-    }
 
     #[test]
     fn cycle_kind_str_round_trip() {
@@ -286,23 +77,9 @@ mod tests {
     }
 
     #[test]
-    fn failure_kind_fs_poison_str_round_trip() {
+    fn failure_kind_str_round_trip() {
+        assert_eq!(FailureKind::Stall.as_str(), "stall");
         assert_eq!(FailureKind::FsPoison.as_str(), "fs_poison");
-    }
-
-    #[test]
-    fn failure_meta_constructor_round_trip() {
-        let id = uuid::Uuid::nil();
-        let meta = FailureMeta {
-            failed_cycle_id: id,
-            kind: FailureKind::Stall,
-            phase: PhaseKind::Run,
-            iter: 2,
-            exit_code: Some(124),
-            error_text: "stall after 30s".into(),
-        };
-        assert_eq!(meta.kind.as_str(), "stall");
-        assert_eq!(meta.phase.as_str(), "run");
-        assert_eq!(meta.iter, 2);
+        assert_eq!(FailureKind::RecursionBound.as_str(), "recursion_bound");
     }
 }
