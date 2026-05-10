@@ -12,6 +12,7 @@ pub mod cleanup;
 pub mod context;
 pub mod cwd;
 pub mod cycle;
+pub mod cycle_state;
 pub mod directive;
 pub mod dispatch;
 pub mod on_failure;
