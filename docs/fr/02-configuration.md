@@ -17,11 +17,11 @@ refs:
 
 # FR 02: Configuration
 
-> Three configuration files: `roki.toml` (per workspace, restart-only), `WORKFLOW.toml` (per workspace, hot-reloadable), and `workflow/*.md` (per workspace, hot-reloadable). Together they describe everything the daemon does. The full schema (key names, defaults, validation rules) lives in [`docs/reference/config.md`](../reference/config.md).
+> Three configuration files: `roki.toml` (per workspace, restart-only), `WORKFLOW.yaml` (per workspace, hot-reloadable), and `workflow/*.md` (per workspace, hot-reloadable). Together they describe everything the daemon does. The full schema (key names, defaults, validation rules) lives in [`docs/reference/config.md`](../reference/config.md).
 
 ## Purpose
 
-`roki.toml` holds daemon startup conditions (Linear access, network, AI default CLIs, log destination, paths); changes require restart. `WORKFLOW.toml` and the `workflow/*.md` files referenced from it hold all workflow behavior — admission filter, rule / cleanup / on_failure entries, phase prompts and commands — and are **hot-reloaded without restart**. Workflow behavior is expressed entirely by operator-authored TOML and Markdown; the daemon knows no fixed template names.
+`roki.toml` holds daemon startup conditions (Linear access, network, AI default CLIs, log destination, paths); changes require restart. `WORKFLOW.yaml` and the `workflow/*.md` files referenced from it hold all workflow behavior — admission filter, rule / cleanup / on_failure entries, phase prompts and commands — and are **hot-reloaded without restart**. Workflow behavior is expressed entirely by operator-authored TOML and Markdown; the daemon knows no fixed template names.
 
 ## User-visible Behavior
 
@@ -29,15 +29,15 @@ refs:
 
 Operators specify the path with `--config <path>` ([12-daemon-lifecycle](12-daemon-lifecycle.md)). The file groups into:
 
-- **Linear access**: API token, polling cadence. The assignee identifier lives in WORKFLOW.toml `[admission]`, not here.
+- **Linear access**: API token, polling cadence. The assignee identifier lives in WORKFLOW.yaml `[admission]`, not here.
 - **Linear webhook receiver** (`[linear.webhook]`, required): bind address, port, and HMAC secret for the **internet-facing** webhook ingress. Required because Linear strongly recommends webhook ingestion over polling.
 - **Observability HTTP API** (`[api]`, optional): bind address and port for the **read-only** observability surface consumed by `roki-tui` and `roki events`. Default loopback. If `[api].port` is unset the server does not start.
 - **AI default CLIs**: the cli line and stall window the daemon uses when a workflow phase declares `session = "session"` (long-lived stream-json AI reused within one cycle's pre/post chain) or `session = "command"` (one-shot subprocess) without specifying its own cli line.
 - **Engine knobs**: per-cycle iteration cap and (future) concurrency cap.
-- **Paths**: where to load WORKFLOW.toml from, where to put session tempdirs.
+- **Paths**: where to load WORKFLOW.yaml from, where to put session tempdirs.
 - **Log destination**: the structured event log goes to stdout, a file, or both, with operator-set rotation policy.
 
-Any invalid value or resolution failure (`[admission].assignee` cannot be resolved against the Linear API token holder, `[default.ai.session].cli` missing, WORKFLOW.toml path missing, token missing, `[linear.webhook]` missing, etc.) **refuses startup** and emits the offending field in the structured log. `[api]` is optional and its absence is logged at info severity but does not refuse startup.
+Any invalid value or resolution failure (`[admission].assignee` cannot be resolved against the Linear API token holder, `[default.ai.session].cli` missing, WORKFLOW.yaml path missing, token missing, `[linear.webhook]` missing, etc.) **refuses startup** and emits the offending field in the structured log. `[api]` is optional and its absence is logged at info severity but does not refuse startup.
 
 `roki.toml` itself is not hot-reloaded; changing it requires a daemon restart. The exact name, default, and validation rule for each key live in the "roki.toml schema" table in [`docs/reference/config.md`](../reference/config.md).
 
@@ -59,11 +59,7 @@ port = 9090
 bind = "127.0.0.1"   # loopback default; non-loopback emits a warn log at startup
 port = 8080
 
-[default.ai.session]
-cli = "claude --input-format stream-json --output-format stream-json --model claude-opus-4-7"
-stall_seconds = 600
-
-[default.ai.command]
+[default.ai]
 cli = "claude -p --output-format stream-json --max-turns 100"
 stall_seconds = 300
 
@@ -71,7 +67,7 @@ stall_seconds = 300
 max_iterations = 10
 
 [paths]
-workflow = "./WORKFLOW.toml"
+workflow = "./WORKFLOW.yaml"
 session_root = "~/.cache/roki/sessions"
 
 [log]
@@ -84,9 +80,9 @@ ring_size = 1000
 queue_size = 64             # default 64; min 1; max 1024
 ```
 
-Linear label names are not interpreted by the daemon. Operators express any label-driven gating inside `[[rule]]` / `[[cleanup]]` entries (see below). The example values below (`roki:ready`, `repo:bar`, etc.) are conventions a particular operator might pick.
+Linear label names are not interpreted by the daemon. Operators express any label-driven gating inside ``rules:` entries` / ``cleanup:` entries` entries (see below). The example values below (`roki:ready`, `repo:bar`, etc.) are conventions a particular operator might pick.
 
-### `WORKFLOW.toml` (hot-reloadable)
+### `WORKFLOW.yaml` (hot-reloadable)
 
 A single per-workspace TOML file referenced from `roki.toml [paths].workflow`. Two roles:
 
@@ -110,33 +106,33 @@ when.title.regex = "^\\[baz\\]"
 ghq = "github.com/foo/qux"
 # `when` omitted → fallback for tickets that match no other repo entry
 
-[[rule]]
+`rules:` entries
 when.status = "Todo"
 when.labels.has_all = ["roki:ready"]
 pre.path = "workflow/01-judge.md"
 run.path = "workflow/01-impl.md"
 post.path = "workflow/01-verdict.md"
 
-[[cleanup]]
+`cleanup:` entries
 when.status.in = ["Done", "Cancelled"]
 pre.prompt = "Final ceremony comment via Linear MCP. Output {directive: 'run'}"
 run.cmd = "claude -p 'post final summary' --output-format stream-json --max-turns 5"
 post.prompt = "Output {directive: 'end'}"
 
-[[cleanup]]
+`cleanup:` entries
 # Shorthand: all phases omitted AND no when.* keys → unconditional immediate
 # worktree + session_tempdir delete with no cycle. Place last in the list so
 # earlier guarded cleanups win first-match.
 
-[[on_failure]]
+`on_failure:` entries
 when.kind.in = ["unparseable", "schema_drift"]
 run.cmd = "claude -p '/post-mortem {{ failure.failed_cycle_id }}'"
 post.prompt = "Output {directive: 'end'}"
 ```
 
-#### Per-repo `WORKFLOW.toml` (optional)
+#### Per-repo `WORKFLOW.yaml` (optional)
 
-When `[[admission.repos]] workflow = "<path>"` is set, that file replaces this repo's `[[rule]]` / `[[cleanup]]` / `[[on_failure]]` lists entirely. The top-level admission stays in WORKFLOW.toml; the per-repo file inherits nothing else from the top-level rule set. Operators that want shared rules across repos either keep a single WORKFLOW.toml (using `when.repo` matchers to dispatch) or duplicate the shared entries into each per-repo file.
+When `[[admission.repos]] workflow = "<path>"` is set, that file replaces this repo's ``rules:` entries` / ``cleanup:` entries` / ``on_failure:` entries` lists entirely. The top-level admission stays in WORKFLOW.yaml; the per-repo file inherits nothing else from the top-level rule set. Operators that want shared rules across repos either keep a single WORKFLOW.yaml (using `when.repo` matchers to dispatch) or duplicate the shared entries into each per-repo file.
 
 #### Condition vocabulary (MVP)
 
@@ -163,41 +159,37 @@ Recognized fields:
 - `assignee` — Linear assignee (rule-level only; `[admission].assignee` does the coarse filter).
 - `repo` — admission-resolved ghq path (rule-level only; admission resolves it before rule evaluation).
 - `kind` — failure kind (on_failure entries only).
-- `phase` — phase name (on_failure entries only; values `pre` / `run` / `post`). Every `[[on_failure]]`-routed failure has a phase context: `process_crash` / `unparseable` / `schema_drift` / `fs_poison` / `stall` / `template_error` carry the phase that emitted them (for `fs_poison`, the phase whose worktree / session-tempdir setup failed); `iter_exhausted` carries `post` (the phase whose directive requested the prohibited next iteration).
+- `phase` — state id that emitted the failure (`on_failure` entries only). Every routed failure has a state-id context.
 - `title`, `body` — Linear ticket strings (admission.repos only, used for repo discrimination).
 
-#### Phase specification
+#### State body specification
 
-Each phase declares exactly one of `path` / `prompt` / `cmd` (mutually exclusive):
+Each state declares exactly one of `run:` / `uses:` (mutually exclusive):
 
-- `path = "<file>"` — file form. Relative paths resolve against the directory of the WORKFLOW.toml that declared them; absolute paths pass through. The file's frontmatter chooses `session: "session"` (long-lived AI reused within the cycle) or `session: "command"` (one-shot subprocess). The body is a Liquid template.
-- `prompt = "<inline string>"` — inline session form. Always uses `default.ai.session.cli` from `roki.toml`.
-- `cmd = "<inline string>"` — inline command form. The operator writes the full command line; the daemon spawns the process directly.
+- `run: <inline cmd>` — inline shell command form. Liquid-rendered, then spawned via `sh -c` (POSIX) / `cmd /C` (Windows).
+- `uses: <path>` — file form. Path resolution per [`ref:config §Path resolution`](../reference/config.md). The file's frontmatter (`cli`, `stall_seconds`) overrides `roki.toml [default.ai].cli` / `stall_seconds` per file. Body is a Liquid template.
 
-Phase requirements per entry: `run` is required for every `[[rule]]` / `[[cleanup]]` / `[[on_failure]]` entry that spawns a cycle (see [01-engine-model §Phase loop](01-engine-model.md)). `pre` and `post` are optional. The only legal entry without `run` is a `[[cleanup]]` entry with all three phases omitted (immediate-delete shorthand). Schema validation rejects any other entry that lacks `run`.
+Every state is command-shape: each visit spawns a fresh subprocess. There is no long-lived AI session shared across states or visits. Operators relying on Claude / Codex conversational continuity drive it inside a single state's process (e.g. one stream-json invocation that holds the conversation).
+
+State machine declared via either the `tasks:` sugar form (linear chain with default-chained `on_done` edges) or the canonical `start:` / `states:` / `terminals:` form. Cleanup immediate-delete shorthand: a `cleanup:` entry with no body deletes synchronously without a cycle.
 
 ### `workflow/*.md`
 
-Each file referenced from a `*.path` field has YAML frontmatter and a Liquid body:
+Each file referenced from a state's `uses:` field has YAML frontmatter and a Liquid body:
 
 ```yaml
 ---
-session: session       # or "command" (default = "session")
-cli: ""                # optional override; falls back to roki.toml [default.ai.{session,command}].cli
-stall_seconds: 600     # optional override of default.ai.{session,command}.stall_seconds
+cli: ""                # optional override; falls back to roki.toml [default.ai].cli
+stall_seconds: 600     # optional override of [default.ai].stall_seconds
 ---
 {Liquid body}
 ```
 
-The Liquid body and the cli line are both rendered against the variables documented in [01-engine-model §Inter-phase data flow](01-engine-model.md). Daemon delivers the rendered output to the subprocess on three fixed channels (full mechanics in [04-phase-execution §Input channels](04-phase-execution.md)):
+The Liquid body and the cli line are both rendered against the variables documented in [01-engine-model §Inter-state data flow](01-engine-model.md). The daemon delivers the rendered output to the subprocess on three fixed channels (full mechanics in [04-state-execution §Input channels](04-state-execution.md)):
 
 - **argv** — the rendered cli line.
-- **environment variables** — `ROKI_*` scalars from the data-flow table.
-- **stdin** — the rendered Liquid body for `path` and `prompt` phases. Inline `cmd` phases write nothing and stdin is closed immediately.
-
-For `session: "session"` mode, stdin stays open across the cycle and the daemon writes one rendered body per pre / post turn. The cli's own input flags (e.g. claude `--input-format stream-json`) decide how those bytes are framed; the daemon does not impose a wire format. For `session: "command"` mode, the body is written once and stdin is closed.
-
-Inline `prompt = "..."` is a one-line workflow body delivered via stdin as above. Inline `cmd = "..."` is a one-line cli substitute delivered via argv with stdin closed.
+- **environment variables** — `ROKI_*` scalars from the data-flow table, plus `ROKI_DIRECTIVE_PATH` pointing at the per-visit sentinel file.
+- **stdin** — the rendered Liquid body for `uses:` states. Inline `run:` shell commands receive nothing on stdin by default.
 
 ### Hot reload and validation
 
@@ -205,25 +197,25 @@ Inline `prompt = "..."` is a one-line workflow body delivered via stdin as above
 - **Validation passes on hot reload** → apply the new policy from the next webhook (in-flight cycles keep their pre-reload policy until they terminate).
 - **Validation fails on hot reload** → keep the previous policy + log the failure (the daemon does not stop).
 - **Per-key invalidity inside a single entry** → that entry is rejected as if it had not matched; other entries continue to apply. The structured log records the offending entry.
-- **`workflow/*.md` change** is treated identically to a `WORKFLOW.toml` change for the purposes of hot reload.
+- **`workflow/*.md` change** is treated identically to a `WORKFLOW.yaml` change for the purposes of hot reload.
 
 ## Capabilities
 
-- **Three files, three responsibilities**: `roki.toml` for restart-time concerns, `WORKFLOW.toml` for the dispatch tables, `workflow/*.md` for the phase bodies. Each file's hot-reload behavior matches its contents.
+- **Three files, three responsibilities**: `roki.toml` for restart-time concerns, `WORKFLOW.yaml` for the dispatch tables, `workflow/*.md` for the phase bodies. Each file's hot-reload behavior matches its contents.
 - **One daemon for multiple repos**: a single developer runs a single daemon. The `[admission].assignee` filter ensures the daemon does not touch other people's tickets; the `[[admission.repos]]` matchers dispatch each ticket to the correct repo.
-- **Operator-defined label gating**: there are no fixed label names. Operators encode whatever labels they want inside `[[rule]]` / `[[cleanup]]` `when.labels.*` clauses.
-- **Per-repo workflow split (optional)**: operators with multiple repos can keep a top-level WORKFLOW.toml plus per-repo files via `[[admission.repos]] workflow = "..."`.
+- **Operator-defined label gating**: there are no fixed label names. Operators encode whatever labels they want inside ``rules:` entries` / ``cleanup:` entries` `when.labels.*` clauses.
+- **Per-repo workflow split (optional)**: operators with multiple repos can keep a top-level WORKFLOW.yaml plus per-repo files via `[[admission.repos]] workflow = "..."`.
 - **Defaulted-key logging**: when an unspecified key falls back to its default, the startup log records which key did so.
 - **Hot-reload safe**: invalid values do not crash the daemon (the previous policy is retained).
-- **Engine-agnostic CLI lines**: `[default.ai.session]` and `[default.ai.command]` accept any cli line that speaks the appropriate protocol (stream-json bidirectional for session, exit-code-and-stdout for command). Operators can switch between claude, codex, or any equivalent without touching the daemon.
+- **Engine-agnostic CLI lines**: `[default.ai].cli` accepts any cli line that speaks the operator's chosen protocol (exit-code + sentinel-file directive). Operators can switch between claude, codex, or any equivalent without touching the daemon.
 
 ## Boundaries
 
-- **Hot reload of `roki.toml`** is out of scope (only WORKFLOW.toml + workflow/*.md are hot-reloadable).
+- **Hot reload of `roki.toml`** is out of scope (only WORKFLOW.yaml + workflow/*.md are hot-reloadable).
 - **Per-issue / per-attempt config overrides** are out of scope.
 - **A daemon-managed canonical label set** is out of scope. Operators choose their own label conventions.
 - **Environment-variable / CLI configuration overrides** are limited to a few values exposed on the CLI (`--bind`, `--port`, `--config`); a full override surface is not provided (see [cli reference](../reference/cli.md) for details).
-- **Conditional includes / partial templates inside `WORKFLOW.toml`** are out of scope for MVP. The `include = [...]` directive is reserved for a future iteration.
+- **Conditional includes / partial templates inside `WORKFLOW.yaml`** are out of scope for MVP. The `include = [...]` directive is reserved for a future iteration.
 - **Daemon-known phase template names** are out of scope. Operators name their phase files however they like under `workflow/`.
 
 ## Traceability

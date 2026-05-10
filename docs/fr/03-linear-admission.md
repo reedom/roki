@@ -31,12 +31,12 @@ Admit assigned tickets without drops, never touch others' tickets, and respect L
 
 ### Admission filter
 
-Before any cache update ([07-recovery §Diff cache](07-recovery.md)), the daemon evaluates the admission filter declared in WORKFLOW.toml ([02-configuration §WORKFLOW.toml](02-configuration.md)):
+Before any cache update ([07-recovery §Diff cache](07-recovery.md)), the daemon evaluates the admission filter declared in WORKFLOW.yaml ([02-configuration §WORKFLOW.yaml](02-configuration.md)):
 
 1. **Assignee gate**: `ticket.assignee == [admission].assignee`. The literal `me` resolves to the API token holder. Failure → silent eviction (logged but not surfaced to Linear).
-2. **Repo resolution**: `[[admission.repos]]` first-match → resolves the ticket's ghq repo identifier and its per-repo `workflow` path (or fall back to the top-level WORKFLOW.toml entries). No match → silent eviction (`reason: repo_unresolvable`).
+2. **Repo resolution**: `[[admission.repos]]` first-match → resolves the ticket's ghq repo identifier and its per-repo `workflow` path (or fall back to the top-level WORKFLOW.yaml entries). No match → silent eviction (`reason: repo_unresolvable`).
 
-Tickets that fail admission are not added to the cache. If the ticket was previously cached and the new webhook fails admission (assignee change, repo matcher no longer hits), the cache entry is evicted after any in-flight cycle terminates naturally. The worktree and session tempdir are **retained** until the ticket reaches a terminal state — reclaimed by a `[[cleanup]]` cycle on re-admission or by cold-start orphan reconcile ([07-recovery §Cold start](07-recovery.md)) when the ticket is no longer enumerable.
+Tickets that fail admission are not added to the cache. If the ticket was previously cached and the new webhook fails admission (assignee change, repo matcher no longer hits), the cache entry is evicted after any in-flight cycle terminates naturally. The worktree and session tempdir are **retained** until the ticket reaches a terminal state — reclaimed by a ``cleanup:` entries` cycle on re-admission or by cold-start orphan reconcile ([07-recovery §Cold start](07-recovery.md)) when the ticket is no longer enumerable.
 
 ### Polling fallback
 
@@ -47,7 +47,7 @@ The webhook receiver is mandatory (`[linear.webhook]` is required in `roki.toml`
 
 Both share the assignee filter and the same status narrowing rules:
 
-- If **every** `[[rule]]` and `[[cleanup]]` entry across WORKFLOW.toml plus every per-repo TOML declares an explicit `when.status`, the union of those values becomes a Linear-side status filter (small, bounded query).
+- If **every** ``rules:` entries` and ``cleanup:` entries` entry across WORKFLOW.yaml plus every per-repo TOML declares an explicit `when.status`, the union of those values becomes a Linear-side status filter (small, bounded query).
 - If **any** entry omits `when.status` (i.e. matches any state), the status filter is dropped and the query enumerates every ticket the assignee owns. The daemon emits an info log at startup naming the entry that triggered the drop, so operators concerned about Linear API budget can add an explicit `when.status` and shrink the query.
 
 Cadence is governed by `roki.toml [linear].polling.cadence_seconds` (canonical default and validation rules in [`docs/reference/config.md`](../reference/config.md)). The cap is enforced even when a refresh nudge arrives (see below). Outage-driven polling stops automatically once webhook delivery resumes (Linear delivers a fresh webhook the daemon successfully verifies); nudge-driven polls are one-shot and do not enter the cadence loop.
@@ -68,8 +68,8 @@ The diff cache decides what counts as a change ([07-recovery §Diff cache](07-re
 When the assignee on a previously admitted ticket changes to someone other than `[admission].assignee`:
 
 1. If a cycle is currently in flight, it runs to natural end (queue mode); afterward the diff cache evicts the entry.
-2. The worktree and session tempdir are **retained** until the ticket reaches a terminal state — reclaimed by a `[[cleanup]]` cycle on re-admission or by cold-start orphan reconcile ([07-recovery §Cold start](07-recovery.md)) when the ticket is no longer enumerable. Re-admission while the eviction is pending cancels it.
-3. No Linear write is performed by the daemon. Operators that want a Linear comment on reassignment author a `[[cleanup]]` entry whose run phase performs the write.
+2. The worktree and session tempdir are **retained** until the ticket reaches a terminal state — reclaimed by a ``cleanup:` entries` cycle on re-admission or by cold-start orphan reconcile ([07-recovery §Cold start](07-recovery.md)) when the ticket is no longer enumerable. Re-admission while the eviction is pending cancels it.
+3. No Linear write is performed by the daemon. Operators that want a Linear comment on reassignment author a ``cleanup:` entries` entry whose run phase performs the write.
 
 There is no separate `Cleaning` state in the daemon ([07-recovery](07-recovery.md)).
 
@@ -93,7 +93,7 @@ Operators (TUI, external scripts, observability components) can request an out-o
 ## Boundaries
 
 - **No Linear writes from the daemon process** at all. Writes belong to phase subprocesses (operator-controlled cli lines).
-- **Generic team / label / project filters** are out of scope. The daemon's Linear-side filter is exactly assignee plus the union of `when.status` values used by WORKFLOW.toml entries.
+- **Generic team / label / project filters** are out of scope. The daemon's Linear-side filter is exactly assignee plus the union of `when.status` values used by WORKFLOW.yaml entries.
 - **Trackers other than Linear** (Jira, etc.) are out of scope.
 - **The daemon does not mirror observed Linear states into a state machine.** Linear states are looked up via the tracker each time and held only as the latest cached triple.
 - **Linear comment dedup / threading** are out of scope. If an operator's cycle posts duplicate comments after a daemon restart, the operator's cli line must dedup (e.g. by checking the cold-start trigger).

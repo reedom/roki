@@ -9,7 +9,7 @@ refs:
     - fr:02-configuration
     - fr:08-observability-logs
     - fr:07-recovery
-    - fr:04-phase-execution
+    - fr:04-state-execution
     - fr:01-engine-model
   modules:
     - crates/roki-daemon/src/runtime.rs
@@ -29,26 +29,26 @@ An operator runs roki by launching the single `roki` binary with `roki run` (or 
 
 | Subcommand | Dispatch mode | Effect |
 |---|---|---|
-| `roki run` | Default | Evaluates `[[cleanup]]` first-match, then `[[rule]]` first-match. |
-| `roki cleanup` | CleanupOnly | Evaluates `[[cleanup]]` first-match only; `[[rule]]` is ignored. |
+| `roki run` | Default | Evaluates ``cleanup:` entries` first-match, then ``rules:` entries` first-match. |
+| `roki cleanup` | CleanupOnly | Evaluates ``cleanup:` entries` first-match only; ``rules:` entries` is ignored. |
 
 Both subcommands run the same single-shot pipeline and binary lifecycle.
 
 ## User-visible Behavior
 
-- **Normal startup**: `roki run --config ./roki.toml` (or `roki cleanup --config ./roki.toml`) loads `roki.toml`, loads `WORKFLOW.toml` (and any per-repo TOMLs referenced through `[[admission.repos]] workflow`), validates both, brings up the Linear adapter, the diff cache, the cycle engine, and the Linear webhook receiver bound to `[linear.webhook]`, optionally brings up the observability HTTP API bound to `[api]` (only when `[api].port` is set; see [10-http-api §Server gating and bind](10-http-api.md)), runs the cold-start enumeration ([07-recovery §Cold start](07-recovery.md)), then logs that it is ready.
-- **Configuration error**: configuration file not found, schema validation failure for `roki.toml`, or schema validation failure for the initial `WORKFLOW.toml` load → non-zero exit, with the offending field name in the structured log.
+- **Normal startup**: `roki run --config ./roki.toml` (or `roki cleanup --config ./roki.toml`) loads `roki.toml`, loads `WORKFLOW.yaml` (and any per-repo TOMLs referenced through `[[admission.repos]] workflow`), validates both, brings up the Linear adapter, the diff cache, the cycle engine, and the Linear webhook receiver bound to `[linear.webhook]`, optionally brings up the observability HTTP API bound to `[api]` (only when `[api].port` is set; see [10-http-api §Server gating and bind](10-http-api.md)), runs the cold-start enumeration ([07-recovery §Cold start](07-recovery.md)), then logs that it is ready.
+- **Configuration error**: configuration file not found, schema validation failure for `roki.toml`, or schema validation failure for the initial `WORKFLOW.yaml` load → non-zero exit, with the offending field name in the structured log.
 - **Missing dependency CLI**: if `wt` / `ghq` are not on `PATH` → refuse to start, with the missing binary name and a remediation hint in the structured log. The cli lines configured in `roki.toml [default.ai.session]` and `[default.ai.command]` are **not** validated at startup (the daemon does not parse them); their first failure surfaces as a `process_crash` failure on the first phase that uses them.
 - **Normal shutdown**: on SIGINT / SIGTERM, stop accepting new work, signal every active cycle (each in-flight pre / run / post subprocess) to terminate within the configured shutdown window, then exit cleanly. In-flight worktrees and session tempdirs are not deleted at shutdown — the next cold start reconciles them.
 - **Help**: `roki --help` and the `--help` of each subcommand (`roki run`, `roki cleanup`, `roki log`, `roki events`, `roki repo`) list every CLI flag and the configuration key each one corresponds to.
 
 ### Cycle integration
 
-The cycle engine ([01-engine-model](01-engine-model.md)) decides when to spawn cycles; subprocess supervision is owned by [04-phase-execution](04-phase-execution.md). Daemon responsibilities at the lifecycle layer:
+The cycle engine ([01-engine-model](01-engine-model.md)) decides when to spawn cycles; subprocess supervision is owned by [04-phase-execution](04-state-execution.md). Daemon responsibilities at the lifecycle layer:
 
 - **Launch a cycle**: the engine signals "spawn pre/run/post for ticket X under matched entry Y". The daemon prepares the per-iter capture directory, renders the cli line, and invokes the launcher. Cycle kind (`rule` / `cleanup` / `failure`) and trigger (`runtime` / `cold_start`) are propagated through environment variables.
-- **Graceful termination**: when a cycle ends (terminal directive, failure routing, or admission eviction after natural end), the daemon writes the final structured event log entry for the cycle and, in the cleanup case, deletes the worktree + session tempdir. On cycle failure, the runtime evaluates `[[on_failure]]` first-match before shutdown: a match spawns a `CycleKind::Failure` handler cycle (recursion bounded to one level); no match emits a `failure_unhandled` event with `marker = none`; a handler cycle that itself fails emits `failure_unhandled` with `marker = recursion_bound`. Handler success exits 0; unhandled failure exits 1. See [06-failure-handling](06-failure-handling.md).
-- **Forced termination on shutdown**: SIGINT / SIGTERM signals every in-flight subprocess. The shutdown window applies uniformly to session-shape and command-shape subprocesses ([04-phase-execution §Subprocess shapes](04-phase-execution.md)).
+- **Graceful termination**: when a cycle ends (terminal directive, failure routing, or admission eviction after natural end), the daemon writes the final structured event log entry for the cycle and, in the cleanup case, deletes the worktree + session tempdir. On cycle failure, the runtime evaluates ``on_failure:` entries` first-match before shutdown: a match spawns a `CycleKind::Failure` handler cycle (recursion bounded to one level); no match emits a `failure_unhandled` event with `marker = none`; a handler cycle that itself fails emits `failure_unhandled` with `marker = recursion_bound`. Handler success exits 0; unhandled failure exits 1. See [06-failure-handling](06-failure-handling.md).
+- **Forced termination on shutdown**: SIGINT / SIGTERM signals every in-flight subprocess. The shutdown window applies uniformly to session-shape and command-shape subprocesses ([04-phase-execution §Subprocess shapes](04-state-execution.md)).
 - **Restart non-persistence**: nothing about the cycle engine or the diff cache is persisted across daemon restarts. The next cold start re-enumerates Linear and reconciles disk residue.
 
 ## Capabilities
@@ -71,4 +71,4 @@ The cycle engine ([01-engine-model](01-engine-model.md)) decides when to spawn c
 - **Roadmap**: `roadmap.md` > Constraints > Platform.
 - **Requirements**:
   - `roki-mvp Req 1`: Daemon Lifecycle and CLI.
-- **Related FR**: [02-configuration](02-configuration.md), [07-recovery](07-recovery.md), [04-phase-execution](04-phase-execution.md), [08-observability-logs](08-observability-logs.md), [01-engine-model](01-engine-model.md).
+- **Related FR**: [02-configuration](02-configuration.md), [07-recovery](07-recovery.md), [04-phase-execution](04-state-execution.md), [08-observability-logs](08-observability-logs.md), [01-engine-model](01-engine-model.md).

@@ -36,7 +36,7 @@ docs/fr/
 | [01-engine-model.md](01-engine-model.md) | Cycle and phase loop, directive schema, failure kinds |
 | [02-configuration.md](02-configuration.md) | `roki.toml` + `WORKFLOW.toml` + `workflow/*.md` schemas, hot reload |
 | [03-linear-admission.md](03-linear-admission.md) | Webhook intake, signature verification, admission filter, diff observation, refresh nudge |
-| [04-phase-execution.md](04-phase-execution.md) | Subprocess launch, capture, directive parsing, stall, tool boundary |
+| [04-state-execution.md](04-state-execution.md) | Subprocess launch, capture, directive parsing, stall, tool boundary |
 | [05-worktree-and-session.md](05-worktree-and-session.md) | Per-ticket session tempdir + lazy worktree lifecycle |
 | [06-failure-handling.md](06-failure-handling.md) | `[[on_failure]]` cycle, escalation queue |
 | [07-recovery.md](07-recovery.md) | In-memory diff cache + cold-start enumeration |

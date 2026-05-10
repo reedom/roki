@@ -7,7 +7,7 @@ refs:
   related:
     - fr:02-configuration
     - fr:07-recovery
-    - fr:04-phase-execution
+    - fr:04-state-execution
     - fr:01-engine-model
     - fr:09-log-access-cli
 ---
@@ -18,7 +18,7 @@ refs:
 
 ## Purpose
 
-Concentrate worktree and session-tempdir lifecycle in the daemon so the operator-declared allowlist (`[[admission.repos]]` in WORKFLOW.toml) is the single boundary for git side effects. Lazy worktree creation avoids materializing a worktree for tickets that admit but never reach a `pre.directive: "run"` (e.g. tickets handled entirely by an admission-time cleanup entry).
+Concentrate worktree and session-tempdir lifecycle in the daemon so the operator-declared allowlist (`[[admission.repos]]` in WORKFLOW.yaml) is the single boundary for git side effects. Lazy worktree creation avoids materializing a worktree for tickets that admit but never reach a `pre.directive: "run"` (e.g. tickets handled entirely by an admission-time cleanup entry).
 
 ## User-visible Behavior
 
@@ -31,7 +31,7 @@ Concentrate worktree and session-tempdir lifecycle in the daemon so the operator
 
 - **Created lazily**: when a cycle's pre returns `directive: "run"` and the worktree does not yet exist, the daemon creates it before spawning the run subprocess. The repo is the admission-resolved repo for this ticket ([03-linear-admission §Repo resolution](03-linear-admission.md)).
 - **Tooling**: the daemon resolves the repo's local clone with `ghq list -p` and creates a worktree with `wt switch-create` (branch name = the Linear issue identifier verbatim). Idempotent on subsequent `directive: "run"` invocations: the daemon verifies the worktree's continued presence with `wt list` (or equivalent) without re-running `wt switch-create`. If the operator removed the worktree out-of-band between iterations, the daemon recreates it.
-- **Working directory**: phase subprocesses are launched by the daemon with cwd set to the worktree if it exists, else to the **ghq base path** of the admission-resolved repo, per [04-phase-execution §Working directory](04-phase-execution.md). Session-shape subprocesses fix cwd at spawn (cycle start) — pre / post turns of a cycle whose worktree was created mid-cycle still use the cycle-start cwd. The session tempdir is for log capture, never used as cwd. Operators do not need to write `cd ...` inside the cli line. `roki repo` ([09-log-access-cli §`roki repo`](09-log-access-cli.md)) is provided for explicit lookups (TUI, external scripts, debugging) where the path must be named.
+- **Working directory**: phase subprocesses are launched by the daemon with cwd set to the worktree if it exists, else to the **ghq base path** of the admission-resolved repo, per [04-phase-execution §Working directory](04-state-execution.md). Session-shape subprocesses fix cwd at spawn (cycle start) — pre / post turns of a cycle whose worktree was created mid-cycle still use the cycle-start cwd. The session tempdir is for log capture, never used as cwd. Operators do not need to write `cd ...` inside the cli line. `roki repo` ([09-log-access-cli §`roki repo`](09-log-access-cli.md)) is provided for explicit lookups (TUI, external scripts, debugging) where the path must be named.
 - **Reused across cycles**: the same worktree persists across cycles for the same ticket. New cycles inherit whatever git state the previous cycle left.
 - **Branch name**: equals the Linear issue identifier verbatim. The daemon does not parse, transform, or namespace it.
 
@@ -42,16 +42,16 @@ Auto-delete is gated by cycle kind ([01-engine-model §Cycle kinds](01-engine-mo
 Three conditions actually invoke deletion:
 
 1. **Cleanup cycle completion** (`cycle.kind == "cleanup"`): after the cycle's terminal directive is observed, the daemon enumerates worktrees in the allowlist whose branch name matches the issue identifier and runs `wt remove`, then `rm -rf` on the session tempdir. The branch itself is **not** deleted.
-2. **Admission-filter eviction** (assignee revoked, repo allowlist match lost): the in-flight cycle (if any) runs to natural end first; afterward the daemon evicts the cache entry but **retains** the worktree and session tempdir. They are reclaimed when the ticket reaches a terminal state — by a `[[cleanup]]` cycle on re-admission, or by orphan reconcile (3) at the next daemon cold start when the ticket is no longer enumerable.
+2. **Admission-filter eviction** (assignee revoked, repo allowlist match lost): the in-flight cycle (if any) runs to natural end first; afterward the daemon evicts the cache entry but **retains** the worktree and session tempdir. They are reclaimed when the ticket reaches a terminal state — by a ``cleanup:` entries` cycle on re-admission, or by orphan reconcile (3) at the next daemon cold start when the ticket is no longer enumerable.
 3. **Orphan reconcile at cold start** ([07-recovery §Cold start](07-recovery.md)): residue not corresponding to any admission-passing Linear ticket is auto-deleted with a `reason: orphan` log entry.
 
 Cleanup is a cycle kind, not a daemon-tracked state.
 
 ### Failure mode retention
 
-When `[[on_failure]]` does not match a daemon-detected failure, the worktree and session tempdir are **retained** for forensics. Operators that want them cleaned up after a failure write a `[[cleanup]]` entry that triggers on whatever signal they choose (e.g. a Linear comment / label produced inside the failure-handler cycle's run / post phase).
+When ``on_failure:` entries` does not match a daemon-detected failure, the worktree and session tempdir are **retained** for forensics. Operators that want them cleaned up after a failure write a ``cleanup:` entries` entry that triggers on whatever signal they choose (e.g. a Linear comment / label produced inside the failure-handler cycle's run / post phase).
 
-When the daemon itself encounters a filesystem error during create or recover (worktree / session tempdir setup before a phase launch), it routes the failure through `[[on_failure]] when.kind = "fs_poison"` ([01-engine-model §Failure handling](01-engine-model.md)). Cleanup-time fs errors (worktree / session tempdir delete, orphan reconcile) do not match `[[on_failure]]` — they emit a structured event and add an escalation queue entry ([06-failure-handling §Escalation queue](06-failure-handling.md)).
+When the daemon itself encounters a filesystem error during create or recover (worktree / session tempdir setup before a phase launch), it routes the failure through ``on_failure:` entries when.kind = "fs_poison"` ([01-engine-model §Failure handling](01-engine-model.md)). Cleanup-time fs errors (worktree / session tempdir delete, orphan reconcile) do not match ``on_failure:` entries` — they emit a structured event and add an escalation queue entry ([06-failure-handling §Escalation queue](06-failure-handling.md)).
 
 ### Multi-repo
 
@@ -79,4 +79,4 @@ One ticket → one repo by construction. The admission step resolves it; the wor
 - **Roadmap**: `roadmap.md` > Scope > In > "Daemon-driven multi-repo worktree materialization via wt + ghq".
 - **Requirements**:
   - `roki-mvp Req 4.3`, `Req 4.6` – `Req 4.9`: worktree creation, path safety, cleanup, terminal-failure retention, filesystem errors.
-- **Related FR**: [02-configuration](02-configuration.md), [07-recovery](07-recovery.md), [04-phase-execution](04-phase-execution.md), [01-engine-model](01-engine-model.md), [09-log-access-cli](09-log-access-cli.md).
+- **Related FR**: [02-configuration](02-configuration.md), [07-recovery](07-recovery.md), [04-phase-execution](04-state-execution.md), [01-engine-model](01-engine-model.md), [09-log-access-cli](09-log-access-cli.md).

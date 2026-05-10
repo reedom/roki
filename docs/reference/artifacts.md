@@ -6,7 +6,7 @@ refs:
   related:
     - fr:09-log-access-cli
     - fr:08-observability-logs
-    - fr:04-phase-execution
+    - fr:04-state-execution
     - fr:10-http-api
 ---
 
@@ -66,7 +66,7 @@ One JSON object per file. UTF-8, no trailing newline required. Written at `cycle
 | `ended_at` | RFC 3339 timestamp or null | yes | Null while the cycle is in flight |
 | `iter_count` | int | yes | Number of completed iterations |
 | `terminal_directive` | enum or null | one of `terminal_directive` / `failure_kind` is non-null when `ended_at` is set | `run` / `end` / `pre` (the post directive that terminated the cycle), or null if the cycle ended through a failure |
-| `failure_kind` | enum or null | see above | `process_crash` / `unparseable` / `schema_drift` / `fs_poison` / `stall` / `iter_exhausted` / `template_error`, or null if the cycle terminated cleanly |
+| `failure_kind` | enum or null | see above | `process_crash` / `unparseable` / `schema_drift` / `fs_poison` / `stall` / `recursion_bound` / `template_error`, or null if the cycle terminated cleanly |
 | `failure_phase` | enum or null | non-null only when `failure_kind` is set | `pre` / `run` / `post` (always concrete for cycle-routed failures per [fr:02 §Recognized fields](../fr/02-configuration.md)) |
 
 The Rust shape lives in the `roki-api-types` crate.

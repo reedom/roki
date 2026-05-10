@@ -40,10 +40,10 @@ Operators must diagnose daemon behavior, admission decisions, cycle outcomes, an
 
 ### Tier 2: per-ticket subprocess raw captures
 
-- **Layout**: `<session_root>/<ticket-id>/cycle-<uuid>/iter-<n>/{pre,run,post}.{stdout,stderr}`, plus parsed-derivative files (`pre.response.json`, `run.exit_code`, `run.terminal.json`, `post.response.json`) and the per-line stream-json event files for session-shape pre / post (`pre.events.jsonl`, `post.events.jsonl`) per [09-log-access-cli §Storage layout](09-log-access-cli.md).
+- **Layout**: `<session_root>/<ticket-id>/cycle-<uuid>/visit-<n>/<state_id>.{stdout,stderr}`, plus parsed-derivative files (`<state_id>.exit_code`, `<state_id>.terminal.json`, `<state_id>.directive.json`) and the per-line stream-json event files when the cli line emits them (`<state_id>.events.jsonl`) per [09-log-access-cli §Storage layout](09-log-access-cli.md).
 - **Capture mode**: byte-for-byte. The daemon does not strip ANSI codes, does not redact, and does not impose a per-line tag.
 - **Lifetime**: deleted on cleanup-cycle completion and on cold-start orphan reconcile (matches [05-worktree-and-session](05-worktree-and-session.md)). Admission-revoke does not delete the captures — the directory is retained until cleanup-cycle reclaim or orphan reconcile.
-- **Read access**: `roki log` (scope = same ticket); HTTP API mirrors via `GET /api/tickets/{id}/cycles/{cycle_id}/iters/{n}/{phase}/{stream}`.
+- **Read access**: `roki log` (scope = same ticket); HTTP API mirrors via `GET /api/tickets/{id}/cycles/{cycle_id}/visits/{n}/{state_id}/{stream}`.
 
 ### Tier 3: in-memory ring buffer
 
@@ -63,7 +63,7 @@ Canonical event names emitted on the structured pipeline. `roki events --kind <n
 | `phase_started` | Phase subprocess spawned |
 | `phase_completed` | Phase clean exit; carries head/tail stderr summary |
 | `phase_failed` | Phase failure (`failure.kind` per [01-engine-model](01-engine-model.md) §Failure kinds) |
-| `failure_unhandled` | A cycle failure with no `[[on_failure]]` match (`marker = none`). Carries `(ticket_id, cycle_id, cycle_kind, failure.kind, phase, error_text, marker)`. Daemon stays alive; the ticket task drops the cycle and waits for the next admission ([06-failure-handling §Failure-handler cycle](06-failure-handling.md)). Recursive failure-cycle failures and cleanup-time fs errors enter the escalation queue instead — see `escalation_added`. |
+| `failure_unhandled` | A cycle failure with no ``on_failure:` entries` match (`marker = none`). Carries `(ticket_id, cycle_id, cycle_kind, failure.kind, phase, error_text, marker)`. Daemon stays alive; the ticket task drops the cycle and waits for the next admission ([06-failure-handling §Failure-handler cycle](06-failure-handling.md)). Recursive failure-cycle failures and cleanup-time fs errors enter the escalation queue instead — see `escalation_added`. |
 | `cycle_completed` | Cycle ends with terminal directive |
 | `cycle_aborted` | Cycle aborted (failure or admission lost mid-cycle) |
 | `escalation_added` | Escalation queue entry added. Daemon-stuck failure: failure-handler cycle that itself failed, cleanup-time fs error, or daemon-internal error with no cycle association. Carries `(ticket_id?, cycle_id?, failure.kind, phase?, error_text)`. Cycle-less entries omit `ticket_id`, `cycle_id`, `phase` ([06-failure-handling §Escalation queue](06-failure-handling.md)) |

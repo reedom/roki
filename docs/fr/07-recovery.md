@@ -51,7 +51,7 @@ A new webhook for a cached ticket triggers re-evaluation only when at least one 
 
 #### Cycle dispatch
 
-When a diff is detected and no cycle is in flight, the daemon evaluates lists in priority order ([01-engine-model §Cycle kinds](01-engine-model.md)): `[[cleanup]]` first-match, then `[[rule]]` first-match. The first matching entry starts a cycle. If a cycle is already in flight for the ticket, the daemon sets `pending_recheck = true` instead of starting a new one (queue-mode preemption).
+When a diff is detected and no cycle is in flight, the daemon evaluates lists in priority order ([01-engine-model §Cycle kinds](01-engine-model.md)): ``cleanup:` entries` first-match, then ``rules:` entries` first-match. The first matching entry starts a cycle. If a cycle is already in flight for the ticket, the daemon sets `pending_recheck = true` instead of starting a new one (queue-mode preemption).
 
 #### Cycle in-flight semantics
 
@@ -69,10 +69,10 @@ Other components (HTTP API, TUI, structured event log) observe cache changes via
 
 On every daemon process start (cold or post-crash), the same flow runs and is the only path that re-populates the cache:
 
-1. Load `roki.toml` and `WORKFLOW.toml` (and any per-repo TOMLs referenced through `[[admission.repos]] workflow`). Validate. Refuse to start on validation failure.
-2. Query Linear API for tickets satisfying the admission filter. Status narrowing matches [03-linear-admission §Polling fallback](03-linear-admission.md): the union of every `[[rule]]` / `[[cleanup]]` entry's explicit `when.status` becomes a Linear-side status filter; if any entry omits `when.status` the filter is dropped and an info log surfaces the choice at startup. Pagination is cursor-based; the daemon walks the full result set before continuing.
+1. Load `roki.toml` and `WORKFLOW.yaml` (and any per-repo TOMLs referenced through `[[admission.repos]] workflow`). Validate. Refuse to start on validation failure.
+2. Query Linear API for tickets satisfying the admission filter. Status narrowing matches [03-linear-admission §Polling fallback](03-linear-admission.md): the union of every ``rules:` entries` / ``cleanup:` entries` entry's explicit `when.status` becomes a Linear-side status filter; if any entry omits `when.status` the filter is dropped and an info log surfaces the choice at startup. Pagination is cursor-based; the daemon walks the full result set before continuing.
 3. For each ticket: resolve repo via `[[admission.repos]]` first-match. On no match, log `reason: repo_unresolvable` and skip. On match, register a cache entry with the current `(status, labels, assignee, repo, workflow_path)`.
-4. After the cache is populated, evaluate `[[cleanup]]` then `[[rule]]` first-match for each ticket. On match, start a cycle with `cycle.trigger = "cold_start"` (env var `ROKI_CYCLE_TRIGGER=cold_start`). Cycles for distinct tickets may run concurrently; same-ticket queue ordering still applies.
+4. After the cache is populated, evaluate ``cleanup:` entries` then ``rules:` entries` first-match for each ticket. On match, start a cycle with `cycle.trigger = "cold_start"` (env var `ROKI_CYCLE_TRIGGER=cold_start`). Cycles for distinct tickets may run concurrently; same-ticket queue ordering still applies.
 5. Reconcile disk residue: enumerate session tempdirs under `[paths].session_root`. Anything not corresponding to a Linear-API-hit ticket is treated as an orphan and auto-deleted (session_tempdir removed; one structured log entry per deletion with `reason: orphan`). Worktree paths are owned by worktrunk; orphan-worktree reconciliation is delegated to worktrunk and out of scope here.
 
 For tickets the daemon was previously running cycles for (e.g. crash-restart): the in-flight cycle is gone (subprocess died with the daemon). The fresh cycle launched in step 4 takes over. Any partial files inside the session tempdir from the previous run remain on disk and are accessible via `roki log --cycle <previous-uuid> ...` for forensics; the new cycle uses a fresh cycle UUID.
@@ -103,7 +103,7 @@ On orderly shutdown ([12-daemon-lifecycle](12-daemon-lifecycle.md)):
 - **No daemon-side execution-stage enum**: execution stages live inside operator-authored cycles, not as daemon-tracked states.
 - **No `Inactive.reason` discriminator**: stop-condition distinctions are operator-authored `outcome` strings on terminal post directives.
 - **No daemon-driven Linear feedback for skipped tickets**: silent eviction stays silent. Operators that want a Linear comment on a skip (e.g. "this ticket was not assigned to a configured operator") cannot rely on the daemon — the daemon does not have any Linear write path.
-- **No mid-cycle preemption of an in-flight cycle by tracker-terminal observations**: a Linear status change to `Done` or `Cancelled` updates the cache; the in-flight cycle runs to natural end; only after it terminates does the cleanup/rule re-evaluation happen. Operators that want forced termination author a `[[cleanup]]` entry whose run phase issues whatever termination signal they want.
+- **No mid-cycle preemption of an in-flight cycle by tracker-terminal observations**: a Linear status change to `Done` or `Cancelled` updates the cache; the in-flight cycle runs to natural end; only after it terminates does the cleanup/rule re-evaluation happen. Operators that want forced termination author a ``cleanup:` entries` entry whose run phase issues whatever termination signal they want.
 - **No mirroring of Linear-side workflow states** is done. Linear states are looked up via the tracker each time.
 - **A persistent DB** is intentionally not maintained.
 - **Cross-issue state correlation** is out of scope (each issue is independent).

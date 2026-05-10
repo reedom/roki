@@ -18,7 +18,7 @@ All docs across kinds. For per-kind indexes see the per-kind INDEX files; for AI
 | `fr:01-engine-model` | Rule and Cycle Engine | roki-engine-iteration-loop | [docs/fr/01-engine-model.md](fr/01-engine-model.md) |
 | `fr:02-configuration` | Configuration | roki-skeleton | [docs/fr/02-configuration.md](fr/02-configuration.md) |
 | `fr:03-linear-admission` | Linear Admission | roki-skeleton | [docs/fr/03-linear-admission.md](fr/03-linear-admission.md) |
-| `fr:04-phase-execution` | Phase Subprocess Execution | roki-skeleton | [docs/fr/04-phase-execution.md](fr/04-phase-execution.md) |
+| `fr:04-state-execution` | Phase Subprocess Execution | roki-skeleton | [docs/fr/04-state-execution.md](fr/04-state-execution.md) |
 | `fr:05-worktree-and-session` | Worktree and Session Lifecycle | roki-skeleton | [docs/fr/05-worktree-and-session.md](fr/05-worktree-and-session.md) |
 | `fr:06-failure-handling` | Failure Handling | roki-skeleton | [docs/fr/06-failure-handling.md](fr/06-failure-handling.md) |
 | `fr:07-recovery` | Diff Cache and Recovery | roki-skeleton | [docs/fr/07-recovery.md](fr/07-recovery.md) |

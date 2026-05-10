@@ -15,7 +15,7 @@
         "fr:03-linear-admission",
         "fr:07-recovery",
         "fr:05-worktree-and-session",
-        "fr:04-phase-execution",
+        "fr:04-state-execution",
         "fr:08-observability-logs",
         "fr:06-failure-handling",
         "fr:09-log-access-cli"
@@ -61,9 +61,9 @@
       "modules": []
     },
     {
-      "id": "fr:04-phase-execution",
+      "id": "fr:04-state-execution",
       "kind": "fr",
-      "path": "docs/fr/04-phase-execution.md",
+      "path": "docs/fr/04-state-execution.md",
       "title": "Phase Subprocess Execution",
       "spec": "roki-skeleton",
       "provides": [],
@@ -92,7 +92,7 @@
       "related": [
         "fr:02-configuration",
         "fr:07-recovery",
-        "fr:04-phase-execution",
+        "fr:04-state-execution",
         "fr:01-engine-model",
         "fr:09-log-access-cli"
       ],
@@ -109,7 +109,7 @@
       "depends_on": [],
       "related": [
         "fr:07-recovery",
-        "fr:04-phase-execution",
+        "fr:04-state-execution",
         "fr:08-observability-logs",
         "fr:10-http-api",
         "fr:11-roki-tui",
@@ -225,7 +225,7 @@
         "fr:02-configuration",
         "fr:08-observability-logs",
         "fr:07-recovery",
-        "fr:04-phase-execution",
+        "fr:04-state-execution",
         "fr:01-engine-model"
       ],
       "modules": [
@@ -307,7 +307,7 @@
       "related": [
         "fr:09-log-access-cli",
         "fr:08-observability-logs",
-        "fr:04-phase-execution",
+        "fr:04-state-execution",
         "fr:10-http-api"
       ],
       "modules": []

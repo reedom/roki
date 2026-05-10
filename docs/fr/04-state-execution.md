@@ -1,8 +1,8 @@
 ---
 refs:
-  id: fr:04-phase-execution
+  id: fr:04-state-execution
   kind: fr
-  title: "Phase Subprocess Execution"
+  title: "State Subprocess Execution"
   spec: roki-skeleton
   related:
     - fr:12-daemon-lifecycle
@@ -14,9 +14,9 @@ refs:
     - fr:09-log-access-cli
 ---
 
-# FR 04: Phase Subprocess Execution
+# FR 04: State Subprocess Execution
 
-> The daemon-side mechanics that spawn each pre / run / post subprocess for a cycle, capture its stdout / stderr to disk, parse a structured directive from the last JSON object on stdout (pre / post), apply stall detection, and route the outcome back to the cycle engine. The cycle dispatch logic — which list to evaluate, what directive means what — lives in [01-engine-model](01-engine-model.md); this FR is the daemon-side process supervisor only.
+> The daemon-side mechanics that spawn each state subprocess for a cycle, capture its stdout / stderr to disk, read the per-state sentinel directive file at exit, apply stall detection, and route the outcome back to the cycle engine. The cycle dispatch logic — which list to evaluate, what directive means what — lives in [01-engine-model](01-engine-model.md); this FR is the daemon-side process supervisor only.
 
 ## Purpose
 

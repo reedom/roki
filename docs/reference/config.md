@@ -35,10 +35,10 @@ Per workspace, specified with `--config <path>` ([cli.md](cli.md)). Not hot-relo
 | `[linear.webhook].port` | yes | port | — | Refuses startup on bind failure | [fr:03 §Webhook intake](../fr/03-linear-admission.md) |
 | `[api].port` | no | port | — (unset → API disabled) | When unset, the observability HTTP server does not start. When set, refuses startup on bind failure | [fr:10 §Server gating](../fr/10-http-api.md) |
 | `[api].bind` | no | bind addr | `127.0.0.1` | Non-loopback emits a warn log noting the absence of authentication | [fr:10 §Server gating](../fr/10-http-api.md) |
-| `[default.ai.session].cli` | yes | string (cli line) | — | Refuses startup if missing. Operator-authored; daemon does not parse the cli line. Liquid-rendered at phase launch | [fr:04 §Subprocess shapes](../fr/04-phase-execution.md) |
-| `[default.ai.session].stall_seconds` | no | int | `600` | min `1` | [fr:04 §Stall detection](../fr/04-phase-execution.md) |
-| `[default.ai.command].cli` | yes | string (cli line) | — | Refuses startup if missing | [fr:04 §Subprocess shapes](../fr/04-phase-execution.md) |
-| `[default.ai.command].stall_seconds` | no | int | `300` | min `1` | [fr:04 §Stall detection](../fr/04-phase-execution.md) |
+| `[default.ai.session].cli` | yes | string (cli line) | — | Refuses startup if missing. Operator-authored; daemon does not parse the cli line. Liquid-rendered at phase launch | [fr:04 §Subprocess shapes](../fr/04-state-execution.md) |
+| `[default.ai.session].stall_seconds` | no | int | `600` | min `1` | [fr:04 §Stall detection](../fr/04-state-execution.md) |
+| `[default.ai.command].cli` | yes | string (cli line) | — | Refuses startup if missing | [fr:04 §Subprocess shapes](../fr/04-state-execution.md) |
+| `[default.ai.command].stall_seconds` | no | int | `300` | min `1` | [fr:04 §Stall detection](../fr/04-state-execution.md) |
 | `[engine].max_iterations` | no | int | `10` | min `1` | [fr:01 §Iteration cap](../fr/01-engine-model.md) |
 | `[engine].shutdown_window_seconds` | no | int | `30` | min `1`, max `600` | [fr:12 §Normal shutdown](../fr/12-daemon-lifecycle.md) |
 | `[paths].workflow` | yes | path | `./WORKFLOW.yaml` | Refuses startup if file missing / unreadable | [fr:02](../fr/02-configuration.md) |

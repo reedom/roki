@@ -110,7 +110,7 @@ The CLIs encapsulate this layout. Operators that need raw file access for debugg
       ...
 ```
 
-`<phase>.events.jsonl` carries one parseable JSON object per line — the advisory stream-json events (thinking blocks, tool-use messages, etc.) emitted by the long-lived AI between turns. It is present only for session-shape pre / post phases ([04-phase-execution §Event handling](04-phase-execution.md)).
+`<phase>.events.jsonl` carries one parseable JSON object per line — the advisory stream-json events (thinking blocks, tool-use messages, etc.) emitted by the long-lived AI between turns. It is present only for session-shape pre / post phases ([04-phase-execution §Event handling](04-state-execution.md)).
 
 `meta.json` is the per-cycle summary file (cycle id, kind, trigger, started_at, ended_at, terminal directive or failure kind). Schema is defined in [`docs/reference/artifacts.md`](../reference/artifacts.md).
 
@@ -123,7 +123,7 @@ This layout is **not** part of the operator-facing contract. Future versions may
 - **One-line accessors for the common case**: env-var defaults make `roki log --phase run --stream stdout` a useful shorthand inside any workflow template.
 - **Relative iteration arithmetic**: `--iter -N` for "N iters back" lets a post template inspect the previous run trivially.
 - **Same-ticket isolation**: phase subprocesses cannot accidentally read a different ticket's captures.
-- **Cross-cycle access within a ticket**: an `[[on_failure]]` cycle reads the failed cycle's logs by passing `--cycle <failed_cycle_id>`.
+- **Cross-cycle access within a ticket**: an ``on_failure:` entries` cycle reads the failed cycle's logs by passing `--cycle <failed_cycle_id>`.
 - **Online + offline event reads**: `roki events` works against a live daemon (HTTP API) or against an archived JSON Lines file (`--offline`).
 - **Auto-clone helper**: `roki repo --auto-clone` keeps workflow scripts from having to call `ghq get` directly.
 - **Storage backend opacity**: the on-disk file layout is intentionally not part of the operator contract; the daemon may switch backends without breaking workflows.
