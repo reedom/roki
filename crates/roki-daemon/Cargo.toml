@@ -132,6 +132,54 @@ name = "escalation_orphan_reconcile_smoke"
 path = "tests/e2e/escalation_orphan_reconcile_smoke.rs"
 required-features = ["test-support"]
 
+[[test]]
+name = "yaml_load_smoke"
+path = "tests/e2e/yaml_load_smoke.rs"
+
+[[test]]
+name = "sugar_linear_smoke"
+path = "tests/e2e/sugar_linear_smoke.rs"
+
+[[test]]
+name = "sugar_retry_smoke"
+path = "tests/e2e/sugar_retry_smoke.rs"
+
+[[test]]
+name = "canonical_branch_smoke"
+path = "tests/e2e/canonical_branch_smoke.rs"
+
+[[test]]
+name = "sentinel_absent_smoke"
+path = "tests/e2e/sentinel_absent_smoke.rs"
+
+[[test]]
+name = "sentinel_unparseable_smoke"
+path = "tests/e2e/sentinel_unparseable_smoke.rs"
+
+[[test]]
+name = "state_on_fail_smoke"
+path = "tests/e2e/state_on_fail_smoke.rs"
+
+[[test]]
+name = "recursion_bound_yaml_smoke"
+path = "tests/e2e/recursion_bound_yaml_smoke.rs"
+
+[[test]]
+name = "validate_orphan_target_smoke"
+path = "tests/e2e/validate_orphan_target_smoke.rs"
+
+[[test]]
+name = "cleanup_immediate_delete_yaml_smoke"
+path = "tests/e2e/cleanup_immediate_delete_yaml_smoke.rs"
+
+[[test]]
+name = "per_repo_override_smoke"
+path = "tests/e2e/per_repo_override_smoke.rs"
+
+[[test]]
+name = "workflow_graph_cli_smoke"
+path = "tests/e2e/workflow_graph_cli_smoke.rs"
+
 [features]
 # Test-only seam: gates the `ROKI_LINEAR_GRAPHQL_URL` env-var override inside
 # `linear::client` so the release binary always targets the hardcoded endpoint.

@@ -68,7 +68,7 @@ pub(crate) async fn run_inner(config_path: &Path, mode: DispatchMode) -> Result<
     // 1. Load roki.toml.
     let cfg = RokiConfig::load(config_path)?;
 
-    // 2. Load WORKFLOW.toml.
+    // 2. Load WORKFLOW.yaml.
     let workflow = WorkflowConfig::load(&cfg.paths.workflow)?;
 
     // Shared rate-limit state — both the viewer-resolve client below and
