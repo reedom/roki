@@ -45,7 +45,7 @@ pub enum StepOutcome {
 }
 
 /// Trait the ticket task uses to invoke a cycle. Production wires this to
-/// `engine::cycle::run_cycle` via `RealCycleRunner` (Task 8); unit tests
+/// `engine::cycle_state::run_cycle` via `RealCycleRunner`; unit tests
 /// substitute a mock to exercise the loop deterministically.
 #[async_trait::async_trait]
 pub trait CycleRunner: Send + Sync {
@@ -256,6 +256,7 @@ fn synthesize_admitted(ticket_id: &str, snap: &crate::daemon::cache::CacheEntry)
 }
 
 #[cfg(test)]
+#[allow(clippy::field_reassign_with_default)]
 mod tests {
     use super::*;
     use std::sync::Mutex as StdMutex;

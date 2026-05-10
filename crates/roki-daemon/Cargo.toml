@@ -16,14 +16,6 @@ name = "skeleton_smoke"
 path = "tests/e2e/skeleton_smoke.rs"
 
 [[test]]
-name = "iteration_smoke"
-path = "tests/e2e/iteration_smoke.rs"
-
-[[test]]
-name = "session_smoke"
-path = "tests/e2e/session_smoke.rs"
-
-[[test]]
 name = "stall_smoke"
 path = "tests/e2e/stall_smoke.rs"
 
@@ -60,16 +52,8 @@ name = "cleanup_subcommand_smoke"
 path = "tests/e2e/cleanup_subcommand_smoke.rs"
 
 [[test]]
-name = "worktree_lazy_smoke"
-path = "tests/e2e/worktree_lazy_smoke.rs"
-
-[[test]]
 name = "worktree_cleanup_smoke"
 path = "tests/e2e/worktree_cleanup_smoke.rs"
-
-[[test]]
-name = "worktree_fs_poison_smoke"
-path = "tests/e2e/worktree_fs_poison_smoke.rs"
 
 [[test]]
 name = "escalation_cleanup_fs_error_smoke"

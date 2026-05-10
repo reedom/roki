@@ -8,9 +8,9 @@
 #![allow(dead_code)]
 
 use std::path::Path;
-use std::sync::Arc;
 #[cfg(test)]
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use crate::error::WorkflowError;
 use crate::workflow::canonical::{Admission, RuleEntry, WorkflowFile};

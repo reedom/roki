@@ -86,6 +86,7 @@ pub fn evaluate_from_cache<'a>(
 }
 
 #[cfg(test)]
+#[allow(clippy::field_reassign_with_default)]
 mod tests {
     use super::*;
     use crate::config::workflow::workflow_config_for_test;

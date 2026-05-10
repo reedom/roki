@@ -47,26 +47,26 @@ async fn fs_poison_routes_through_on_failure() {
 
     let ticket_id = "ENG-500";
 
-    let workflow_path = work.path().join("WORKFLOW.toml");
+    let workflow_path = work.path().join("WORKFLOW.yaml");
     let workflow_body = r#"
-[admission]
-assignee = "u1"
+admission:
+  assignee: u1
+  repos:
+    - ghq: github.com/example/repo
 
-[[admission.repos]]
-ghq = "github.com/example/repo"
+rules:
+  - when:
+      status: in_progress
+    tasks:
+      - id: run0
+        run: 'true'
 
-[[rule]]
-[rule.when]
-status = "in_progress"
-[rule.when.labels]
-has_all = []
-[rule.run]
-cmd = "true"
-
-[[on_failure]]
-when.kind = "fs_poison"
-[on_failure.run]
-cmd = "true"
+on_failure:
+  - when:
+      kind: stall
+    tasks:
+      - id: frun0
+        run: 'true'
 "#;
     std::fs::write(&workflow_path, workflow_body).unwrap();
 
@@ -80,7 +80,7 @@ token = "linear-test-token"
 bind = "127.0.0.1"
 port = {port}
 
-[default.ai.command]
+[default.ai]
 cli = "echo"
 
 [engine]

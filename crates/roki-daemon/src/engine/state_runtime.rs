@@ -2,10 +2,9 @@
 //!
 //! Spec: §2.4, §6 (data-flow capture).
 //!
-//! Slice 8 introduces this alongside the legacy `engine::phase` module.
-//! Production wiring (real subprocess spawn) lands in Task 8; this file
-//! defines the trait + types + a deterministic mock impl used by
-//! `engine::cycle_state` integration tests.
+//! Defines the `StateRunner` trait + types + a deterministic mock impl used
+//! by `engine::cycle_state` integration tests. Production wiring is in
+//! `engine::real_state_runner`.
 
 #![allow(dead_code)]
 

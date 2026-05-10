@@ -42,26 +42,23 @@ async fn rule_failure_with_no_handler_emits_failure_unhandled() {
 
     let ticket_id = "ENG-400";
 
-    let workflow_path = work.path().join("WORKFLOW.toml");
-    // The post phase exits non-zero with no JSON output → ProcessCrash. No
-    // [[on_failure]] block, so route() returns None and the runtime emits
-    // failure_unhandled with marker=none.
+    let workflow_path = work.path().join("WORKFLOW.yaml");
+    // post0 SIGKILLs itself → daemon-detected ProcessCrash. No `on_failure:`
+    // entry exists, so the runtime emits failure_unhandled with marker=none.
     let workflow_body = r#"
-[admission]
-assignee = "u1"
+admission:
+  assignee: u1
+  repos:
+    - ghq: github.com/example/repo
 
-[[admission.repos]]
-ghq = "github.com/example/repo"
-
-[[rule]]
-[rule.when]
-status = "in_progress"
-[rule.when.labels]
-has_all = []
-[rule.run]
-cmd = "true"
-[rule.post]
-cmd = "exit 7"
+rules:
+  - when:
+      status: in_progress
+    tasks:
+      - id: run0
+        run: 'true'
+      - id: post0
+        run: 'kill -KILL $$'
 "#;
     std::fs::write(&workflow_path, workflow_body).unwrap();
 
@@ -75,7 +72,7 @@ token = "linear-test-token"
 bind = "127.0.0.1"
 port = {port}
 
-[default.ai.command]
+[default.ai]
 cli = "echo"
 
 [engine]

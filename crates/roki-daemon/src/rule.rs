@@ -168,6 +168,7 @@ pub(crate) fn admitted_with(status: &str, labels: Vec<String>) -> AdmittedTicket
 }
 
 #[cfg(test)]
+#[allow(clippy::field_reassign_with_default)]
 mod tests {
     use super::*;
     use crate::linear::ticket::NormalizedTicket;

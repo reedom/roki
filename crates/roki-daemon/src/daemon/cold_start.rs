@@ -268,6 +268,7 @@ fn classify_webhook_skip_reason(err: &crate::error::AdmissionError) -> WebhookSk
 }
 
 #[cfg(test)]
+#[allow(clippy::field_reassign_with_default)]
 mod tests {
     use super::*;
     use crate::config::workflow::{WorkflowConfig, workflow_config_for_test};

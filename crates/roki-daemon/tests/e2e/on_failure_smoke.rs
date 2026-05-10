@@ -41,33 +41,33 @@ async fn on_failure_handler_recovers_from_process_crash() {
 
     let ticket_id = "ENG-200";
 
-    let workflow_path = work.path().join("WORKFLOW.toml");
-    // The post phase exits non-zero with no JSON output, which the directive
-    // parser classifies as ProcessCrash. The on_failure handler matches
-    // when.kind = "process_crash" and its post emits {"directive":"end"}.
+    let workflow_path = work.path().join("WORKFLOW.yaml");
+    // post0 SIGKILLs itself → daemon-detected ProcessCrash. The on_failure
+    // handler matches when.kind = "process_crash"; its terminal task writes
+    // a directive file with `outcome: "handled"`.
     let workflow_body = r#"
-[admission]
-assignee = "u1"
+admission:
+  assignee: u1
+  repos:
+    - ghq: github.com/example/repo
 
-[[admission.repos]]
-ghq = "github.com/example/repo"
+rules:
+  - when:
+      status: in_progress
+    tasks:
+      - id: run0
+        run: 'true'
+      - id: post0
+        run: 'kill -KILL $$'
 
-[[rule]]
-[rule.when]
-status = "in_progress"
-[rule.when.labels]
-has_all = []
-[rule.run]
-cmd = "true"
-[rule.post]
-cmd = "exit 7"
-
-[[on_failure]]
-when.kind = "process_crash"
-[on_failure.run]
-cmd = "echo handled"
-[on_failure.post]
-cmd = "printf '{\"directive\":\"end\",\"outcome\":\"handled\"}'"
+on_failure:
+  - when:
+      kind: process_crash
+    tasks:
+      - id: frun0
+        run: 'echo handled'
+      - id: fpost0
+        run: 'printf ''{"directive":"end","outcome":"handled"}'' > "$ROKI_DIRECTIVE_PATH"'
 "#;
     std::fs::write(&workflow_path, workflow_body).unwrap();
 
@@ -81,7 +81,7 @@ token = "linear-test-token"
 bind = "127.0.0.1"
 port = {port}
 
-[default.ai.command]
+[default.ai]
 cli = "echo"
 
 [engine]
@@ -205,10 +205,10 @@ session_root = "{session_root}"
     );
 
     for entry in &cycle_dirs {
-        let iter_dir = entry.path().join("iter-1");
+        let visit_dir = entry.path().join("visit-1");
         assert!(
-            iter_dir.exists(),
-            "iter-1 must exist under {:?}",
+            visit_dir.exists(),
+            "visit-1 must exist under {:?}",
             entry.path()
         );
     }

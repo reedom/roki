@@ -41,23 +41,21 @@ async fn cleanup_deletes_worktree_then_session_dir() {
     std::fs::create_dir_all(wt_root.join(ticket_id)).unwrap();
     std::fs::create_dir_all(session_root.join(ticket_id)).unwrap();
 
-    let workflow_path = work.path().join("WORKFLOW.toml");
+    let workflow_path = work.path().join("WORKFLOW.yaml");
     let workflow_body = r#"
-[admission]
-assignee = "u1"
+admission:
+  assignee: u1
+  repos:
+    - ghq: github.com/example/repo
 
-[[admission.repos]]
-ghq = "github.com/example/repo"
-
-[[cleanup]]
-[cleanup.when]
-status = "done"
-[cleanup.when.labels]
-has_all = []
-[cleanup.run]
-cmd = "true"
-[cleanup.post]
-cmd = "printf '{\"directive\":\"end\"}'"
+cleanup:
+  - when:
+      status: done
+    tasks:
+      - id: crun0
+        run: 'true'
+      - id: cpost0
+        run: 'printf ''{\"directive\":\"end\"}'''
 "#;
     std::fs::write(&workflow_path, workflow_body).unwrap();
 
@@ -71,7 +69,7 @@ token = "linear-test-token"
 bind = "127.0.0.1"
 port = {port}
 
-[default.ai.command]
+[default.ai]
 cli = "echo"
 
 [engine]

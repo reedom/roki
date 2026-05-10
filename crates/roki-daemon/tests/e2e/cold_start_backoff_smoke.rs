@@ -59,7 +59,7 @@ async fn cold_start_handles_429_with_retry_after() {
     let session_root = work.path().join("sessions");
     std::fs::create_dir_all(&session_root).unwrap();
 
-    let workflow_path = work.path().join("WORKFLOW.toml");
+    let workflow_path = work.path().join("WORKFLOW.yaml");
     std::fs::write(
         &workflow_path,
         r#"
@@ -94,7 +94,7 @@ token = "linear-test-token"
 bind = "127.0.0.1"
 port = {port}
 
-[default.ai.command]
+[default.ai]
 cli = "echo"
 
 [engine]

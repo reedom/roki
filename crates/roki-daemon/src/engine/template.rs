@@ -9,7 +9,7 @@ use liquid::model::{DisplayCow, KStringCow, ObjectView, State, Value, ValueView}
 use thiserror::Error;
 
 /// Render error wrapper. The engine maps this to `FailureKind::TemplateError`
-/// when surfacing it through `PhaseOutcome`.
+/// when surfacing it through state outcomes.
 #[derive(Debug, Error)]
 pub enum TemplateError {
     #[error("template parse failed: {0}")]

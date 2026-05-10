@@ -43,13 +43,12 @@ async fn orphan_reconcile_fs_error_pushes_cycle_less_escalation() {
     let orphan_dir = session_root.join(orphan_id);
     std::fs::create_dir_all(&orphan_dir).unwrap();
 
-    let workflow_path = work.path().join("WORKFLOW.toml");
+    let workflow_path = work.path().join("WORKFLOW.yaml");
     let workflow_body = r#"
-[admission]
-assignee = "u1"
-
-[[admission.repos]]
-ghq = "github.com/example/repo"
+admission:
+  assignee: u1
+  repos:
+    - ghq: github.com/example/repo
 "#;
     std::fs::write(&workflow_path, workflow_body).unwrap();
 
@@ -63,7 +62,7 @@ token = "lin"
 bind = "127.0.0.1"
 port = {port}
 
-[default.ai.command]
+[default.ai]
 cli = "echo"
 
 [paths]
