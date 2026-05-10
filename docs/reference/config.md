@@ -17,10 +17,10 @@ refs:
 Schema for the three configuration files:
 
 - `roki.toml` — per workspace, restart-only ([fr:02 §`roki.toml`](../fr/02-configuration.md)).
-- `WORKFLOW.toml` — per workspace, hot-reloadable. Admission filter + rule / cleanup / on_failure entries.
-- `workflow/*.md` — per workspace, hot-reloadable. Phase prompt / cmd bodies (frontmatter + Liquid template).
+- `WORKFLOW.yaml` — per workspace, restart-only. Admission filter + rules + cleanup + on_failure state machines.
+- `workflow/*.md` — per workspace, restart-only. State body (frontmatter + Liquid template).
 
-Working samples in [`docs/examples/`](../examples/) (pending post-pivot rewrite).
+Working samples in [`docs/examples/`](../examples/).
 
 ## `roki.toml` schema
 
@@ -41,7 +41,7 @@ Per workspace, specified with `--config <path>` ([cli.md](cli.md)). Not hot-relo
 | `[default.ai.command].stall_seconds` | no | int | `300` | min `1` | [fr:04 §Stall detection](../fr/04-phase-execution.md) |
 | `[engine].max_iterations` | no | int | `10` | min `1` | [fr:01 §Iteration cap](../fr/01-engine-model.md) |
 | `[engine].shutdown_window_seconds` | no | int | `30` | min `1`, max `600` | [fr:12 §Normal shutdown](../fr/12-daemon-lifecycle.md) |
-| `[paths].workflow` | yes | path | — | Refuses startup if file missing / unreadable | [fr:02](../fr/02-configuration.md) |
+| `[paths].workflow` | yes | path | `./WORKFLOW.yaml` | Refuses startup if file missing / unreadable | [fr:02](../fr/02-configuration.md) |
 | `[paths].session_root` | yes | path | — | Refuses startup if parent directory missing or not writable | [fr:05](../fr/05-worktree-and-session.md) |
 | `[log].destination` | no | enum (`stdout` / `file` / `both`) | `stdout` | — | [fr:08 §Tier 1](../fr/08-observability-logs.md) |
 | `[log].file_path` | yes when `destination ∈ {file, both}` | path | — | Refuses startup if parent directory missing or not writable | [fr:08 §Tier 1](../fr/08-observability-logs.md) |
@@ -51,104 +51,206 @@ Per workspace, specified with `--config <path>` ([cli.md](cli.md)). Not hot-relo
 
 Validation failure refuses startup and emits the offending key path in the structured log. The default-value column lists canonical defaults; a future schema-version bump is the only path to changing them.
 
-## `WORKFLOW.toml` schema
+## `WORKFLOW.yaml` schema
 
-Per workspace, referenced from `roki.toml [paths].workflow`. Hot-reloadable.
+Per workspace, referenced from `roki.toml [paths].workflow`. Restart-only.
 
-### `[admission]` (single block, required)
+### Top-level shape
+
+```yaml
+admission:                    # required, single block
+  assignee: <string>
+  repos:                      # 1+ entries, ordered first-match
+    - ghq: <string>
+      when: <WhenClause>      # optional
+      workflow: <path>        # optional per-repo override file
+
+rules:                        # 0..N, ordered first-match
+  - when: <WhenClause>
+    <SugarOrCanonical>
+
+cleanup:                      # 0..N, ordered first-match; evaluated before rules
+  - when: <WhenClause>
+    <SugarOrCanonical>        # OR omitted entirely (immediate-delete shorthand)
+
+on_failure:                   # 0..N, ordered first-match
+  - when: <WhenClause>
+    <SugarOrCanonical>
+```
+
+### `admission`
 
 | Key | Required | Type | Meaning |
 |---|---|---|---|
 | `assignee` | yes | string | Linear assignee identifier; the literal `me` resolves to the API token holder |
+| `repos` | yes | list | 1+ entries, ordered first-match |
 
-### `[[admission.repos]]` (array, 1+ entries, ordered first-match)
+Per-repo `workflow:` resolution runs once per cache entry at first admission ([fr:03 §Diff observation](../fr/03-linear-admission.md)). Subsequent webhook updates do not re-resolve.
 
-Repo allowlist + dispatch.
+### `WhenClause`
 
-| Key | Required | Type | Meaning |
-|---|---|---|---|
-| `ghq` | yes | string | ghq path (`github.com/foo/bar` or `host/owner/repo`) |
-| `workflow` | no | path (relative to WORKFLOW.toml) | Per-repo TOML overriding the top-level `[[rule]]` / `[[cleanup]]` / `[[on_failure]]` lists for this repo |
-| `when.*` | no | matcher set | Optional repo-discrimination matchers; entry with no `when.*` is the fallback for tickets matching no other repo entry |
+```yaml
+when:
+  status: <scalar>                            # equality
+  status: { not: <scalar> }                   # negation
+  status: { in: [<scalar>, ...] }             # set membership
 
-Resolution runs once per cache entry at first admission ([fr:03 §Diff observation](../fr/03-linear-admission.md)). Subsequent webhook updates do not re-resolve.
+  labels: { has_all:  [<string>, ...] }
+  labels: { has_any:  [<string>, ...] }
+  labels: { has_none: [<string>, ...] }
 
-### `[[rule]]` / `[[cleanup]]` / `[[on_failure]]` (arrays, 0+ entries each, ordered first-match)
+  assignee: <scalar>                          # rule-level refinement
+  repo: <ghq path>                            # rule-level only
+  kind: <scalar>                              # on_failure only
+  phase: <scalar>                             # on_failure only: state id that emitted the failure
 
-| Key | Required | Type | Meaning |
-|---|---|---|---|
-| `when.*` | yes | matcher set | Conditions; all `when.*` keys within an entry AND together |
-| `pre` | no | phase block | Optional. Synthesized `directive: "run"` when omitted |
-| `run` | yes | phase block | Required for any cycle-spawning entry. The only legal omission is a `[[cleanup]]` entry with all three phases omitted (immediate-delete shorthand) |
-| `post` | no | phase block | Optional. Synthesized `directive: "end"` when omitted |
+  title: { regex: <string> }                  # admission.repos only
+  title: { starts_with: <string> }            # admission.repos only
+  title: { contains: <string> }               # admission.repos only
+  body:  { contains: <string> }               # admission.repos only
+```
 
-Phase block declares exactly one of:
-
-| Key | Type | Meaning |
-|---|---|---|
-| `path = "<file>"` | path (relative to WORKFLOW.toml) | File-form. Frontmatter chooses session vs command. Body is a Liquid template |
-| `prompt = "<inline string>"` | string | Inline session-form. Always uses `default.ai.session.cli` |
-| `cmd = "<inline string>"` | string | Inline command-form. Operator-authored full cli line, Liquid-rendered |
-
-### Condition vocabulary (`when.*`)
-
-| Operator | Form | Meaning |
-|---|---|---|
-| Equality | `when.<field> = "<scalar>"` | Field equals the scalar |
-| Negation | `when.<field>.not = "<scalar>"` | Field does not equal the scalar |
-| Set membership | `when.<field>.in = [...]` | Field is in the set |
-| List has-all | `when.labels.has_all = [...]` | Every entry present in ticket labels |
-| List has-any | `when.labels.has_any = [...]` | At least one entry present |
-| List has-none | `when.labels.has_none = [...]` | None of the entries present |
-| String regex | `when.title.regex = "..."` | (admission.repos only) ticket title matches the regex |
-| String prefix | `when.title.starts_with = "..."` | (admission.repos only) |
-| String contains | `when.title.contains = "..."` / `when.body.contains = "..."` | (admission.repos only) |
-
-Recognized fields:
+All `when.*` keys AND together. OR by writing more list entries.
 
 | Field | Scope |
 |---|---|
 | `status` | Linear state name |
 | `labels` | Linear label list |
-| `assignee` | Linear assignee (rule-level only; `[admission].assignee` does the coarse filter) |
+| `assignee` | Linear assignee (rule-level only; `admission.assignee` does the coarse filter) |
 | `repo` | admission-resolved ghq path (rule-level only) |
-| `kind` | failure kind (`[[on_failure]]` only): `process_crash` / `unparseable` / `schema_drift` / `fs_poison` / `stall` / `iter_exhausted` / `template_error` |
-| `phase` | phase name (`[[on_failure]]` only): `pre` / `run` / `post` |
-| `title`, `body` | Linear ticket strings (`[[admission.repos]]` only) |
+| `kind` | failure kind (`on_failure` only): `process_crash` / `unparseable` / `schema_drift` / `fs_poison` / `stall` / `recursion_bound` / `template_error` |
+| `phase` | state id that emitted the failure (`on_failure` only) |
+| `title`, `body` | Linear ticket strings (`admission.repos` only) |
 
-OR is expressed by writing additional entries.
+### Sugar form (`tasks:`)
 
-## Per-repo `WORKFLOW.toml` (optional)
+Linear chain. Each task becomes a state with `on_done` chained to the next; the last task's `on_done` defaults to `__success__`. `on_fail` defaults to the rule-level `on_fail`, else `__failure__`.
 
-Set via `[[admission.repos]] workflow = "<path>"`. The file replaces this repo's `[[rule]]` / `[[cleanup]]` / `[[on_failure]]` lists entirely. Top-level admission stays in WORKFLOW.toml; the per-repo file inherits nothing else.
+```yaml
+tasks:
+  - id: <state_id>
+    run: <inline cmd>                         # OR uses: <path>
+    if: <Liquid expr>                         # optional skip condition
+    timeout: <duration>                       # optional; overrides default stall window
+    on_fail: <state_id>                       # optional
+    directives:
+      <directive_name>: <state_id>            # short form
+      <directive_name>:                       # long form
+        target: <state_id>
+        max_visits: <int>
+    max_visits: <int>                         # optional
+on_fail: <state_id>                           # rule-level default
+states:                                       # optional inline canonical states
+  <state_id>: <StateBody>
+terminals:
+  <state_id>: { outcome: <string> }
+```
 
-Schema is identical to the top-level WORKFLOW.toml minus the `[admission]` block.
+### Canonical form (explicit state machine)
+
+```yaml
+start: <state_id>
+states:
+  <state_id>:
+    run: <inline cmd>                         # OR uses: <path>
+    if: <Liquid expr>
+    timeout: <duration>
+    on_done: <state_id>
+    on_fail: <state_id>
+    directives: { <name>: <state_id>, ... }
+    max_visits: <int>
+terminals:
+  <state_id>: { outcome: <string> }
+```
+
+### State body fields
+
+Exactly one of `run:` / `uses:` per state. Every state is command-shape: each visit spawns a fresh subprocess.
+
+| Field | Type | Notes |
+|---|---|---|
+| `run` | string (Liquid) | Inline shell command; spawned via `sh -c` (POSIX) / `cmd /C` (Windows) |
+| `uses` | path | Path to `workflow/*.md`. Frontmatter `cli:` and `stall_seconds:` honored |
+
+### Cleanup immediate-delete shorthand
+
+A `cleanup:` entry with no `tasks:` / `states:` / `terminals:` deletes worktree + session_tempdir synchronously without a cycle. Recognized only inside `cleanup:`. An entry without a body inside `rules:` or `on_failure:` is a schema error.
+
+### Reserved terminal ids
+
+Auto-injected when referenced and not declared:
+
+| Id | Default `outcome` | Auto-targeted by |
+|---|---|---|
+| `__success__` | `success` | `directives.end`, last-task `on_done` |
+| `__failure__` | `failure` | `directives.fail`, default `on_fail` |
+| `__no_action__` | `no_action` | `directives.skip` |
+| `__cancelled__` | `cancelled` | Operator `directives.cancel` only — daemon never auto-targets |
+
+State ids beginning with `__` are reserved and rejected at validate time.
+
+### Built-in directive name defaults
+
+When a directive name received at runtime is not in the state's `directives:` map, these defaults apply:
+
+| Directive name | Default edge target |
+|---|---|
+| `end` | `__success__` |
+| `skip` | `__no_action__` |
+| `retry` | self (current state id) |
+| `fail` | `__failure__` |
+| `cancel` | `__cancelled__` |
+
+A directive name not in the state's `directives:` ∪ defaults is a `schema_drift` failure.
+
+### Path resolution
+
+| Path field | Resolved relative to |
+|---|---|
+| `roki.toml [paths] workflow` | `roki.toml` directory (or absolute) |
+| `admission.repos[].workflow` | top-level `WORKFLOW.yaml` directory |
+| State `uses:` inside top-level `WORKFLOW.yaml` | top-level `WORKFLOW.yaml` directory |
+| State `uses:` inside per-repo override file | the override file's directory |
+
+All path fields accept absolute or `~`-prefixed paths.
+
+### Validation rules (load-time)
+
+The loader rejects the file (refuses startup) on any of the following. All errors accumulate before reporting.
+
+1. Edge target id not in `states` ∪ `terminals`.
+2. State has both `run:` and `uses:` (mutually exclusive).
+3. State has neither `run:` nor `uses:` and is not a terminal (`OrphanBody`).
+4. State id begins with `__` (reserved prefix).
+5. Cycle in the state graph where no state on the cycle declares `max_visits` and Pass 5 auto-injection has not run.
+6. Terminal `outcome` is empty.
+7. `start:` references a non-existent state, or references a terminal in a non-shorthand machine.
+8. State id does not match `[A-Za-z][A-Za-z0-9_]*` (must be safe for `ROKI_TASK_<ID>_*` env-var encoding).
+
+`roki workflow validate <FILE>` runs the same expansion + validation pipeline ahead of daemon restart.
+
+## Per-repo `WORKFLOW.yaml` (optional)
+
+Set via `admission.repos[].workflow: <path>`. The file replaces this repo's `rules:` / `cleanup:` / `on_failure:` lists entirely. Top-level `admission:` stays in the parent file; per-repo files must not declare `admission:`.
+
+Schema is identical to the top-level minus `admission:`.
 
 ## `workflow/*.md` schema
 
-Each file referenced from a `*.path` field has YAML frontmatter and a Liquid body.
+Each file referenced from a state's `uses:` field has YAML frontmatter and a Liquid body. Every state is command-shape: each visit spawns a fresh subprocess.
 
 | Key | Required | Type | Default | Meaning |
 |---|---|---|---|---|
-| `session` | no | enum (`session` / `command`) | `session` | Subprocess shape ([fr:04](../fr/04-phase-execution.md)) |
-| `cli` | no | string (cli line) | (falls back to `[default.ai.{session,command}].cli`) | Per-file override of the cli line |
-| `stall_seconds` | no | int | (falls back to `[default.ai.{session,command}].stall_seconds`) | Per-file stall window override |
+| `cli` | no | string (cli line) | falls back to `[default.ai].cli` | Per-file override of the cli line |
+| `stall_seconds` | no | int | falls back to `[default.ai].stall_seconds` | Per-file stall window override |
 
-Body is a Liquid template, rendered against the variables in [fr:01 §Inter-phase data flow](../fr/01-engine-model.md). The rendered text is delivered via stdin per [fr:04 §Input channels](../fr/04-phase-execution.md).
+Body is a Liquid template, rendered against the variables in [fr:01 §Inter-state data flow](../fr/01-engine-model.md). The rendered text is delivered via stdin per [fr:04 §Input channels](../fr/04-state-execution.md).
 
 ## Hot reload
 
-WORKFLOW.toml + workflow/*.md changes:
+`WORKFLOW.yaml` + `workflow/*.md` changes are restart-only in slice 8. A future slice introduces hot reload; that contract documents itself when it lands.
 
-| Outcome | Behavior |
-|---|---|
-| Validation passes on initial load | Apply policy; daemon proceeds to ready |
-| Validation fails on initial load | Refuse to start; log offending key path |
-| Validation passes on hot reload | Apply on next webhook; in-flight cycles keep their pre-reload policy until they terminate |
-| Validation fails on hot reload | Keep the previous policy + log the failure (daemon does not stop) |
-| Per-key invalidity inside a single entry | That entry is rejected as if it had not matched; other entries continue to apply |
-
-`roki.toml` is **not** hot-reloaded; changes require a daemon restart.
+`roki.toml` is restart-only.
 
 ## Removed legacy keys
 
@@ -172,6 +274,10 @@ The following pre-pivot keys are removed and **explicitly refused** by the loade
 | `extension.server.*` | `WORKFLOW.md` | HTTP API config moved to top-level `roki.toml [api]` (not in WORKFLOW.toml) |
 | `prompt_template_orchestrator` (named template block) | `WORKFLOW.md` | Orchestrator session removed |
 | `prompt_template_<phase>` (named template block) | `WORKFLOW.md` | Phase prompts now live in `workflow/*.md` and inline `prompt` / `cmd` strings |
+| `WORKFLOW.toml` (entire file) | `[paths].workflow` | Schema migrated to `WORKFLOW.yaml` (state-machine model). Loader refuses any path with `.toml` extension. |
+| `[[rule]]` / `[[cleanup]]` / `[[on_failure]]` (TOML array-of-tables form) | `WORKFLOW.toml` | YAML lists `rules:` / `cleanup:` / `on_failure:` |
+| `pre` / `run` / `post` (phase blocks) | `WORKFLOW.toml` | State machine replaces fixed phase loop. Use `tasks:` sugar or canonical `start:` / `states:` / `terminals:` |
+| `session:` frontmatter key | `workflow/*.md` | Session-shape phases removed. All states are command-shape. |
 
 The loader emits a startup error that names the offending key path. At hot reload the loader retains the previous policy and logs the failure; the daemon does not stop.
 
