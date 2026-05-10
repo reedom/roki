@@ -12,17 +12,19 @@ refs:
 
 # Reference: CLI Flags
 
-The single `roki` binary exposes one daemon subcommand and three observability subcommands. CLI flags override the corresponding values in `roki.toml` ([config.md](config.md)) where applicable. Each subcommand's `--help` lists every flag together with the configuration key it overrides.
+The single `roki` binary exposes one daemon subcommand, three observability subcommands, and one workflow utility subcommand. CLI flags override the corresponding values in `roki.toml` ([config.md](config.md)) where applicable. Each subcommand's `--help` lists every flag together with the configuration key it overrides.
 
 ## Subcommands
 
 | Subcommand | Purpose | FR |
 |---|---|---|
 | `roki run` | Launch the daemon — default dispatch (cleanup-first then rule) | [fr:12-daemon-lifecycle](../fr/12-daemon-lifecycle.md) |
-| `roki cleanup` | Launch the daemon — cleanup-only dispatch; `[[rule]]` is ignored | [fr:12-daemon-lifecycle](../fr/12-daemon-lifecycle.md) |
+| `roki cleanup` | Launch the daemon — cleanup-only dispatch; `rules:` is ignored | [fr:12-daemon-lifecycle](../fr/12-daemon-lifecycle.md) |
 | `roki log` | Read per-ticket subprocess captures | [fr:09-log-access-cli](../fr/09-log-access-cli.md) |
 | `roki events` | Read the structured event stream | [fr:09-log-access-cli](../fr/09-log-access-cli.md) |
 | `roki repo` | Resolve per-ticket repo path | [fr:09-log-access-cli](../fr/09-log-access-cli.md) |
+| `roki workflow validate` | Sugar-expand + validate a `WORKFLOW.yaml` file | [fr:02-configuration](../fr/02-configuration.md) |
+| `roki workflow graph` | Render any rule's state machine as ASCII or DOT | [fr:02-configuration](../fr/02-configuration.md) |
 
 ## `roki run`
 
@@ -49,7 +51,7 @@ Per-ticket subprocess capture reader. Defaults read `ROKI_TICKET_ID` / `ROKI_CYC
 | `--ticket <id>` | Linear issue id | Override default ticket. Required when invoked without env (and required alongside `--cycle` for cross-ticket reads). |
 | `--cycle <uuid>` | cycle UUID | Cross-cycle access within the same ticket. |
 | `--iter <n>` | int (absolute) or `-N` (relative) | Iteration index. Negative = N back from current. |
-| `--phase <phase>` | `pre` / `run` / `post` | Phase selector. |
+| `--state <state_id>` | string | State selector. Operator-defined ids declared in `WORKFLOW.yaml` (legacy `--phase` removed). |
 | `--stream <stream>` | `stdout` / `stderr` / `response` / `events` / `terminal` / `exit_code` | Stream selector. |
 | `--tail <N>` | int | Last N lines. |
 | `--bytes <N>` | int | Last N bytes. |
@@ -85,6 +87,35 @@ Per-ticket repo path resolver. Defaults read `ROKI_TICKET_ID` / `ROKI_REPO` from
 | `--worktree` | (boolean) | Require worktree. Exits 1 if not yet created. |
 
 Default returns the worktree path when one exists, else the ghq base path. Pre-run callers receive the ghq base — treat it as **read-only** unless `--worktree` confirmed worktree materialization ([fr:09-log-access-cli §`roki repo`](../fr/09-log-access-cli.md)).
+
+## `roki workflow validate`
+
+Pre-flight loader: parse + sugar-expand + validate. Intended for operator use ahead of daemon restart.
+
+| Flag | Argument | Purpose |
+|---|---|---|
+| (positional) | path to `WORKFLOW.yaml` | File to validate. |
+
+Exit codes:
+
+| Code | Meaning |
+|---|---|
+| `0` | All checks pass. Stdout/stderr silent. |
+| `1` | I/O or YAML parse error. |
+| `2` | Validation error. Stderr lists every accumulated `ValidationError` ([config.md §Validation rules](config.md)). |
+
+## `roki workflow graph`
+
+Render any rule's state machine as ASCII or DOT. Useful for operator review of complex `rules:` / `cleanup:` / `on_failure:` lists.
+
+| Flag | Argument | Purpose |
+|---|---|---|
+| (positional) | path to `WORKFLOW.yaml` | File to render. |
+| `--rule <selector>` | `rules[<n>]` / `cleanup[<n>]` / `on_failure[<n>]` | Render a single rule. Omit to render every state machine in the file. |
+| `--format <fmt>` | `ascii` (default) / `dot` | Output format. |
+| `--out <path>` | path | Write to file. Stdout when omitted. |
+
+Validation runs before rendering. A validation error exits non-zero without rendering.
 
 ## When adding a new flag
 

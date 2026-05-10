@@ -27,8 +27,9 @@ Attached to every event via tracing spans (when in scope).
 | `cycle.id` | string (UUID v4) | per-cycle event |
 | `cycle.kind` | enum (`rule` / `cleanup` / `failure`) | per-cycle event |
 | `cycle.trigger` | enum (`runtime` / `cold_start`) | per-cycle event |
-| `cycle.iter` | int (1-indexed) | per-iteration event |
-| `phase` | enum (`pre` / `run` / `post`) | per-phase event |
+| `cycle.iter` | int (1-indexed) | total state-visit count across the cycle |
+| `state_id` | string | per-state event |
+| `visit_n` | int (1-indexed) | per-state event — visit count for this state |
 
 `cycle.trigger = runtime` covers webhook delivery, polling fallback, and refresh nudge driven cycles; sub-source detail surfaces via separate event kinds (`webhook_received`, `polling_started`, `refresh_received`).
 
@@ -37,13 +38,13 @@ Attached to every event via tracing spans (when in scope).
 | Event | When | Carries |
 |---|---|---|
 | `cycle_started` | Cycle begins | `cycle.kind`, `cycle.trigger`, matched entry index |
-| `phase_started` | Phase subprocess spawned | `phase`, cli line (Liquid-rendered, secrets-redacted), env var keys, working directory |
-| `phase_completed` | Phase clean exit | `phase`, exit code, duration, terminal directive (when applicable), head/tail summary of stderr |
-| `phase_failed` | Phase failure | `phase`, `failure.kind` per [fr:01 §Failure handling](../fr/01-engine-model.md), `error_text`, head/tail summary of stderr |
-| `failure_unhandled` | A cycle failure with no `[[on_failure]]` match (`marker = none`) | `(ticket.id, cycle.id, cycle.kind, failure.kind, phase, error_text, marker)`. Daemon stays alive; the ticket task drops the cycle and waits for the next admission. Recursive failure-cycle failures and cleanup-time fs errors enter the escalation queue instead — see `escalation_added` ([fr:06 §Failure-handler cycle](../fr/06-failure-handling.md)) |
-| `cycle_completed` | Cycle ends with terminal directive | `cycle.kind`, terminal directive, iter count, duration |
+| `state_started` | State subprocess spawned | `state_id`, `visit_n`, cli line (Liquid-rendered, secrets-redacted), env var keys, working directory |
+| `state_completed` | State clean exit | `state_id`, `visit_n`, exit code, duration, sentinel directive (when present), head/tail summary of stderr |
+| `state_failed` | State failure | `state_id`, `visit_n`, `failure.kind` per [fr:01 §Failure handling](../fr/01-engine-model.md), `error_text`, head/tail summary of stderr |
+| `failure_unhandled` | A cycle failure with no `on_failure:` match (`marker = none`) | `(ticket.id, cycle.id, cycle.kind, failure.kind, state_id, visit_n, error_text, marker)`. Daemon stays alive; the ticket task drops the cycle and waits for the next admission. Recursive failure-cycle failures and cleanup-time fs errors enter the escalation queue instead — see `escalation_added` ([fr:06 §Failure-handler cycle](../fr/06-failure-handling.md)) |
+| `cycle_completed` | Cycle ends at a terminal | `cycle.kind`, `terminal_id`, `outcome` (terminal-declared or sentinel-overridden), iter count (total state visits), duration |
 | `cycle_aborted` | Cycle aborted (failure or admission lost mid-cycle) | `cycle.kind`, `failure.kind` (if applicable), iter count |
-| `escalation_added` | Escalation queue entry added | Daemon-stuck failure: failure-handler cycle that itself failed, cleanup-time fs error, or daemon-internal error with no cycle association. Carries `(ticket_id?, cycle_id?, failure.kind, phase?, error_text)`. Cycle-less entries omit `ticket_id`, `cycle_id`, `phase` ([fr:06 §Escalation queue](../fr/06-failure-handling.md)) |
+| `escalation_added` | Escalation queue entry added | Daemon-stuck failure: failure-handler cycle that itself failed, cleanup-time fs error, or daemon-internal error with no cycle association. Carries `(ticket_id?, cycle_id?, failure.kind, state_id?, error_text)`. Cycle-less entries omit `ticket_id`, `cycle_id`, `state_id` ([fr:06 §Escalation queue](../fr/06-failure-handling.md)) |
 
 ## Worktree / session lifecycle
 
@@ -58,7 +59,7 @@ Attached to every event via tracing spans (when in scope).
 
 | Event | When | Carries |
 |---|---|---|
-| `cold_start_began` | Daemon process start, after config validation | `roki_toml_path`, `workflow_toml_path` |
+| `cold_start_began` | Daemon process start, after config validation | `roki_toml_path`, `workflow_yaml_path` |
 | `cold_start_completed` | Cold-start enumeration + reconciliation finished | `enumerated`, `admitted`, `cycles_spawned`, `orphans_deleted`, `enum_partial`; on partial: `partial_reason`, `partial_error_text` |
 | `orphan_reconcile_skipped` | Orphan reconciliation skipped (e.g. enumeration partial) | `reason` |
 | `status_filter_dropped` | Cold-start `[linear].status` entry rejected pre-enumeration | `entry`, `reason` |
@@ -96,13 +97,13 @@ Attached to every event via tracing spans (when in scope).
 
 ## Per-iteration capture (Tier 2)
 
-Every phase subprocess writes byte-for-byte stdout / stderr to `<session_root>/<ticket-id>/cycle-<uuid>/iter-<n>/{phase}.{stdout,stderr}` plus parsed-derivative files. **Not part of the structured event log** ([fr:08 §Tier 2](../fr/08-observability-logs.md)) — the structured event log emits a head/tail summary on `phase_completed` / `phase_failed`. The full bytes are accessible via `roki log` ([fr:09](../fr/09-log-access-cli.md)).
+Every state subprocess writes byte-for-byte stdout / stderr to `<session_root>/<ticket-id>/cycle-<uuid>/visit-<n>/{state_id}.{stdout,stderr}` plus parsed-derivative files. **Not part of the structured event log** ([fr:08 §Tier 2](../fr/08-observability-logs.md)) — the structured event log emits a head/tail summary on `state_completed` / `state_failed`. The full bytes are accessible via `roki log` ([fr:09](../fr/09-log-access-cli.md)).
 
 ## What the daemon does **not** log
 
 - **HTTP API request / response bodies**: only metadata fields per `api_request`.
 - **Subprocess advisory output** (claude stream-json thinking turns, tool-use messages, etc.): captured to `<phase>.events.jsonl` (Tier 2) only; never parsed by the daemon.
-- **Operator-defined post-directive payload contents** (beyond the `directive` value): captured to `<phase>.response.json` (Tier 2). The structured event records the directive value but not arbitrary operator fields.
+- **Operator-defined sentinel payload contents** (beyond the `directive` value): captured to `<state_id>.directive.json` (Tier 2). The structured event records the directive value but not arbitrary operator fields.
 - **Secrets**: Linear API token, webhook secret, and any `roki.toml` secret values are redacted before emit.
 
 ## When adding a new event
