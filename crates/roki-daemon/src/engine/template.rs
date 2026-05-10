@@ -21,13 +21,17 @@ pub enum TemplateError {
 }
 
 /// A thin `ObjectView` wrapper around a populated `liquid::Object` that also
-/// exposes a fixed set of optional top-level keys (`pre`, `post`, `run`) as
-/// `NilSection` when those keys are absent from the underlying map.
+/// exposes a fixed set of optional top-level keys as `NilSection` when those
+/// keys are absent from the underlying map.
 ///
 /// Liquid 0.26 raises "Unknown variable" for any top-level key that is
-/// missing from globals. By always advertising these three keys we prevent
-/// that error; `NilSection` then absorbs any sub-key access and returns `Nil`
+/// missing from globals. By always advertising these keys we prevent that
+/// error; `NilSection` then absorbs any sub-key access and returns `Nil`
 /// (empty string) rather than raising "Unknown index".
+///
+/// Sentinel keys span both the legacy phase model (`pre`, `post`, `run`) and
+/// the slice-8 state-machine model (`state`, `failure`, `tasks`). The unified
+/// list lets one render path serve both contexts during the migration.
 struct LenientGlobals {
     inner: liquid::Object,
     /// Sentinel sections advertised as present when absent from `inner`.
@@ -39,7 +43,7 @@ impl LenientGlobals {
     fn new(inner: liquid::Object) -> Self {
         Self {
             inner,
-            sentinel_keys: &["pre", "post", "run"],
+            sentinel_keys: &["pre", "post", "run", "state", "failure", "tasks"],
             nil_section: NilSection::new(),
         }
     }
@@ -202,19 +206,35 @@ impl ObjectView for NilSection {
 /// Render `template` against `ctx`'s Liquid object. Missing variables expand
 /// to the Liquid default (empty string) per Shopify Liquid semantics.
 pub fn render_str(template: &str, ctx: &PhaseContext) -> Result<String, TemplateError> {
+    render_str_with_globals(template, &to_liquid_object(ctx))
+}
+
+/// Render `template` against an already-built Liquid object. Used by the
+/// slice-8 state runner to pass a `CycleContext`-derived globals map without
+/// going through `PhaseContext`.
+pub fn render_str_with_globals(
+    template: &str,
+    globals: &liquid::Object,
+) -> Result<String, TemplateError> {
     let parser = liquid::ParserBuilder::with_stdlib()
         .build()
         .map_err(|err| TemplateError::Parse(err.to_string()))?;
     let parsed = parser
         .parse(template)
         .map_err(|err| TemplateError::Parse(err.to_string()))?;
-    // LenientGlobals wraps the context object and exposes `pre`, `post`, `run`
-    // as NilSection when absent, preventing "Unknown variable" / "Unknown index"
-    // errors for optional sections that have not yet been populated.
-    let globals = LenientGlobals::new(to_liquid_object(ctx));
+    let lenient = LenientGlobals::new(globals.clone());
     parsed
-        .render(&globals)
+        .render(&lenient)
         .map_err(|err| TemplateError::Render(err.to_string()))
+}
+
+/// Evaluate a Liquid expression as a boolean. The expression is wrapped in
+/// `{% if <expr> %}1{% endif %}`; the render result is `"1"` for truthy and
+/// `""` for falsy. Used by the cycle driver for `state.if_cond` skip.
+pub fn eval_cond(expr: &str, globals: &liquid::Object) -> Result<bool, TemplateError> {
+    let wrapped = format!("{{% if {expr} %}}1{{% endif %}}");
+    let rendered = render_str_with_globals(&wrapped, globals)?;
+    Ok(rendered == "1")
 }
 
 #[cfg(test)]
@@ -327,6 +347,67 @@ mod tests {
             Err(TemplateError::Parse(_)) => {}
             other => panic!("expected Parse error, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn render_with_globals_renders_state_namespace() {
+        let mut obj = liquid::Object::new();
+        let mut state = liquid::Object::new();
+        state.insert("id".into(), liquid::model::Value::scalar("judge"));
+        state.insert("visit_n".into(), liquid::model::Value::scalar(2_i64));
+        obj.insert("state".into(), liquid::model::Value::Object(state));
+        let out = render_str_with_globals("state {{ state.id }} visit {{ state.visit_n }}", &obj)
+            .unwrap();
+        assert_eq!(out, "state judge visit 2");
+    }
+
+    #[test]
+    fn render_with_globals_treats_absent_state_as_nil() {
+        let obj = liquid::Object::new();
+        let out = render_str_with_globals("[{{ state.id }}]", &obj).unwrap();
+        assert_eq!(out, "[]");
+    }
+
+    #[test]
+    fn render_with_globals_treats_absent_failure_and_tasks_as_nil() {
+        let obj = liquid::Object::new();
+        let out = render_str_with_globals("[{{ failure.kind }}|{{ tasks.judge.exit_code }}]", &obj)
+            .unwrap();
+        assert_eq!(out, "[|]");
+    }
+
+    #[test]
+    fn eval_cond_truthy_string_returns_true() {
+        let mut obj = liquid::Object::new();
+        obj.insert("flag".into(), liquid::model::Value::scalar("yes"));
+        assert!(eval_cond("flag", &obj).unwrap());
+    }
+
+    #[test]
+    fn eval_cond_falsy_when_var_absent() {
+        let obj = liquid::Object::new();
+        // Liquid treats absent variables as nil → falsy in `{% if %}`.
+        assert!(!eval_cond("ghost", &obj).unwrap());
+    }
+
+    #[test]
+    fn eval_cond_compares_values() {
+        let mut obj = liquid::Object::new();
+        let mut tasks = liquid::Object::new();
+        let mut judge = liquid::Object::new();
+        judge.insert("exit_code".into(), liquid::model::Value::scalar(0_i64));
+        tasks.insert("judge".into(), liquid::model::Value::Object(judge));
+        obj.insert("tasks".into(), liquid::model::Value::Object(tasks));
+        assert!(eval_cond("tasks.judge.exit_code == 0", &obj).unwrap());
+        assert!(!eval_cond("tasks.judge.exit_code == 1", &obj).unwrap());
+    }
+
+    #[test]
+    fn eval_cond_parse_error_returns_template_error() {
+        let obj = liquid::Object::new();
+        // Unmatched braces inside the expression confuse the parser.
+        let result = eval_cond("flag and {%", &obj);
+        assert!(result.is_err());
     }
 
     #[test]

@@ -137,6 +137,100 @@ pub fn open_session_phase_files(
     })
 }
 
+/// Create `<session_root>/<sanitised_ticket>/cycle-<uuid>/visit-<n>/` per
+/// fr:04 §Capture and return its path. Used by the slice-8 state runner.
+#[allow(dead_code)]
+pub fn create_visit_dir(
+    session_root: &Path,
+    ticket_id: &str,
+    cycle_id: Uuid,
+    visit_n: u32,
+) -> Result<PathBuf, CaptureError> {
+    let safe_ticket = sanitize_ticket_id(ticket_id);
+    let path = session_root
+        .join(safe_ticket)
+        .join(format!("cycle-{cycle_id}"))
+        .join(format!("visit-{visit_n}"));
+    fs::create_dir_all(&path).map_err(|source| CaptureError::CreateDir {
+        path: path.clone(),
+        source,
+    })?;
+    Ok(path)
+}
+
+/// Open `<state_id>.stdout` and `<state_id>.stderr` inside `visit_dir`.
+#[allow(dead_code)]
+pub fn open_state_files(visit_dir: &Path, state_id: &str) -> Result<(File, File), CaptureError> {
+    let stdout_path = visit_dir.join(format!("{state_id}.stdout"));
+    let stderr_path = visit_dir.join(format!("{state_id}.stderr"));
+    let stdout = File::create(&stdout_path).map_err(|source| CaptureError::OpenFile {
+        path: stdout_path,
+        source,
+    })?;
+    let stderr = File::create(&stderr_path).map_err(|source| CaptureError::OpenFile {
+        path: stderr_path,
+        source,
+    })?;
+    Ok((stdout, stderr))
+}
+
+/// Write `<state_id>.exit_code` inside `visit_dir`.
+#[allow(dead_code)]
+pub fn write_state_exit_code(
+    visit_dir: &Path,
+    state_id: &str,
+    exit_code: i32,
+) -> Result<(), CaptureError> {
+    let path = visit_dir.join(format!("{state_id}.exit_code"));
+    let mut file = File::create(&path).map_err(|source| CaptureError::OpenFile {
+        path: path.clone(),
+        source,
+    })?;
+    let body = format!("{exit_code}\n");
+    file.write_all(body.as_bytes())
+        .map_err(|source| CaptureError::Write { path, source })
+}
+
+/// Write `<state_id>.directive.json` (pretty-printed) inside `visit_dir`.
+#[allow(dead_code)]
+pub fn write_state_directive_json(
+    visit_dir: &Path,
+    state_id: &str,
+    value: &serde_json::Value,
+) -> Result<(), CaptureError> {
+    let path = visit_dir.join(format!("{state_id}.directive.json"));
+    let pretty = serde_json::to_vec_pretty(value).map_err(|err| CaptureError::Write {
+        path: path.clone(),
+        source: std::io::Error::other(err),
+    })?;
+    let mut file = File::create(&path).map_err(|source| CaptureError::OpenFile {
+        path: path.clone(),
+        source,
+    })?;
+    file.write_all(&pretty)
+        .map_err(|source| CaptureError::Write { path, source })
+}
+
+/// Write `<state_id>.terminal.json` (pretty-printed) inside `visit_dir`.
+#[allow(dead_code)]
+pub fn write_state_terminal_json(
+    visit_dir: &Path,
+    state_id: &str,
+    value: &serde_json::Value,
+) -> Result<(), CaptureError> {
+    let path = visit_dir.join(format!("{state_id}.terminal.json"));
+    let pretty = serde_json::to_vec_pretty(value).map_err(|err| CaptureError::Write {
+        path: path.clone(),
+        source: std::io::Error::other(err),
+    })?;
+    let mut file = File::create(&path).map_err(|source| CaptureError::OpenFile {
+        path: path.clone(),
+        source,
+    })?;
+    file.write_all(&pretty)
+        .map_err(|source| CaptureError::Write { path, source })
+}
+
 /// Write `run.terminal.json` (pretty-printed) inside `iter_dir`. Used when
 /// the run-phase tee scanner spots a claude/codex `result` event mid-stream.
 #[allow(dead_code)]
