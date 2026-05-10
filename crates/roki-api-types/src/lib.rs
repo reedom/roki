@@ -9,4 +9,8 @@ pub mod healthz;
 pub mod refresh;
 pub mod tickets;
 
-// Re-exports land in Task 2 once the underlying types are defined.
+pub use escalations::ApiEscalation;
+pub use events::{ApiEvent, EventsPage};
+pub use healthz::Healthz;
+pub use refresh::RefreshAck;
+pub use tickets::{CycleKind, CycleSummary, CycleTrigger, TicketDetail, TicketSummary};
