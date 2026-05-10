@@ -44,13 +44,13 @@ Attached to every event via tracing spans (when in scope).
 | `failure_unhandled` | A cycle failure with no `on_failure:` match (`marker = none`) | `(ticket.id, cycle.id, cycle.kind, failure.kind, state_id, visit_n, error_text, marker)`. Daemon stays alive; the ticket task drops the cycle and waits for the next admission. Recursive failure-cycle failures and cleanup-time fs errors enter the escalation queue instead — see `escalation_added` ([fr:06 §Failure-handler cycle](../fr/06-failure-handling.md)) |
 | `cycle_completed` | Cycle ends at a terminal | `cycle.kind`, `terminal_id`, `outcome` (terminal-declared or sentinel-overridden), iter count (total state visits), duration |
 | `cycle_aborted` | Cycle aborted (failure or admission lost mid-cycle) | `cycle.kind`, `failure.kind` (if applicable), iter count |
-| `escalation_added` | Escalation queue entry added | Daemon-stuck failure: failure-handler cycle that itself failed, cleanup-time fs error, or daemon-internal error with no cycle association. Carries `(ticket_id?, cycle_id?, failure.kind, state_id?, error_text)`. Cycle-less entries omit `ticket_id`, `cycle_id`, `state_id` ([fr:06 §Escalation queue](../fr/06-failure-handling.md)) |
+| `escalation_added` | Escalation queue entry added | Daemon-stuck failure: failure-handler cycle that itself failed, cleanup-time fs error, or daemon-internal error with no cycle association. Carries `(ticket_id?, cycle_id?, failure.kind, state_id?, visit_n?, error_text)`. Cycle-less entries omit ticket / cycle / state context ([fr:06 §Escalation queue](../fr/06-failure-handling.md)) |
 
 ## Worktree / session lifecycle
 
 | Event | When | Carries |
 |---|---|---|
-| `worktree_created` | Worktree materialized on first `pre.directive: "run"` | `repo`, branch name, worktree path |
+| `worktree_created` | Worktree materialized when a state's sentinel directive resolves to `run` | `repo`, branch name, worktree path |
 | `worktree_deleted` | Worktree removed (cleanup-cycle completion / orphan reconcile). Admission-revoke does not delete worktrees | `repo`, branch name, `reason` ∈ `cleanup` / `orphan` |
 | `session_tempdir_created` | Session tempdir created at admission | `ticket.id`, path |
 | `session_tempdir_deleted` | Session tempdir removed | `ticket.id`, path, `reason` ∈ `cleanup` / `orphan` |
@@ -95,14 +95,14 @@ Attached to every event via tracing spans (when in scope).
 | `daemon_shutdown_completed` | Graceful exit | Cycles drained count |
 | `shutdown_window_exceeded` | Warn-severity event when one or more in-flight subprocesses failed to drain inside the shutdown window | Offending subprocess descriptors |
 
-## Per-iteration capture (Tier 2)
+## Per-visit capture (Tier 2)
 
-Every state subprocess writes byte-for-byte stdout / stderr to `<session_root>/<ticket-id>/cycle-<uuid>/visit-<n>/{state_id}.{stdout,stderr}` plus parsed-derivative files. **Not part of the structured event log** ([fr:08 §Tier 2](../fr/08-observability-logs.md)) — the structured event log emits a head/tail summary on `state_completed` / `state_failed`. The full bytes are accessible via `roki log` ([fr:09](../fr/09-log-access-cli.md)).
+Every state subprocess writes byte-for-byte stdout / stderr to `<session_root>/<ticket-id>/cycle-<uuid>/visit-<n>/<state_id>.{stdout,stderr}` plus parsed-derivative files. **Not part of the structured event log** ([fr:08 §Tier 2](../fr/08-observability-logs.md)) — the structured event log emits a head/tail summary on `state_completed` / `state_failed`. The full bytes are accessible via `roki log` ([fr:09](../fr/09-log-access-cli.md)).
 
 ## What the daemon does **not** log
 
 - **HTTP API request / response bodies**: only metadata fields per `api_request`.
-- **Subprocess advisory output** (claude stream-json thinking turns, tool-use messages, etc.): captured to `<phase>.events.jsonl` (Tier 2) only; never parsed by the daemon.
+- **Subprocess advisory output** (claude stream-json thinking turns, tool-use messages, etc.): captured to `<state_id>.events.jsonl` (Tier 2) only; never parsed by the daemon.
 - **Operator-defined sentinel payload contents** (beyond the `directive` value): captured to `<state_id>.directive.json` (Tier 2). The structured event records the directive value but not arbitrary operator fields.
 - **Secrets**: Linear API token, webhook secret, and any `roki.toml` secret values are redacted before emit.
 
@@ -116,4 +116,4 @@ Every state subprocess writes byte-for-byte stdout / stderr to `<session_root>/<
 
 - [cli.md](cli.md): flags that change logging behavior (`--log-level`)
 - [config.md](config.md): `[log]` block — destination / level / ring size
-- [artifacts.md](artifacts.md): per-iter capture artifacts that are not part of the structured log
+- [artifacts.md](artifacts.md): per-visit capture artifacts that are not part of the structured log

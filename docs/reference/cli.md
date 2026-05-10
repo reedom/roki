@@ -35,7 +35,7 @@ The single `roki` binary exposes one daemon subcommand, three observability subc
 
 ## `roki cleanup`
 
-Identical flags to `roki run`. Dispatch mode is `CleanupOnly`: `[[cleanup]]` entries are evaluated first-match; `[[rule]]` is ignored.
+Identical flags to `roki run`. Dispatch mode is `CleanupOnly`: `cleanup:` entries are evaluated first-match; `rules:` is ignored.
 
 | Flag | Argument | Overrides | Purpose |
 |---|---|---|---|
@@ -50,13 +50,13 @@ Per-ticket subprocess capture reader. Defaults read `ROKI_TICKET_ID` / `ROKI_CYC
 |---|---|---|
 | `--ticket <id>` | Linear issue id | Override default ticket. Required when invoked without env (and required alongside `--cycle` for cross-ticket reads). |
 | `--cycle <uuid>` | cycle UUID | Cross-cycle access within the same ticket. |
-| `--iter <n>` | int (absolute) or `-N` (relative) | Iteration index. Negative = N back from current. |
-| `--state <state_id>` | string | State selector. Operator-defined ids declared in `WORKFLOW.yaml` (legacy `--phase` removed). |
-| `--stream <stream>` | `stdout` / `stderr` / `response` / `events` / `terminal` / `exit_code` | Stream selector. |
+| `--iter <n>` | int (absolute) or `-N` (relative) | Visit selector (cycle-wide visit ordering). Negative = N visits back from current. |
+| `--state <state_id>` | string | State selector. Operator-defined ids declared in `WORKFLOW.yaml`. |
+| `--stream <stream>` | `stdout` / `stderr` / `directive` / `events` / `terminal` / `exit_code` | Stream selector. |
 | `--tail <N>` | int | Last N lines. |
 | `--bytes <N>` | int | Last N bytes. |
-| `--list-iters` | (boolean) | Enumerate iter ids and per-phase completion status. |
-| `--meta` | (boolean) | Cycle meta (kind, trigger, started_at, ended_at). |
+| `--list-visits` | (boolean) | Enumerate per-visit `(visit_n, state_id, exit_code)` tuples. |
+| `--meta` | (boolean) | Cycle meta (kind, trigger, started_at, ended_at, terminal_id, total visits). |
 
 ## `roki events`
 
