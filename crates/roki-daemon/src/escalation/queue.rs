@@ -7,7 +7,7 @@ use time::format_description::well_known::Rfc3339;
 use tokio::sync::Mutex;
 use uuid::Uuid;
 
-use crate::engine::outcome::{FailureKind, PhaseKind};
+use crate::engine::outcome::FailureKind;
 use crate::escalation::entry::EscalationEntry;
 use crate::escalation::ring::{PushOutcome, Ring};
 use crate::events::{Event, EventWriter, FailureMetaSer};
@@ -30,11 +30,16 @@ impl EscalationQueue {
         ticket_id: String,
         cycle_id: Uuid,
         failure_kind: FailureKind,
-        phase: PhaseKind,
+        state_id: String,
         error_text: String,
     ) {
-        let entry =
-            EscalationEntry::cycle(ticket_id.clone(), cycle_id, failure_kind, phase, error_text);
+        let entry = EscalationEntry::cycle(
+            ticket_id.clone(),
+            cycle_id,
+            failure_kind,
+            state_id,
+            error_text,
+        );
         self.insert_and_emit(entry).await;
     }
 
@@ -65,8 +70,8 @@ impl EscalationQueue {
             cycle_id: snapshot.cycle_id.map(|u| u.to_string()),
             failure: FailureMetaSer {
                 kind: snapshot.failure_kind.as_str().to_string(),
-                phase: snapshot.phase.map(|p| p.as_str().to_string()),
-                iter: 0,
+                state_id: snapshot.state_id.clone(),
+                visit_n: 0,
                 exit_code: None,
                 error_text: snapshot.error_text.clone(),
             },
@@ -107,7 +112,7 @@ mod tests {
             "T-1".into(),
             Uuid::new_v4(),
             FailureKind::FsPoison,
-            PhaseKind::Post,
+            "post".to_string(),
             "boom".into(),
         )
         .await;
@@ -125,7 +130,7 @@ mod tests {
         let snap = q.snapshot().await;
         assert!(snap[0].ticket_id.is_none());
         assert!(snap[0].cycle_id.is_none());
-        assert!(snap[0].phase.is_none());
+        assert!(snap[0].state_id.is_none());
     }
 
     #[tokio::test]
@@ -136,7 +141,7 @@ mod tests {
             "T-1".into(),
             Uuid::new_v4(),
             FailureKind::FsPoison,
-            PhaseKind::Post,
+            "post".to_string(),
             "x".into(),
         )
         .await;
@@ -144,7 +149,7 @@ mod tests {
             "T-2".into(),
             Uuid::new_v4(),
             FailureKind::FsPoison,
-            PhaseKind::Post,
+            "post".to_string(),
             "y".into(),
         )
         .await;
@@ -165,7 +170,7 @@ mod tests {
                 format!("T-{i}"),
                 Uuid::new_v4(),
                 FailureKind::FsPoison,
-                PhaseKind::Post,
+                "post".to_string(),
                 format!("e{i}"),
             )
             .await;

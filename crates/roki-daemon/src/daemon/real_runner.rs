@@ -201,7 +201,7 @@ async fn handle_failed_cycle(
                 admitted.ticket.id.clone(),
                 meta.failed_cycle_id,
                 meta.kind,
-                meta.phase,
+                meta.phase.as_str().to_string(),
                 meta.error_text.clone(),
             )
             .await;
@@ -251,7 +251,7 @@ async fn handle_failed_cycle(
                     admitted.ticket.id.clone(),
                     handler_meta.failed_cycle_id,
                     handler_meta.kind,
-                    handler_meta.phase,
+                    handler_meta.phase.as_str().to_string(),
                     handler_meta.error_text.clone(),
                 )
                 .await;
@@ -261,15 +261,15 @@ async fn handle_failed_cycle(
             tracing::error!(?infra, "handler cycle infra error");
             // fr:06 trigger 1: handler cycle hit an infra error. Synthesize
             // FsPoison for the failure_kind because infra errors do not carry
-            // a phase-level FailureKind. Tag with the original failed cycle's
-            // id and phase to keep the operator-visible scope identical to
+            // a state-level FailureKind. Tag with the original failed cycle's
+            // id and state to keep the operator-visible scope identical to
             // the user's [[on_failure]] match.
             escalation
                 .push_cycle(
                     admitted.ticket.id.clone(),
                     meta.failed_cycle_id,
                     FailureKind::FsPoison,
-                    meta.phase,
+                    meta.phase.as_str().to_string(),
                     format!("handler cycle infra error: {infra}"),
                 )
                 .await;

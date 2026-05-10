@@ -56,9 +56,17 @@ pub enum SessionTempdirDeleteReason {
 #[derive(Debug, Serialize)]
 pub struct FailureMetaSer {
     pub kind: String,
+    /// Slice 8: state-machine identifier of the state that emitted the
+    /// failure. `None` for daemon-internal failures with no associated
+    /// state (e.g. orphan-reconcile fs error). Replaces the legacy `phase`
+    /// field; the legacy phase names ("pre", "run", "post") flow through
+    /// here via `from_meta` until the legacy cycle driver is removed.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub phase: Option<String>,
-    pub iter: u32,
+    pub state_id: Option<String>,
+    /// Slice 8: per-state visit counter. Defaults to 0 for legacy callers
+    /// that produced a `FailureMeta` without a visit notion; `from_meta`
+    /// maps the legacy `iter` field through.
+    pub visit_n: u32,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub exit_code: Option<i32>,
     pub error_text: String,
@@ -68,9 +76,20 @@ impl FailureMetaSer {
     pub fn from_meta(meta: &crate::engine::outcome::FailureMeta) -> Self {
         Self {
             kind: meta.kind.as_str().to_string(),
-            phase: Some(meta.phase.as_str().to_string()),
-            iter: meta.iter,
+            state_id: Some(meta.phase.as_str().to_string()),
+            visit_n: meta.iter,
             exit_code: meta.exit_code,
+            error_text: meta.error_text.clone(),
+        }
+    }
+
+    /// Slice 8: build from the canonical state-machine failure metadata.
+    pub fn from_state_metadata(meta: &crate::engine::cycle_state::FailureMetadata) -> Self {
+        Self {
+            kind: meta.kind.as_str().to_string(),
+            state_id: Some(meta.state_id.clone()),
+            visit_n: meta.visit_n,
+            exit_code: None,
             error_text: meta.error_text.clone(),
         }
     }
@@ -397,8 +416,8 @@ mod tests {
             cycle_kind: "rule".into(),
             failure: FailureMetaSer {
                 kind: "stall".into(),
-                phase: Some("run".into()),
-                iter: 2,
+                state_id: Some("run".into()),
+                visit_n: 2,
                 exit_code: None,
                 error_text: "stalled".into(),
             },
@@ -408,6 +427,9 @@ mod tests {
         assert!(s.contains("\"event\":\"failure_unhandled\""));
         assert!(s.contains("\"marker\":\"none\""));
         assert!(s.contains("\"kind\":\"stall\""));
+        assert!(s.contains("\"state_id\":\"run\""));
+        assert!(s.contains("\"visit_n\":2"));
+        assert!(!s.contains("\"phase\""), "phase field must be gone");
         assert!(!s.contains("exit_code"), "None exit_code should be omitted");
     }
 
@@ -419,8 +441,8 @@ mod tests {
             cycle_id: Some("00000000-0000-0000-0000-000000000001".to_string()),
             failure: FailureMetaSer {
                 kind: "fs_poison".to_string(),
-                phase: Some("post".to_string()),
-                iter: 0,
+                state_id: Some("post".to_string()),
+                visit_n: 0,
                 exit_code: None,
                 error_text: "cleanup remove_dir_all failed".to_string(),
             },
@@ -443,8 +465,8 @@ mod tests {
             cycle_id: None,
             failure: FailureMetaSer {
                 kind: "fs_poison".to_string(),
-                phase: None,
-                iter: 0,
+                state_id: None,
+                visit_n: 0,
                 exit_code: None,
                 error_text: "orphan reconcile failed".to_string(),
             },
@@ -456,6 +478,7 @@ mod tests {
             "ticket_id must be elided: {s}"
         );
         assert!(!s.contains("\"cycle_id\""), "cycle_id must be elided: {s}");
-        assert!(!s.contains("\"phase\""), "phase must be elided: {s}");
+        assert!(!s.contains("\"state_id\""), "state_id must be elided: {s}");
+        assert!(!s.contains("\"phase\""), "phase must never appear: {s}");
     }
 }
