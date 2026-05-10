@@ -35,6 +35,8 @@ Per workspace, specified with `--config <path>` ([cli.md](cli.md)). Not hot-relo
 | `[linear.webhook].port` | yes | port | — | Refuses startup on bind failure | [fr:03 §Webhook intake](../fr/03-linear-admission.md) |
 | `[api].port` | no | port | — (unset → API disabled) | When unset, the observability HTTP server does not start. When set, refuses startup on bind failure | [fr:10 §Server gating and bind](../fr/10-http-api.md) |
 | `[api].bind` | no | bind addr | `127.0.0.1` | Non-loopback emits a warn log noting the absence of authentication | [fr:10 §Server gating and bind](../fr/10-http-api.md) |
+| `[api].ticket_events_window` | no | int | `50` | `1..=500` | [fr:10 §GET /api/tickets/{id}](../fr/10-http-api.md) |
+| `[api].cycle_list_window` | no | int | `50` | `1..=500` | [fr:10 §GET /api/tickets/{id}/cycles](../fr/10-http-api.md) |
 | `[default.ai].cli` | no | string (cli line) | — (no default) | Operator-authored; daemon does not parse the cli line. Liquid-rendered at state launch. Not validated at startup; first failure surfaces as `process_crash` on first state that uses it | [fr:04 §Subprocess shape](../fr/04-state-execution.md) |
 | `[default.ai].stall_seconds` | no | int | `300` | min `1` | [fr:04 §Stall detection](../fr/04-state-execution.md) |
 | `[engine].max_iterations` | no | int | `10` | min `1` | [fr:01 §Recursion bound](../fr/01-engine-model.md) |
