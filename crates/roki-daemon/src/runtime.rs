@@ -115,6 +115,30 @@ pub(crate) async fn run_inner(config_path: &Path, mode: DispatchMode) -> Result<
         daemon_events.clone(),
     );
 
+    // 4c. Dependency check (fr:12 §Capabilities). Runs after the event
+    //     writer is open so the failure surfaces in `_daemon.events.jsonl`
+    //     in addition to the tracing line.
+    if let Err(missing) = crate::daemon::deps::check() {
+        for m in &missing {
+            let mut w = daemon_events.lock().await;
+            let _ = w.emit(&Event::DaemonDependencyMissing {
+                ts: now_rfc3339(),
+                binary: m.binary.into(),
+                remediation: m.hint.into(),
+            });
+            drop(w);
+            tracing::error!(
+                event_name = "daemon_dependency_missing",
+                binary = m.binary,
+                hint = m.hint,
+                "missing required CLI dependency"
+            );
+        }
+        return Err(SkeletonError::MissingDependency {
+            binaries: missing.iter().map(|m| m.binary.to_string()).collect(),
+        });
+    }
+
     // 5. Emit DaemonStarted.
     {
         let mut w = daemon_events.lock().await;
@@ -487,4 +511,7 @@ mod tests {
             other => panic!("expected SkeletonError::Config(MissingFile), got {other:?}"),
         }
     }
+
+    // Dep-missing path is covered end-to-end by
+    // `tests/e2e/daemon_dependency_missing_smoke.rs` (Task 8).
 }
