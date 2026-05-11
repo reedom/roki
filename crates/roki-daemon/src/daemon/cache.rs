@@ -120,6 +120,17 @@ impl DiffCache {
         self.inner.read().await.get(ticket_id).cloned()
     }
 
+    /// Clone every cache entry plus its ticket id. Used by the observability
+    /// API projection layer (fr:10) to render `/tickets`.
+    pub async fn snapshot_all(&self) -> Vec<(String, CacheEntry)> {
+        self.inner
+            .read()
+            .await
+            .iter()
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect()
+    }
+
     pub async fn set_cycle_id(&self, ticket_id: &str, id: Uuid) {
         if let Some(e) = self.inner.write().await.get_mut(ticket_id) {
             e.cycle_id = Some(id);
