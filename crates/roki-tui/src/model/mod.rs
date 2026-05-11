@@ -59,7 +59,10 @@ pub enum PollSource {
     Events,
     Escalations,
     TicketDetail,
+    Cycles,
+    Tail,
     Refresh,
+    Input,
 }
 
 pub struct AppModel {

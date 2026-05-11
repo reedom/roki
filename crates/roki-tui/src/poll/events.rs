@@ -29,12 +29,16 @@ pub async fn run(client: Arc<ApiClient>, cadence_seconds: u32, tx: mpsc::Sender<
                 }
             }
             Err(e) => {
-                let _ = tx
+                if tx
                     .send(Update::PollError {
                         source: PollSource::Events,
                         message: e.to_string(),
                     })
-                    .await;
+                    .await
+                    .is_err()
+                {
+                    return;
+                }
             }
         }
     }
