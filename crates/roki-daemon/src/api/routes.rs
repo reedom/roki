@@ -32,10 +32,10 @@ pub fn build_router(state: Arc<ApiState>) -> Router {
     Router::new()
         .route("/api/healthz", get(healthz))
         .route("/api/tickets", get(list_tickets))
-        .route("/api/tickets/{id}", get(ticket_detail))
-        .route("/api/tickets/{id}/cycles", get(list_cycles))
+        .route("/api/tickets/:id", get(ticket_detail))
+        .route("/api/tickets/:id/cycles", get(list_cycles))
         .route(
-            "/api/tickets/{id}/cycles/{cycle_id}/visits/{n}/{state_id}/{stream}",
+            "/api/tickets/:id/cycles/:cycle_id/visits/:n/:state_id/:stream",
             get(visit_stream),
         )
         .route("/api/events", get(events_page))

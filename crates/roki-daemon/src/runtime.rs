@@ -284,6 +284,12 @@ pub(crate) async fn run_inner(config_path: &Path, mode: DispatchMode) -> Result<
     //      than aborting the daemon — the operator can still observe
     //      cycles via the file-backed event log.
     if cfg.api.port.is_some() {
+        if cfg.api.bind != "127.0.0.1" && cfg.api.bind != "::1" {
+            tracing::warn!(
+                bind = %cfg.api.bind,
+                "API binding to non-loopback address; no authentication"
+            );
+        }
         let api_state = Arc::new(crate::api::ApiState {
             cache: cache.clone(),
             workflow: workflow.clone(),
