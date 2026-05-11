@@ -296,6 +296,7 @@ impl StateRunner for RealStateRunner {
         let exit_status = match child.wait().await {
             Ok(s) => s,
             Err(err) => {
+                self.inflight.clear(&self.ticket_id).await;
                 return StateOutcome::Failure {
                     kind: FailureKind::ProcessCrash,
                     error_text: format!("wait: {err}"),
