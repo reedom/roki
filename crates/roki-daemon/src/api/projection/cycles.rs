@@ -91,6 +91,7 @@ fn parse(d: OnDisk) -> CycleSummary {
         ended_at: d.ended_at,
         terminal_id: d.terminal_id,
         failure_kind: d.failure_kind,
+        last_state_id: None,
         total_visits: d.total_visits,
     }
 }

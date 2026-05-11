@@ -55,6 +55,8 @@ pub struct CycleSummary {
     pub terminal_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub failure_kind: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_state_id: Option<String>,
     pub total_visits: u32,
 }
 
@@ -87,5 +89,41 @@ mod tests {
         let json = serde_json::to_string(&s).unwrap();
         let parsed: TicketSummary = serde_json::from_str(&json).unwrap();
         assert_eq!(s, parsed);
+    }
+
+    #[test]
+    fn cycle_summary_last_state_id_round_trips() {
+        let now = OffsetDateTime::from_unix_timestamp(1_700_000_000).unwrap();
+        let with_value = CycleSummary {
+            cycle_id: Uuid::nil(),
+            kind: CycleKind::Rule,
+            trigger: CycleTrigger::Runtime,
+            started_at: now,
+            ended_at: None,
+            terminal_id: None,
+            failure_kind: None,
+            last_state_id: Some("post0".into()),
+            total_visits: 3,
+        };
+        let json = serde_json::to_string(&with_value).unwrap();
+        assert!(json.contains("\"last_state_id\":\"post0\""));
+        let parsed: CycleSummary = serde_json::from_str(&json).unwrap();
+        assert_eq!(with_value, parsed);
+
+        let without_value = CycleSummary {
+            cycle_id: Uuid::nil(),
+            kind: CycleKind::Rule,
+            trigger: CycleTrigger::Runtime,
+            started_at: now,
+            ended_at: None,
+            terminal_id: None,
+            failure_kind: None,
+            last_state_id: None,
+            total_visits: 0,
+        };
+        let json = serde_json::to_string(&without_value).unwrap();
+        assert!(!json.contains("last_state_id"));
+        let parsed: CycleSummary = serde_json::from_str(&json).unwrap();
+        assert_eq!(without_value, parsed);
     }
 }
