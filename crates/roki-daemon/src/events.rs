@@ -369,6 +369,16 @@ impl EventWriter {
         serde_json::to_writer(&mut self.file, event).map_err(std::io::Error::other)?;
         self.file.write_all(b"\n")?;
         self.file.flush()?;
+        // Mirror the event into the process-wide ring (when installed by
+        // `runtime::run_inner`) so the observability HTTP API surfaces every
+        // file-backed event without threading an `Arc<EventRing>` through
+        // every emit-site owner (dispatcher, ticket task, runner, cleanup,
+        // escalation queue, orphan reconciler). Tests that never call
+        // `observability::set_global_ring` see `global_ring()` return `None`
+        // and pay only the OnceLock load.
+        if let Some(ring) = crate::observability::global_ring() {
+            EventTap { ring }.record(event);
+        }
         Ok(())
     }
 

@@ -92,6 +92,11 @@ pub(crate) async fn run_inner(config_path: &Path, mode: DispatchMode) -> Result<
     // Defaults to 1000 when `log.ring_size` is absent in roki.toml.
     let ring_capacity = cfg.log.ring_size.unwrap_or(1000) as usize;
     let ring = crate::observability::EventRing::new(ring_capacity);
+    // Install the ring globally so every `EventWriter::emit` mirrors into it
+    // (see events.rs::EventWriter::emit). Must happen before the daemon-scoped
+    // writer is opened and the first `daemon_started` event is emitted so the
+    // boot sequence shows up in `/api/events`.
+    crate::observability::set_global_ring(ring.clone());
 
     // 4. Open the daemon-scoped event log.
     let daemon_events_writer =

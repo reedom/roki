@@ -249,8 +249,24 @@ async fn list_escalations(State(state): State<Arc<ApiState>>) -> impl IntoRespon
     (StatusCode::OK, json_headers(), Json(body))
 }
 
-async fn refresh(State(state): State<Arc<ApiState>>) -> impl IntoResponse {
+async fn refresh(
+    State(state): State<Arc<ApiState>>,
+    axum::extract::ConnectInfo(client_addr): axum::extract::ConnectInfo<std::net::SocketAddr>,
+) -> impl IntoResponse {
     let ack: RefreshAck = state.nudge.nudge().await;
+    // Mirror the ack as a structured event so operators can correlate
+    // `/api/refresh` calls with downstream `polling_tick` entries. The
+    // file-backed writer routes through the global ring (see
+    // `EventWriter::emit`), so this surfaces in `/api/events` too.
+    {
+        let mut w = state.daemon_writer.lock().await;
+        let _ = w.emit(&crate::events::Event::RefreshNudgeAcknowledged {
+            ts: crate::events::now_rfc3339(),
+            coalesced: ack.coalesced,
+            backoff_active: ack.backoff_active,
+            client_addr: client_addr.to_string(),
+        });
+    }
     (StatusCode::ACCEPTED, json_headers(), Json(ack))
 }
 
