@@ -9,8 +9,10 @@ refs:
     - fr:06-failure-handling
     - fr:10-http-api
     - fr:09-log-access-cli
+    - ref:log-events
   modules:
     - crates/roki-tui/src/palette.rs
+    - crates/roki-tui/src/startup_log.rs
 ---
 
 # FR 11: roki-tui
