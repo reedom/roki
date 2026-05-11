@@ -14,11 +14,11 @@ use clap::{Parser, Subcommand};
 
 use crate::runtime;
 
+pub mod events;
 pub mod log;
-pub mod workflow;
-// pub mod events;  // wired in Task 10
 pub mod repo;
 pub mod shared;
+pub mod workflow;
 
 /// roki — Linear-driven coding-agent daemon.
 #[derive(Debug, Parser)]
@@ -52,6 +52,8 @@ pub enum CliCommand {
     Repo(repo::RepoArgs),
     /// Read per-ticket subprocess captures (fr:09 §`roki log`).
     Log(log::LogArgs),
+    /// Read the structured event stream (live HTTP or offline file).
+    Events(events::EventsArgs),
 }
 
 /// Parse argv from the process and dispatch the matched subcommand.
@@ -70,6 +72,7 @@ pub async fn run() -> ExitCode {
         CliCommand::Workflow { cmd } => workflow::dispatch(cmd),
         CliCommand::Repo(args) => repo::run(args).await,
         CliCommand::Log(args) => log::run(args).await,
+        CliCommand::Events(args) => events::run(args).await,
     }
 }
 
