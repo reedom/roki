@@ -70,6 +70,14 @@ Canonical event names emitted on the structured pipeline. `roki events --kind <n
 | `worktree_created` / `worktree_deleted` | Worktree lifecycle |
 | `cold_start_began` / `cold_start_completed` | Daemon startup reconciliation |
 
+#### Slice 9 additions
+
+- `api_request` — per-request structured log line. Fields: `method`, `path`, `query_keys` (key names only, values redacted), `status`, `duration_ms`, `client_addr`, `correlation_id`.
+- `api_bind_failed` — observability API bind failure at startup. Fields: `bind`, `port`, `error`. Daemon continues without the API server.
+- `api_disabled` — `[api].port` not set at startup; no API server spawned.
+- `polling_tick` — Linear polling tracker fired once. Fields: `trigger` (`outage` | `nudge`), `status_set`, `enumerated`, `admitted`.
+- `refresh_nudge_acknowledged` — `POST /api/refresh` acked by the tracker. Fields: `coalesced`, `backoff_active`, `client_addr`.
+
 Subprocess advisory output (claude `stream-json` thinking turns, etc.) is not parsed by the daemon. It is captured as raw stdout / stderr in Tier 2 and accessible via `roki log`.
 
 ### What the daemon does **not** capture
