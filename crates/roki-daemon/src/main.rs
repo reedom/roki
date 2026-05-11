@@ -1,6 +1,7 @@
 use std::process::ExitCode;
 
 mod admission;
+pub mod api;
 mod capture;
 mod cli;
 mod config;

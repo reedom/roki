@@ -190,6 +190,7 @@ anyhow = "1"
 async-trait = "0.1"
 axum = "0.7"
 clap = { version = "4", features = ["derive"] }
+html-escape = "0.2"
 liquid = "0.26"
 nix = { version = "0.29", features = ["signal"] }
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
@@ -205,6 +206,7 @@ toml = "0.8"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["fmt"] }
 uuid = { version = "1", features = ["v4"] }
+vte = "0.13"
 
 [dev-dependencies]
 tempfile = "3"
