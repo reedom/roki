@@ -83,14 +83,18 @@ pub enum LogError {
     Io(#[from] std::io::Error),
     #[error("roki log: {0}")]
     Other(String),
+    /// User-input error (missing required arg, mutually-exclusive misuse).
+    /// Mapped to exit code 2.
+    #[error("roki log: {0}")]
+    Usage(String),
 }
 
 pub async fn run(args: LogArgs) -> ExitCode {
     if args.follow {
         match run_follow_streaming(args).await {
             Ok(()) => ExitCode::SUCCESS,
-            Err(LogError::CrossTicket) => {
-                eprintln!("{}", LogError::CrossTicket);
+            Err(err @ (LogError::CrossTicket | LogError::Usage(_))) => {
+                eprintln!("{err}");
                 ExitCode::from(2)
             }
             Err(err) => {
@@ -105,8 +109,8 @@ pub async fn run(args: LogArgs) -> ExitCode {
                 let _ = std::io::stdout().write_all(&bytes);
                 ExitCode::SUCCESS
             }
-            Err(LogError::CrossTicket) => {
-                eprintln!("{}", LogError::CrossTicket);
+            Err(err @ (LogError::CrossTicket | LogError::Usage(_))) => {
+                eprintln!("{err}");
                 ExitCode::from(2)
             }
             Err(err) => {
@@ -137,15 +141,15 @@ async fn follow_file_for_test(args: LogArgs) -> Result<Vec<u8>, LogError> {
     let cycle_dir = session_root.join(&ticket).join(format!("cycle-{cycle}"));
     let stream = args
         .stream
-        .ok_or_else(|| LogError::Other("roki log: --stream required for --follow".into()))?;
+        .ok_or_else(|| LogError::Usage("--stream required for --follow".into()))?;
     if !matches!(stream, Stream::Stdout | Stream::Stderr) {
-        return Err(LogError::Other(
-            "roki log: --follow supported only with --stream stdout|stderr".into(),
+        return Err(LogError::Usage(
+            "--follow supported only with --stream stdout|stderr".into(),
         ));
     }
     let state = args
         .state
-        .ok_or_else(|| LogError::Other("roki log: --state required for --follow".into()))?;
+        .ok_or_else(|| LogError::Usage("--state required for --follow".into()))?;
     let visit = resolve_iter(&cycle_dir, args.iter).map_err(|e| LogError::Other(format!("{e}")))?;
     let file = visit_dir(&cycle_dir, visit).join(format!("{state}{}", stream.file_suffix()));
     if !file.exists() {
@@ -207,15 +211,15 @@ async fn run_follow_streaming(args: LogArgs) -> Result<(), LogError> {
     let cycle_dir = session_root.join(&ticket).join(format!("cycle-{cycle}"));
     let stream = args
         .stream
-        .ok_or_else(|| LogError::Other("roki log: --stream required for --follow".into()))?;
+        .ok_or_else(|| LogError::Usage("--stream required for --follow".into()))?;
     if !matches!(stream, Stream::Stdout | Stream::Stderr) {
-        return Err(LogError::Other(
-            "roki log: --follow supported only with --stream stdout|stderr".into(),
+        return Err(LogError::Usage(
+            "--follow supported only with --stream stdout|stderr".into(),
         ));
     }
     let state = args
         .state
-        .ok_or_else(|| LogError::Other("roki log: --state required for --follow".into()))?;
+        .ok_or_else(|| LogError::Usage("--state required for --follow".into()))?;
     let visit = resolve_iter(&cycle_dir, args.iter).map_err(|e| LogError::Other(format!("{e}")))?;
     let file = visit_dir(&cycle_dir, visit).join(format!("{state}{}", stream.file_suffix()));
     if !file.exists() {
@@ -272,11 +276,11 @@ async fn run_capture_inner(args: LogArgs) -> Result<Vec<u8>, LogError> {
     }
     // Stream read.
     let stream = args.stream.ok_or_else(|| {
-        LogError::Other("roki log: --stream required (or pass --list-visits / --meta)".into())
+        LogError::Usage("--stream required (or pass --list-visits / --meta)".into())
     })?;
     let state = args
         .state
-        .ok_or_else(|| LogError::Other("roki log: --state required for stream reads".into()))?;
+        .ok_or_else(|| LogError::Usage("--state required for stream reads".into()))?;
     let visit = resolve_iter(&cycle_dir, args.iter).map_err(|e| LogError::Other(format!("{e}")))?;
     let file = visit_dir(&cycle_dir, visit).join(format!("{state}{}", stream.file_suffix()));
     if !file.exists() {

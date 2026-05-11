@@ -969,6 +969,24 @@ mod tests {
     }
 
     #[test]
+    fn build_env_emits_roki_api_url_when_api_namespace_present() {
+        let state = run_state_with_cmd("true");
+        let mut ctx = empty_ctx();
+        ctx.globals.insert(
+            "api".into(),
+            serde_json::json!({ "url": "http://127.0.0.1:7777" }),
+        );
+        ctx.bump_visit("s");
+        let path = std::path::PathBuf::from("/tmp/dir/s.1.json");
+        let env = build_env(&state, &ctx, 1, &path);
+        let pair = env
+            .iter()
+            .find(|(k, _)| k == "ROKI_API_URL")
+            .expect("ROKI_API_URL present");
+        assert_eq!(pair.1, "http://127.0.0.1:7777");
+    }
+
+    #[test]
     fn build_env_flattens_task_captures() {
         let state = run_state_with_cmd("true");
         let mut ctx = empty_ctx();

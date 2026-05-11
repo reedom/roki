@@ -344,12 +344,13 @@ fn build_cycle_context(
         } else {
             cfg.api.bind.clone()
         };
-        if let Some(serde_json::Value::Object(m)) = globals.get_mut("config") {
-            m.insert(
-                "api_url".into(),
-                serde_json::Value::String(format!("http://{bind}:{port}")),
-            );
-        }
+        // Land as namespace `api.url` so the scalar flattener emits
+        // ROKI_API_URL (the documented env name) rather than
+        // ROKI_CONFIG_API_URL.
+        globals.insert(
+            "api".into(),
+            serde_json::json!({ "url": format!("http://{bind}:{port}") }),
+        );
     }
     if let Some(meta) = failure {
         globals.insert(
@@ -479,10 +480,10 @@ mod tests {
         );
         let url = cx
             .globals
-            .get("config")
-            .and_then(|v| v.get("api_url"))
+            .get("api")
+            .and_then(|v| v.get("url"))
             .and_then(|v| v.as_str())
-            .expect("api_url present");
+            .expect("api.url present");
         assert_eq!(url, "http://127.0.0.1:7777");
     }
 
@@ -499,11 +500,6 @@ mod tests {
             CycleTrigger::Runtime,
             None,
         );
-        let cfg_obj = cx
-            .globals
-            .get("config")
-            .and_then(|v| v.as_object())
-            .unwrap();
-        assert!(cfg_obj.get("api_url").is_none());
+        assert!(cx.globals.get("api").is_none());
     }
 }

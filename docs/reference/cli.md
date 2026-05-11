@@ -32,7 +32,6 @@ The single `roki` binary exposes one daemon subcommand, three observability subc
 | Flag | Argument | Overrides | Purpose |
 |---|---|---|---|
 | `--config <path>` | path | (none) | Path to `roki.toml`. Documented default applies when omitted. |
-| `--log-level <level>` | one of `error` / `warn` / `info` / `debug` / `trace` | `[log].level` | Structured log level. |
 
 ## `roki cleanup`
 
@@ -41,11 +40,10 @@ Identical flags to `roki run`. Dispatch mode is `CleanupOnly`: `cleanup:` entrie
 | Flag | Argument | Overrides | Purpose |
 |---|---|---|---|
 | `--config <path>` | path | (none) | Path to `roki.toml`. Documented default applies when omitted. |
-| `--log-level <level>` | one of `error` / `warn` / `info` / `debug` / `trace` | `[log].level` | Structured log level. |
 
 ## `roki log`
 
-Per-ticket subprocess capture reader. Defaults read `ROKI_TICKET_ID` / `ROKI_CYCLE_ID` / `ROKI_CONFIG_SESSION_ROOT` / `ROKI_CONFIG_PATH` from the environment when invoked inside a state subprocess. External callers pass `--config <PATH>` so `paths.session_root` resolves.
+Per-ticket subprocess capture reader. Defaults read `ROKI_TICKET_ID` / `ROKI_CYCLE_ID` / `ROKI_CONFIG_SESSION_ROOT` from the environment when invoked inside a state subprocess. External callers pass `--config <PATH>` so `paths.session_root` resolves.
 
 ```
 roki log [OPTIONS]
@@ -65,7 +63,7 @@ roki log --meta [OPTIONS]
 | `--list-visits` | flag | — | Emit per-visit JSON Lines `{visit_n, state_id, exit_code}`. |
 | `--meta` | flag | — | Emit `cycle.json` content verbatim. |
 | `--follow` | flag | — | Continue tailing `stdout` / `stderr` after EOF; polls every 200 ms (hidden `--follow-poll-ms` for tests). |
-| `--config <PATH>` | path | `$ROKI_CONFIG_PATH` or absent | Required when `$ROKI_CONFIG_SESSION_ROOT` is unset. |
+| `--config <PATH>` | path | (none) | Required when `$ROKI_CONFIG_SESSION_ROOT` is unset. |
 
 ## `roki events`
 
@@ -82,11 +80,11 @@ roki events --offline --file <PATH> [filters...]
 | `--tail` | unset | Continuous polling loop until SIGINT. |
 | `--since <S>` | unset | `<u64>` → server-side cursor. RFC3339 timestamp → client-side filter after server `since=0`. |
 | `--kind <K>` | unset | Filter on `event` (one value; AND with the rest). |
-| `--ticket <T>` | `$ROKI_TICKET_ID` (online) | Forwarded to `/api/events?ticket=`. |
-| `--cycle <U>` | `$ROKI_CYCLE_ID` (online) | Forwarded to `/api/events?cycle=`. |
+| `--ticket <T>` | unset | Forwarded to `/api/events?ticket=`. |
+| `--cycle <U>` | unset | Forwarded to `/api/events?cycle=`. |
 | `--format` | `json` | `human` = one-line text reformatter. |
 | `--api <URL>` | `$ROKI_API_URL` else `--config`-derived else error | HTTP base URL. |
-| `--config <PATH>` | `$ROKI_CONFIG_PATH` | Used to synthesize `--api` from `[api]` when env unset. |
+| `--config <PATH>` | (none) | Used to synthesize `--api` from `[api]` when env unset. |
 | `--offline --file <P>` | — | Read JSONL file directly. Ignores `--api` / `--config`. |
 | `--cadence-ms <N>` | 1000 | `--tail` polling cadence. Hidden flag (testability). |
 
@@ -106,7 +104,7 @@ roki repo [<ghq>] [--ticket <id>] [--worktree] [--auto-clone] [--config <PATH>]
 | `--ticket <id>` | `$ROKI_TICKET_ID` | Needed only when worktree resolution is attempted. |
 | `--worktree` | flag | Require worktree (exit 1 if absent). |
 | `--auto-clone` | flag | Run `ghq get <ghq>` before resolving the ghq base. |
-| `--config <PATH>` | `$ROKI_CONFIG_PATH` | Currently optional (the ghq + worktree lookup is config-free). |
+| `--config <PATH>` | (none) | Currently optional (the ghq + worktree lookup is config-free). |
 
 ## `roki workflow validate`
 

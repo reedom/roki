@@ -7,11 +7,11 @@ fn bin() -> &'static str {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn online_dump_against_wiremock() {
-    use wiremock::matchers::{method, path};
+    use wiremock::matchers::{method, path, query_param};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     let server = MockServer::start().await;
-    let body = serde_json::json!({
+    let page1 = serde_json::json!({
         "events": [{
             "seq": 1,
             "ts": "2026-05-11T10:00:00Z",
@@ -22,9 +22,17 @@ async fn online_dump_against_wiremock() {
         "gap": false,
         "next_since": 2,
     });
+    let page2 = serde_json::json!({"events": [], "gap": false});
     Mock::given(method("GET"))
         .and(path("/api/events"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(&body))
+        .and(query_param("since", "0"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(&page1))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/api/events"))
+        .and(query_param("since", "2"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(&page2))
         .mount(&server)
         .await;
 
