@@ -18,7 +18,7 @@ pub mod workflow;
 // pub mod log;     // wired in Task 7
 // pub mod events;  // wired in Task 10
 // pub mod repo;    // wired in Task 6
-// pub mod shared;  // wired in Task 3
+pub mod shared;
 
 /// roki — Linear-driven coding-agent daemon.
 #[derive(Debug, Parser)]
