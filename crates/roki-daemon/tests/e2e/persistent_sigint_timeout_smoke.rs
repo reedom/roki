@@ -204,6 +204,32 @@ session_root = "{session_root}"
         ticket_ids.contains(&"ENG-100"),
         "offenders[].ticket_id must contain \"ENG-100\"; got: {exceeded_event}"
     );
+
+    // SIGKILL must have fired during drain — the offender pid is dead by
+    // the time the daemon process exits.
+    let pids: Vec<i64> = offenders
+        .iter()
+        .filter_map(|o| o["pid"].as_u64())
+        .map(|p| p as i64)
+        .collect();
+    assert!(
+        !pids.is_empty(),
+        "offenders[].pid must be present: {exceeded_event}"
+    );
+    for pid in pids {
+        let pid_t = nix::unistd::Pid::from_raw(pid as i32);
+        let mut alive = nix::sys::signal::kill(pid_t, None).is_ok();
+        if alive {
+            for _ in 0..40 {
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+                if nix::sys::signal::kill(pid_t, None).is_err() {
+                    alive = false;
+                    break;
+                }
+            }
+        }
+        assert!(!alive, "offender pid {pid} should be dead at daemon exit");
+    }
 }
 
 async fn wait_for_listener(addr: SocketAddr) {
