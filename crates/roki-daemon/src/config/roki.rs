@@ -38,6 +38,7 @@ pub struct RokiConfig {
     pub paths: PathsSection,
     pub log: LogSection,
     pub escalation: EscalationSection,
+    pub api: ApiSection,
 }
 
 /// `[linear]` section. Only `token` is required at the skeleton level.
@@ -46,13 +47,51 @@ pub struct RokiConfig {
 #[derive(Clone)]
 pub struct LinearSection {
     pub token: String,
+    pub polling: LinearPollingSection,
 }
 
 impl fmt::Debug for LinearSection {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("LinearSection")
             .field("token", &"***")
+            .field("polling", &self.polling)
             .finish()
+    }
+}
+
+/// `[linear.polling]` section. Cadence for the polling fallback path.
+#[derive(Clone, Debug, PartialEq)]
+pub struct LinearPollingSection {
+    pub cadence_seconds: u32,
+}
+
+impl Default for LinearPollingSection {
+    fn default() -> Self {
+        Self {
+            cadence_seconds: 300,
+        }
+    }
+}
+
+/// `[api]` section. Observability HTTP API server.
+///
+/// `port` absent disables the API server (server gating).
+#[derive(Clone, Debug, PartialEq)]
+pub struct ApiSection {
+    pub bind: String,
+    pub port: Option<u16>,
+    pub ticket_events_window: u32,
+    pub cycle_list_window: u32,
+}
+
+impl Default for ApiSection {
+    fn default() -> Self {
+        Self {
+            bind: "127.0.0.1".into(),
+            port: None,
+            ticket_events_window: 50,
+            cycle_list_window: 50,
+        }
     }
 }
 
@@ -137,6 +176,7 @@ impl fmt::Debug for RokiConfig {
             .field("paths", &self.paths)
             .field("log", &self.log)
             .field("escalation", &self.escalation)
+            .field("api", &self.api)
             .finish()
     }
 }
@@ -191,6 +231,7 @@ impl RokiConfig {
         Self {
             linear: LinearSection {
                 token: "x".to_string(),
+                polling: LinearPollingSection::default(),
             },
             linear_webhook: LinearWebhookSection {
                 bind: "127.0.0.1".to_string(),
@@ -208,6 +249,7 @@ impl RokiConfig {
             },
             log: LogSection::default(),
             escalation: EscalationSection::default(),
+            api: ApiSection::default(),
         }
     }
 }
@@ -224,6 +266,7 @@ struct RawRokiConfig {
     paths: Option<RawPaths>,
     log: Option<RawLog>,
     escalation: Option<RawEscalation>,
+    api: Option<RawApi>,
 }
 
 #[derive(Default, Deserialize)]
@@ -231,6 +274,22 @@ struct RawRokiConfig {
 struct RawLinear {
     token: Option<String>,
     webhook: Option<RawLinearWebhook>,
+    polling: Option<RawLinearPolling>,
+}
+
+#[derive(Default, Deserialize)]
+#[serde(default)]
+struct RawLinearPolling {
+    cadence_seconds: Option<u32>,
+}
+
+#[derive(Default, Deserialize)]
+#[serde(default)]
+struct RawApi {
+    bind: Option<String>,
+    port: Option<u16>,
+    ticket_events_window: Option<u32>,
+    cycle_list_window: Option<u32>,
 }
 
 #[derive(Default, Deserialize)]
@@ -293,8 +352,10 @@ impl RawRokiConfig {
         let raw_paths = self.paths.unwrap_or_default();
         let raw_log = self.log.unwrap_or_default();
 
+        let polling = parse_linear_polling(path, raw_linear.polling.unwrap_or_default())?;
         let linear = LinearSection {
             token: required_string(path, "linear.token", raw_linear.token)?,
+            polling,
         };
 
         let linear_webhook = LinearWebhookSection {
@@ -331,6 +392,8 @@ impl RawRokiConfig {
         let raw_escalation = self.escalation.unwrap_or_default();
         let escalation = parse_escalation(path, raw_escalation)?;
 
+        let api = parse_api(path, self.api.unwrap_or_default())?;
+
         Ok(RokiConfig {
             linear,
             linear_webhook,
@@ -339,6 +402,7 @@ impl RawRokiConfig {
             paths: paths_section,
             log,
             escalation,
+            api,
         })
     }
 }
@@ -386,6 +450,69 @@ fn parse_engine(path: &Path, raw: RawEngine) -> Result<EngineSection, RokiConfig
     Ok(EngineSection {
         max_iterations,
         shutdown_window_seconds,
+    })
+}
+
+fn parse_linear_polling(
+    path: &Path,
+    raw: RawLinearPolling,
+) -> Result<LinearPollingSection, RokiConfigError> {
+    // Codes are baked into `expected:` so error messages reproducibly
+    // contain a stable token (e.g., `invalid_cadence`) that callers can
+    // pattern-match without parsing free-form text.
+    let cadence_seconds = match raw.cadence_seconds {
+        None => 300,
+        Some(n) if n >= 60 => n,
+        Some(_) => {
+            return Err(RokiConfigError::TypeMismatch {
+                path: path.to_path_buf(),
+                key: "linear.polling.cadence_seconds".to_string(),
+                expected: "u32 >= 60 (invalid_cadence)",
+            });
+        }
+    };
+    Ok(LinearPollingSection { cadence_seconds })
+}
+
+fn parse_api(path: &Path, raw: RawApi) -> Result<ApiSection, RokiConfigError> {
+    let bind = raw.bind.unwrap_or_else(|| "127.0.0.1".to_string());
+    if bind.parse::<std::net::IpAddr>().is_err() {
+        return Err(RokiConfigError::TypeMismatch {
+            path: path.to_path_buf(),
+            key: "api.bind".to_string(),
+            expected: "IP address (invalid_bind_addr)",
+        });
+    }
+    if let Some(p) = raw.port {
+        if p == 0 {
+            return Err(RokiConfigError::TypeMismatch {
+                path: path.to_path_buf(),
+                key: "api.port".to_string(),
+                expected: "u16 >= 1 (invalid_port_zero)",
+            });
+        }
+    }
+    let ticket_events_window = raw.ticket_events_window.unwrap_or(50);
+    if !(1..=500).contains(&ticket_events_window) {
+        return Err(RokiConfigError::TypeMismatch {
+            path: path.to_path_buf(),
+            key: "api.ticket_events_window".to_string(),
+            expected: "u32 in 1..=500 (invalid_window)",
+        });
+    }
+    let cycle_list_window = raw.cycle_list_window.unwrap_or(50);
+    if !(1..=500).contains(&cycle_list_window) {
+        return Err(RokiConfigError::TypeMismatch {
+            path: path.to_path_buf(),
+            key: "api.cycle_list_window".to_string(),
+            expected: "u32 in 1..=500 (invalid_window)",
+        });
+    }
+    Ok(ApiSection {
+        bind,
+        port: raw.port,
+        ticket_events_window,
+        cycle_list_window,
     })
 }
 
@@ -443,6 +570,81 @@ mod tests {
         let mut f = std::fs::File::create(&path).expect("create toml");
         f.write_all(body.as_bytes()).expect("write toml");
         path
+    }
+
+    fn parse_test(toml: &str) -> Result<RokiConfig, RokiConfigError> {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("roki.toml");
+        std::fs::write(&p, toml).unwrap();
+        RokiConfig::load(&p)
+    }
+
+    #[test]
+    fn api_section_defaults_when_block_absent() {
+        let toml = r#"
+[linear]
+token = "x"
+[linear.webhook]
+bind = "127.0.0.1"
+port = 1
+[default.ai]
+cli = "echo"
+[engine]
+[paths]
+workflow = "WORKFLOW.yaml"
+session_root = "/tmp"
+[log]
+"#;
+        let cfg: RokiConfig = parse_test(toml).unwrap();
+        assert_eq!(cfg.api.bind, "127.0.0.1");
+        assert!(cfg.api.port.is_none());
+        assert_eq!(cfg.api.ticket_events_window, 50);
+        assert_eq!(cfg.api.cycle_list_window, 50);
+        assert_eq!(cfg.linear.polling.cadence_seconds, 300);
+    }
+
+    #[test]
+    fn api_section_validates_port_zero() {
+        let toml = r#"
+[linear]
+token = "x"
+[linear.webhook]
+bind = "127.0.0.1"
+port = 1
+[default.ai]
+cli = "echo"
+[engine]
+[paths]
+workflow = "WORKFLOW.yaml"
+session_root = "/tmp"
+[log]
+[api]
+port = 0
+"#;
+        let err = parse_test(toml).unwrap_err();
+        assert!(err.to_string().contains("invalid_port_zero"));
+    }
+
+    #[test]
+    fn polling_cadence_min_60() {
+        let toml = r#"
+[linear]
+token = "x"
+[linear.polling]
+cadence_seconds = 30
+[linear.webhook]
+bind = "127.0.0.1"
+port = 1
+[default.ai]
+cli = "echo"
+[engine]
+[paths]
+workflow = "WORKFLOW.yaml"
+session_root = "/tmp"
+[log]
+"#;
+        let err = parse_test(toml).unwrap_err();
+        assert!(err.to_string().contains("invalid_cadence"));
     }
 
     #[test]

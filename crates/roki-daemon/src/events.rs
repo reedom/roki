@@ -7,8 +7,11 @@
 use std::fs::{File, OpenOptions};
 use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use serde::Serialize;
+
+use crate::observability::EventRing;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -134,6 +137,16 @@ pub enum Event {
         cycle_id: Option<String>,
         reason: WorktreeDeleteReason,
     },
+    ApiRequest {
+        ts: String,
+        method: String,
+        path: String,
+        query_keys: Vec<String>,
+        status: u16,
+        duration_ms: u32,
+        client_addr: String,
+        correlation_id: String,
+    },
     DaemonStarted {
         ts: String,
         config_path: String,
@@ -201,6 +214,121 @@ pub enum Event {
         path: String,
         reason: SessionTempdirDeleteReason,
     },
+    ApiBindFailed {
+        ts: String,
+        bind: String,
+        port: u16,
+        error: String,
+    },
+    ApiDisabled {
+        ts: String,
+    },
+    PollingTick {
+        ts: String,
+        trigger: String,
+        status_set: Vec<String>,
+        enumerated: u32,
+        admitted: u32,
+    },
+    RefreshNudgeAcknowledged {
+        ts: String,
+        coalesced: bool,
+        backoff_active: bool,
+        client_addr: String,
+    },
+}
+
+impl Event {
+    /// Canonical lowercase discriminator matching the `#[serde(tag = "event",
+    /// rename_all = "snake_case")]` mapping. Read on the ring fast path so
+    /// the caller does not need to re-serialize the event just to learn its
+    /// kind.
+    pub fn kind_str(&self) -> &'static str {
+        match self {
+            Event::CycleCompleted { .. } => "cycle_completed",
+            Event::FailureUnhandled { .. } => "failure_unhandled",
+            Event::EscalationAdded { .. } => "escalation_added",
+            Event::WorktreeDeleteRequested { .. } => "worktree_delete_requested",
+            Event::ApiRequest { .. } => "api_request",
+            Event::DaemonStarted { .. } => "daemon_started",
+            Event::DaemonReady { .. } => "daemon_ready",
+            Event::DaemonShutdownBegan { .. } => "daemon_shutdown_began",
+            Event::DaemonShutdownCompleted { .. } => "daemon_shutdown_completed",
+            Event::ShutdownWindowExceeded { .. } => "shutdown_window_exceeded",
+            Event::WebhookSkipped { .. } => "webhook_skipped",
+            Event::ColdStartBegan { .. } => "cold_start_began",
+            Event::ColdStartCompleted { .. } => "cold_start_completed",
+            Event::OrphanReconcileSkipped { .. } => "orphan_reconcile_skipped",
+            Event::StatusFilterDropped { .. } => "status_filter_dropped",
+            Event::LinearBackoffApplied { .. } => "linear_backoff_applied",
+            Event::SessionTempdirDeleted { .. } => "session_tempdir_deleted",
+            Event::ApiBindFailed { .. } => "api_bind_failed",
+            Event::ApiDisabled { .. } => "api_disabled",
+            Event::PollingTick { .. } => "polling_tick",
+            Event::RefreshNudgeAcknowledged { .. } => "refresh_nudge_acknowledged",
+        }
+    }
+
+    /// Extract the routing keys `(ticket_id, cycle_id)` carried by this event
+    /// variant. Borrows `ticket_id` from `self` so the caller doesn't allocate;
+    /// `cycle_id` is parsed once here — the daemon constructs every cycle_id
+    /// from `Uuid::to_string()`, so a parse failure is a programmer bug and we
+    /// panic rather than silently drop the routing key.
+    pub fn routing_keys(&self) -> (Option<&str>, Option<uuid::Uuid>) {
+        fn parse_cycle(s: &str) -> uuid::Uuid {
+            uuid::Uuid::parse_str(s).expect("event cycle_id must be a valid Uuid")
+        }
+        match self {
+            Event::CycleCompleted { cycle_id, .. } => (None, Some(parse_cycle(cycle_id))),
+            Event::FailureUnhandled { cycle_id, .. } => (None, Some(parse_cycle(cycle_id))),
+            Event::EscalationAdded {
+                ticket_id,
+                cycle_id,
+                ..
+            } => (ticket_id.as_deref(), cycle_id.as_deref().map(parse_cycle)),
+            Event::WorktreeDeleteRequested {
+                ticket_id,
+                cycle_id,
+                ..
+            } => (
+                Some(ticket_id.as_str()),
+                cycle_id.as_deref().map(parse_cycle),
+            ),
+            Event::ApiRequest { .. } => (None, None),
+            Event::DaemonStarted { .. } => (None, None),
+            Event::DaemonReady { .. } => (None, None),
+            Event::DaemonShutdownBegan { .. } => (None, None),
+            Event::DaemonShutdownCompleted { .. } => (None, None),
+            Event::ShutdownWindowExceeded { .. } => (None, None),
+            Event::WebhookSkipped { ticket_id, .. } => (Some(ticket_id.as_str()), None),
+            Event::ColdStartBegan { .. } => (None, None),
+            Event::ColdStartCompleted { .. } => (None, None),
+            Event::OrphanReconcileSkipped { .. } => (None, None),
+            Event::StatusFilterDropped { .. } => (None, None),
+            Event::LinearBackoffApplied { .. } => (None, None),
+            Event::SessionTempdirDeleted { ticket_id, .. } => (Some(ticket_id.as_str()), None),
+            Event::ApiBindFailed { .. } => (None, None),
+            Event::ApiDisabled { .. } => (None, None),
+            Event::PollingTick { .. } => (None, None),
+            Event::RefreshNudgeAcknowledged { .. } => (None, None),
+        }
+    }
+}
+
+/// Thin adapter that records an `Event` into the in-memory `EventRing` after
+/// extracting the routing keys + JSON payload. Lives next to the file-backed
+/// `EventWriter` so emit sites can route a single event through both sinks.
+pub struct EventTap {
+    pub ring: Arc<EventRing>,
+}
+
+impl EventTap {
+    pub fn record(&self, event: &Event) {
+        let kind = event.kind_str();
+        let (ticket, cycle) = event.routing_keys();
+        let payload = serde_json::to_value(event).expect("Event derives Serialize infallibly");
+        self.ring.record(kind, ticket, cycle, payload);
+    }
 }
 
 pub fn events_path(session_root: &Path, ticket_id: &str) -> PathBuf {
@@ -243,6 +371,16 @@ impl EventWriter {
         serde_json::to_writer(&mut self.file, event).map_err(std::io::Error::other)?;
         self.file.write_all(b"\n")?;
         self.file.flush()?;
+        // Mirror the event into the process-wide ring (when installed by
+        // `runtime::run_inner`) so the observability HTTP API surfaces every
+        // file-backed event without threading an `Arc<EventRing>` through
+        // every emit-site owner (dispatcher, ticket task, runner, cleanup,
+        // escalation queue, orphan reconciler). Tests that never call
+        // `observability::set_global_ring` see `global_ring()` return `None`
+        // and pay only the OnceLock load.
+        if let Some(ring) = crate::observability::global_ring() {
+            EventTap { ring }.record(event);
+        }
         Ok(())
     }
 
@@ -464,6 +602,81 @@ mod tests {
             "{s}"
         );
         assert!(s.contains("\"kind\":\"fs_poison\""), "{s}");
+    }
+
+    #[test]
+    fn tap_records_event_into_ring() {
+        let ring = EventRing::new(10);
+        let tap = EventTap { ring: ring.clone() };
+        tap.record(&Event::CycleCompleted {
+            ts: "2026-05-11T00:00:00Z".into(),
+            cycle_id: uuid::Uuid::nil().to_string(),
+            cycle_kind: "rule".into(),
+            iters: 1,
+            terminal_id: Some("__success__".into()),
+            outcome: Some("success".into()),
+        });
+        let p = ring.page(None, None, None, None, 10);
+        assert_eq!(p.events.len(), 1);
+        assert_eq!(p.events[0].event, "cycle_completed");
+    }
+
+    #[test]
+    fn kind_str_matches_serde_tag_for_one_variant_per_emit_site() {
+        let cases = vec![
+            Event::CycleCompleted {
+                ts: "x".into(),
+                cycle_id: uuid::Uuid::nil().to_string(),
+                cycle_kind: "rule".into(),
+                iters: 0,
+                terminal_id: None,
+                outcome: None,
+            },
+            Event::FailureUnhandled {
+                ts: "x".into(),
+                cycle_id: uuid::Uuid::nil().to_string(),
+                cycle_kind: "rule".into(),
+                failure: FailureMetaSer {
+                    kind: "stall".into(),
+                    state_id: None,
+                    visit_n: 0,
+                    exit_code: None,
+                    error_text: "x".into(),
+                },
+                marker: FailureMarker::None,
+            },
+            Event::EscalationAdded {
+                ts: "x".into(),
+                ticket_id: Some("T".into()),
+                cycle_id: None,
+                failure: FailureMetaSer {
+                    kind: "fs_poison".into(),
+                    state_id: None,
+                    visit_n: 0,
+                    exit_code: None,
+                    error_text: "x".into(),
+                },
+            },
+            Event::WorktreeDeleteRequested {
+                ts: "x".into(),
+                ticket_id: "T".into(),
+                cycle_id: None,
+                reason: WorktreeDeleteReason::CleanupTerminal,
+            },
+        ];
+        for e in cases {
+            let json = serde_json::to_value(&e).unwrap();
+            let tag = json
+                .get("event")
+                .and_then(|v| v.as_str())
+                .expect("serde tag");
+            assert_eq!(
+                e.kind_str(),
+                tag,
+                "kind_str must match serde tag for {:?}",
+                e
+            );
+        }
     }
 
     #[test]

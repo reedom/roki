@@ -88,6 +88,16 @@ pub(crate) async fn run_inner(config_path: &Path, mode: DispatchMode) -> Result<
     let cfg = Arc::new(cfg);
     let workflow = Arc::new(workflow);
 
+    // fr:08 Tier 3 in-memory ring buffer for the observability HTTP API.
+    // Defaults to 1000 when `log.ring_size` is absent in roki.toml.
+    let ring_capacity = cfg.log.ring_size.unwrap_or(1000) as usize;
+    let ring = crate::observability::EventRing::new(ring_capacity);
+    // Install the ring globally so every `EventWriter::emit` mirrors into it
+    // (see events.rs::EventWriter::emit). Must happen before the daemon-scoped
+    // writer is opened and the first `daemon_started` event is emitted so the
+    // boot sequence shows up in `/api/events`.
+    crate::observability::set_global_ring(ring.clone());
+
     // 4. Open the daemon-scoped event log.
     let daemon_events_writer =
         EventWriter::open(&cfg.paths.session_root, "_daemon").map_err(|e| {
@@ -124,9 +134,14 @@ pub(crate) async fn run_inner(config_path: &Path, mode: DispatchMode) -> Result<
     })?;
     let addr = SocketAddr::from((bind_ip, cfg.linear_webhook.port));
 
+    // fr:09 polling-fallback outage signal: bumped on every successful
+    // webhook 202; PollingTracker reads this to gate outage ticks.
+    let last_webhook_success = Arc::new(std::sync::atomic::AtomicI64::new(0));
+
     let (tx, rx) = mpsc::channel(64);
     let state = WebhookState {
         sender: Arc::new(tx),
+        last_webhook_success: Some(last_webhook_success.clone()),
     };
 
     let shutdown = ShutdownToken::new();
@@ -232,6 +247,81 @@ pub(crate) async fn run_inner(config_path: &Path, mode: DispatchMode) -> Result<
             webhook_bind_addr: addr.to_string(),
         });
     }
+
+    // 11a. Spawn PollingTracker (fr:09 §2.4). Outage gating reads
+    //      `last_webhook_success`; nudges arrive via the API's
+    //      `POST /admin/refresh-now` handler. The on-tick callback emits
+    //      `polling_tick`; the full enumerate-on-tick wiring is deferred
+    //      to slice 10 per design spec §9 Documented divergence.
+    let polling_cadence = std::time::Duration::from_secs(cfg.linear.polling.cadence_seconds as u64);
+    let daemon_writer_for_tick = daemon_events.clone();
+    let nudge_handle = crate::linear::polling::PollingTracker::spawn(
+        polling_cadence,
+        rate_limit.clone(),
+        last_webhook_success.clone(),
+        Box::new(move |reason| {
+            let writer = daemon_writer_for_tick.clone();
+            let trigger = match reason {
+                crate::linear::polling::TickReason::Outage => "outage",
+                crate::linear::polling::TickReason::Nudge => "nudge",
+            };
+            tokio::spawn(async move {
+                let mut w = writer.lock().await;
+                let _ = w.emit(&Event::PollingTick {
+                    ts: now_rfc3339(),
+                    trigger: trigger.into(),
+                    status_set: Vec::new(),
+                    enumerated: 0,
+                    admitted: 0,
+                });
+            });
+        }),
+    );
+
+    // 11b. Spawn the observability HTTP API (fr:10) when `[api].port`
+    //      is set. Bind failure is logged as `api_bind_failed` rather
+    //      than aborting the daemon — the operator can still observe
+    //      cycles via the file-backed event log.
+    if cfg.api.port.is_some() {
+        if cfg.api.bind != "127.0.0.1" && cfg.api.bind != "::1" {
+            tracing::warn!(
+                bind = %cfg.api.bind,
+                "API binding to non-loopback address; no authentication"
+            );
+        }
+        let api_state = Arc::new(crate::api::ApiState {
+            cache: cache.clone(),
+            workflow: workflow.clone(),
+            cfg: cfg.clone(),
+            escalation: escalation.clone(),
+            ring: ring.clone(),
+            nudge: nudge_handle.clone(),
+            request_counter: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            boot_time: time::OffsetDateTime::now_utc(),
+            daemon_writer: daemon_events.clone(),
+        });
+        let writer_for_log = daemon_events.clone();
+        tokio::spawn(async move {
+            match crate::api::serve(api_state).await {
+                Ok(()) => {}
+                Err(crate::api::ApiBindError::Bind { bind, port, source }) => {
+                    let mut w = writer_for_log.lock().await;
+                    let _ = w.emit(&Event::ApiBindFailed {
+                        ts: now_rfc3339(),
+                        bind,
+                        port,
+                        error: source.to_string(),
+                    });
+                }
+            }
+        });
+    } else {
+        let mut w = daemon_events.lock().await;
+        let _ = w.emit(&Event::ApiDisabled { ts: now_rfc3339() });
+    }
+    // Keep the nudge handle alive until daemon shutdown; without this the
+    // PollingTracker's `recv` returns None and the task exits.
+    let _nudge_handle_keepalive = nudge_handle;
 
     // 12. Spawn dispatcher drain.
     let dispatcher_drain = dispatcher.clone();

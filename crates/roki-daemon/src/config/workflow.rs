@@ -193,6 +193,29 @@ impl WorkflowConfig {
         }
     }
 
+    /// Union of admission.repos[].ghq across top-level + every per-repo override.
+    ///
+    /// `AdmissionRepo` only carries the first entry's ghq today; for slice 9
+    /// the API's healthz handler needs every configured repo, so this helper
+    /// approximates the full set by returning the top-level entry plus every
+    /// override key (which corresponds to an `[[admission.repos]]` declaring
+    /// `workflow:`). Future slices may extend `AdmissionSection` to carry
+    /// every entry; this is the current best-effort.
+    pub fn admission_repos(&self) -> Vec<String> {
+        let mut out: Vec<String> = self
+            .repo
+            .as_ref()
+            .into_iter()
+            .map(|r| r.ghq.clone())
+            .collect();
+        for ghq in self.repo_overrides.keys() {
+            out.push(ghq.clone());
+        }
+        out.sort();
+        out.dedup();
+        out
+    }
+
     /// Produce a [`WorkflowFile`] view of this config. Used by code paths that
     /// already speak canonical types (e.g. the `roki workflow validate` CLI).
     pub fn to_workflow_file(&self) -> WorkflowFile {

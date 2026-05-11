@@ -1,6 +1,7 @@
 use std::process::ExitCode;
 
 mod admission;
+pub mod api;
 mod capture;
 mod cli;
 mod config;
@@ -10,6 +11,7 @@ pub mod error;
 mod escalation;
 pub mod events;
 mod linear;
+pub mod observability;
 mod rule;
 mod runtime;
 mod workflow;

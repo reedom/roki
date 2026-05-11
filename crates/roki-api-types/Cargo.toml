@@ -1,0 +1,17 @@
+[package]
+name = "roki-api-types"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Stable wire-schema types for the roki observability HTTP API"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+time = { version = "0.3", features = ["formatting", "parsing", "serde-well-known"] }
+uuid = { version = "1", features = ["serde", "v4"] }
+
+[lints]
+workspace = true

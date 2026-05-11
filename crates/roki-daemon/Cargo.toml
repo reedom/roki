@@ -180,6 +180,46 @@ path = "tests/e2e/per_repo_override_smoke.rs"
 name = "workflow_graph_cli_smoke"
 path = "tests/e2e/workflow_graph_cli_smoke.rs"
 
+[[test]]
+name = "api_disabled_smoke"
+path = "tests/e2e/api_disabled_smoke.rs"
+
+[[test]]
+name = "api_healthz_smoke"
+path = "tests/e2e/api_healthz_smoke.rs"
+
+[[test]]
+name = "api_tickets_list_smoke"
+path = "tests/e2e/api_tickets_list_smoke.rs"
+
+[[test]]
+name = "api_cycle_and_visit_smoke"
+path = "tests/e2e/api_cycle_and_visit_smoke.rs"
+
+[[test]]
+name = "api_events_since_smoke"
+path = "tests/e2e/api_events_since_smoke.rs"
+
+[[test]]
+name = "api_escalations_smoke"
+path = "tests/e2e/api_escalations_smoke.rs"
+
+[[test]]
+name = "api_refresh_coalesce_smoke"
+path = "tests/e2e/api_refresh_coalesce_smoke.rs"
+
+[[test]]
+name = "api_refresh_backoff_smoke"
+path = "tests/e2e/api_refresh_backoff_smoke.rs"
+
+[[test]]
+name = "api_non_loopback_warn_smoke"
+path = "tests/e2e/api_non_loopback_warn_smoke.rs"
+
+[[test]]
+name = "api_bind_failure_smoke"
+path = "tests/e2e/api_bind_failure_smoke.rs"
+
 [features]
 # Test-only seam: gates the `ROKI_LINEAR_GRAPHQL_URL` env-var override inside
 # `linear::client` so the release binary always targets the hardcoded endpoint.
@@ -190,9 +230,11 @@ anyhow = "1"
 async-trait = "0.1"
 axum = "0.7"
 clap = { version = "4", features = ["derive"] }
+html-escape = "0.2"
 liquid = "0.26"
 nix = { version = "0.29", features = ["signal"] }
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
+roki-api-types = { path = "../roki-api-types" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 serde_yaml_ng = "0.10"
@@ -204,10 +246,12 @@ toml = "0.8"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["fmt"] }
 uuid = { version = "1", features = ["v4"] }
+vte = "0.13"
 
 [dev-dependencies]
 tempfile = "3"
 temp-env = { version = "0.3", features = ["async_closure"] }
+tokio = { version = "1", features = ["full", "test-util"] }
 tower = { version = "0.5", features = ["util"] }
 wiremock = "0.6"
 
