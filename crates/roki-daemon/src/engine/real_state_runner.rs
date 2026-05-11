@@ -961,6 +961,65 @@ mod tests {
         assert_eq!(result.iterations, 2);
     }
 
+    #[tokio::test]
+    async fn shutdown_terminates_running_state_subprocess() {
+        let tmp = TempDir::new().unwrap();
+        let ghq_base = tmp.path().join("ghq");
+        std::fs::create_dir_all(&ghq_base).unwrap();
+
+        let shutdown = crate::daemon::shutdown::ShutdownToken::new();
+        let inflight = std::sync::Arc::new(crate::daemon::inflight::InflightRegistry::new());
+
+        let runner = RealStateRunner {
+            default_cli: "echo".into(),
+            default_stall_seconds: 60,
+            ticket_id: "ENG-1".into(),
+            ghq: "github.com/acme/x".into(),
+            session_root: tmp.path().to_path_buf(),
+            session_tempdir: tmp.path().join("ENG-1"),
+            cycle_id: Uuid::nil(),
+            shutdown: shutdown.clone(),
+            inflight: inflight.clone(),
+        };
+
+        let state = run_state_with_cmd("sleep 30");
+        let mut ctx = empty_ctx();
+        ctx.bump_visit("s");
+
+        let shutdown_fire = shutdown.clone();
+        let fire = tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(200)).await;
+            shutdown_fire.fire();
+        });
+
+        let start = std::time::Instant::now();
+        let outcome = temp_env::async_with_vars(
+            [
+                ("ROKI_GHQ_BASE_OVERRIDE", Some(ghq_base.to_str().unwrap())),
+                ("ROKI_WT_ROOT_OVERRIDE", Some(tmp.path().to_str().unwrap())),
+            ],
+            async { runner.run_state(&state, &ctx).await },
+        )
+        .await;
+        fire.await.unwrap();
+
+        assert!(
+            start.elapsed() < Duration::from_secs(15),
+            "shutdown did not terminate the child quickly: {:?}",
+            start.elapsed()
+        );
+        match outcome {
+            StateOutcome::Failure { kind, .. } => {
+                assert!(
+                    matches!(kind, FailureKind::ProcessCrash),
+                    "expected ProcessCrash, got {kind:?}"
+                );
+            }
+            other => panic!("expected Failure(ProcessCrash), got {other:?}"),
+        }
+        assert!(inflight.snapshot().await.is_empty(), "registry not cleared");
+    }
+
     #[test]
     fn split_frontmatter_returns_body_when_no_delimiter() {
         let raw = "no frontmatter here";
