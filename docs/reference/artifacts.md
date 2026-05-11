@@ -38,6 +38,7 @@ Paths and required elements of public artifacts the daemon writes. Operator-auth
 | Artifact | Path (under `<session_root>/<ticket-id>/cycle-<uuid>/`) | Writer | Reader | Purpose |
 |---|---|---|---|---|
 | `meta.json` | `meta.json` | daemon (cycle engine) | `roki log --meta`, `GET /api/tickets/{id}/cycles` | Per-cycle summary; durable independent of structured event log retention |
+| `cycle.json` | `cycle.json` | daemon (`daemon::cycle_metadata`) | `GET /api/tickets/{id}/cycles` ([fr:10](../fr/10-http-api.md)) | Cycle metadata: `kind`, `trigger`, `started_at`, `ended_at`, `terminal_id`, `failure_kind`, `total_visits`, declared `states[]`. Atomic write at cycle start (`ended_at: null`); atomic update at cycle end |
 | `<state_id>.stdout` / `<state_id>.stderr` | `visit-<n>/<state_id>.{stdout,stderr}` | daemon (subprocess capture) | `roki log --stream stdout` / `--stream stderr` | Byte-for-byte subprocess output |
 | `<state_id>.events.jsonl` | `visit-<n>/<state_id>.events.jsonl` | daemon (event capture, when cli emits stream-json) | `roki log --stream events` | One parseable JSON object per line; advisory stream-json events the cli emits between turns |
 | `<state_id>.directive.json` | `visit-<n>/<state_id>.directive.json` | daemon (sentinel-file copy at exit) | `roki log --stream directive` | The sentinel JSON the operator's subprocess wrote to `$ROKI_DIRECTIVE_PATH` before exit |

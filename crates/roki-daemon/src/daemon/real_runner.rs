@@ -79,6 +79,23 @@ impl CycleRunner for RealCycleRunner {
         let runner = build_runner(&self.cfg, admitted, cycle_id);
         let mut ctx = build_cycle_context(&self.cfg, admitted, cycle_id, kind, cycle_trigger, None);
 
+        // Best-effort write of cycle.json at cycle start so the slice 9 HTTP
+        // API (`GET /api/tickets/{id}/cycles`) has data to read mid-flight.
+        // A failure here must not abort the cycle.
+        let trigger_str = match cycle_trigger {
+            CycleTrigger::Runtime => "runtime",
+            CycleTrigger::ColdStart => "cold_start",
+        };
+        let states: Vec<String> = rule_entry.state_machine.states.keys().cloned().collect();
+        let _ = crate::daemon::cycle_metadata::write_cycle_start(
+            &self.cfg.paths.session_root,
+            &admitted.ticket.id,
+            cycle_id,
+            kind,
+            trigger_str,
+            states,
+        );
+
         match cycle_state::run_cycle(&rule_entry.state_machine, &runner, &mut ctx).await {
             Ok(result) => {
                 let _ = events.emit(&Event::CycleCompleted {
@@ -89,6 +106,16 @@ impl CycleRunner for RealCycleRunner {
                     terminal_id: Some(result.terminal_id.clone()),
                     outcome: Some(result.outcome.clone()),
                 });
+                let _ = crate::daemon::cycle_metadata::write_cycle_end(
+                    &self.cfg.paths.session_root,
+                    &admitted.ticket.id,
+                    cycle_id,
+                    crate::daemon::cycle_metadata::CycleEndPayload {
+                        terminal_id: Some(result.terminal_id.clone()),
+                        failure_kind: None,
+                        total_visits: result.iterations,
+                    },
+                );
                 if kind == CycleKind::Cleanup {
                     let _ = crate::engine::cleanup::post_cycle_delete(
                         &admitted.ticket.id,
@@ -106,6 +133,16 @@ impl CycleRunner for RealCycleRunner {
                 }
             }
             Err(meta) => {
+                let _ = crate::daemon::cycle_metadata::write_cycle_end(
+                    &self.cfg.paths.session_root,
+                    &admitted.ticket.id,
+                    cycle_id,
+                    crate::daemon::cycle_metadata::CycleEndPayload {
+                        terminal_id: None,
+                        failure_kind: Some(meta.kind),
+                        total_visits: meta.visit_n,
+                    },
+                );
                 let decision = self
                     .handle_failed_cycle(
                         cycle_id,
@@ -183,6 +220,23 @@ impl RealCycleRunner {
             Some(meta),
         );
 
+        // Failure-handler cycle is itself a real cycle that should surface in
+        // `GET /api/tickets/{id}/cycles`. Best-effort write at start + end.
+        let trigger_str = match cycle_trigger {
+            CycleTrigger::Runtime => "runtime",
+            CycleTrigger::ColdStart => "cold_start",
+        };
+        let handler_states: Vec<String> =
+            handler.state_machine.states.keys().cloned().collect();
+        let _ = crate::daemon::cycle_metadata::write_cycle_start(
+            &self.cfg.paths.session_root,
+            &admitted.ticket.id,
+            handler_cycle_id,
+            CycleKind::Failure,
+            trigger_str,
+            handler_states,
+        );
+
         match cycle_state::run_cycle(&handler.state_machine, &handler_runner, &mut handler_ctx)
             .await
         {
@@ -195,9 +249,29 @@ impl RealCycleRunner {
                     terminal_id: Some(result.terminal_id.clone()),
                     outcome: Some(result.outcome.clone()),
                 });
+                let _ = crate::daemon::cycle_metadata::write_cycle_end(
+                    &self.cfg.paths.session_root,
+                    &admitted.ticket.id,
+                    handler_cycle_id,
+                    crate::daemon::cycle_metadata::CycleEndPayload {
+                        terminal_id: Some(result.terminal_id.clone()),
+                        failure_kind: None,
+                        total_visits: result.iterations,
+                    },
+                );
                 HandlerDecision::Succeeded
             }
             Err(handler_meta) => {
+                let _ = crate::daemon::cycle_metadata::write_cycle_end(
+                    &self.cfg.paths.session_root,
+                    &admitted.ticket.id,
+                    handler_cycle_id,
+                    crate::daemon::cycle_metadata::CycleEndPayload {
+                        terminal_id: None,
+                        failure_kind: Some(handler_meta.kind),
+                        total_visits: handler_meta.visit_n,
+                    },
+                );
                 self.escalation
                     .push_cycle(
                         admitted.ticket.id.clone(),
