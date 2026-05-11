@@ -198,4 +198,26 @@ mod tests {
         assert!(p.events.is_empty());
         assert!(!p.gap);
     }
+
+    #[test]
+    fn ticket_filter_only_returns_matching() {
+        let r = EventRing::new(10);
+        r.record("e", Some("A"), None, Value::Null);
+        r.record("e", Some("B"), None, Value::Null);
+        r.record("e", Some("A"), None, Value::Null);
+        let p = r.page(None, None, Some("A"), None, 100);
+        assert_eq!(p.events.len(), 2);
+        assert!(p.events.iter().all(|e| e.ticket_id.as_deref() == Some("A")));
+    }
+
+    #[test]
+    fn limit_truncates_and_next_since_is_last_seq() {
+        let r = EventRing::new(10);
+        for i in 0..5 {
+            r.record(&format!("e{i}"), None, None, Value::Null);
+        }
+        let p = r.page(None, None, None, None, 2);
+        assert_eq!(p.events.len(), 2);
+        assert_eq!(p.next_since, Some(p.events.last().unwrap().seq));
+    }
 }

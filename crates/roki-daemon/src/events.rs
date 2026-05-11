@@ -233,34 +233,39 @@ impl Event {
     }
 
     /// Extract the routing keys `(ticket_id, cycle_id)` carried by this event
-    /// variant. Returned as owned strings so the caller can hand them to the
-    /// ring without holding a borrow on `self`.
-    pub fn routing_keys(&self) -> (Option<String>, Option<String>) {
+    /// variant. Borrows `ticket_id` from `self` so the caller doesn't allocate;
+    /// `cycle_id` is parsed once here — the daemon constructs every cycle_id
+    /// from `Uuid::to_string()`, so a parse failure is a programmer bug and we
+    /// panic rather than silently drop the routing key.
+    pub fn routing_keys(&self) -> (Option<&str>, Option<uuid::Uuid>) {
+        fn parse_cycle(s: &str) -> uuid::Uuid {
+            uuid::Uuid::parse_str(s).expect("event cycle_id must be a valid Uuid")
+        }
         match self {
-            Event::CycleCompleted { cycle_id, .. } => (None, Some(cycle_id.clone())),
-            Event::FailureUnhandled { cycle_id, .. } => (None, Some(cycle_id.clone())),
+            Event::CycleCompleted { cycle_id, .. } => (None, Some(parse_cycle(cycle_id))),
+            Event::FailureUnhandled { cycle_id, .. } => (None, Some(parse_cycle(cycle_id))),
             Event::EscalationAdded {
                 ticket_id,
                 cycle_id,
                 ..
-            } => (ticket_id.clone(), cycle_id.clone()),
+            } => (ticket_id.as_deref(), cycle_id.as_deref().map(parse_cycle)),
             Event::WorktreeDeleteRequested {
                 ticket_id,
                 cycle_id,
                 ..
-            } => (Some(ticket_id.clone()), cycle_id.clone()),
+            } => (Some(ticket_id.as_str()), cycle_id.as_deref().map(parse_cycle)),
             Event::DaemonStarted { .. } => (None, None),
             Event::DaemonReady { .. } => (None, None),
             Event::DaemonShutdownBegan { .. } => (None, None),
             Event::DaemonShutdownCompleted { .. } => (None, None),
             Event::ShutdownWindowExceeded { .. } => (None, None),
-            Event::WebhookSkipped { ticket_id, .. } => (Some(ticket_id.clone()), None),
+            Event::WebhookSkipped { ticket_id, .. } => (Some(ticket_id.as_str()), None),
             Event::ColdStartBegan { .. } => (None, None),
             Event::ColdStartCompleted { .. } => (None, None),
             Event::OrphanReconcileSkipped { .. } => (None, None),
             Event::StatusFilterDropped { .. } => (None, None),
             Event::LinearBackoffApplied { .. } => (None, None),
-            Event::SessionTempdirDeleted { ticket_id, .. } => (Some(ticket_id.clone()), None),
+            Event::SessionTempdirDeleted { ticket_id, .. } => (Some(ticket_id.as_str()), None),
         }
     }
 }
@@ -276,10 +281,9 @@ impl EventTap {
     pub fn record(&self, event: &Event) {
         let kind = event.kind_str();
         let (ticket, cycle) = event.routing_keys();
-        let payload = serde_json::to_value(event).unwrap_or(serde_json::Value::Null);
-        let cycle_uuid = cycle.and_then(|s| uuid::Uuid::parse_str(&s).ok());
-        self.ring
-            .record(kind, ticket.as_deref(), cycle_uuid, payload);
+        let payload =
+            serde_json::to_value(event).expect("Event derives Serialize infallibly");
+        self.ring.record(kind, ticket, cycle, payload);
     }
 }
 
@@ -561,6 +565,61 @@ mod tests {
         let p = ring.page(None, None, None, None, 10);
         assert_eq!(p.events.len(), 1);
         assert_eq!(p.events[0].event, "cycle_completed");
+    }
+
+    #[test]
+    fn kind_str_matches_serde_tag_for_one_variant_per_emit_site() {
+        let cases = vec![
+            Event::CycleCompleted {
+                ts: "x".into(),
+                cycle_id: uuid::Uuid::nil().to_string(),
+                cycle_kind: "rule".into(),
+                iters: 0,
+                terminal_id: None,
+                outcome: None,
+            },
+            Event::FailureUnhandled {
+                ts: "x".into(),
+                cycle_id: uuid::Uuid::nil().to_string(),
+                cycle_kind: "rule".into(),
+                failure: FailureMetaSer {
+                    kind: "stall".into(),
+                    state_id: None,
+                    visit_n: 0,
+                    exit_code: None,
+                    error_text: "x".into(),
+                },
+                marker: FailureMarker::None,
+            },
+            Event::EscalationAdded {
+                ts: "x".into(),
+                ticket_id: Some("T".into()),
+                cycle_id: None,
+                failure: FailureMetaSer {
+                    kind: "fs_poison".into(),
+                    state_id: None,
+                    visit_n: 0,
+                    exit_code: None,
+                    error_text: "x".into(),
+                },
+            },
+            Event::WorktreeDeleteRequested {
+                ts: "x".into(),
+                ticket_id: "T".into(),
+                cycle_id: None,
+                reason: WorktreeDeleteReason::CleanupTerminal,
+            },
+        ];
+        for e in cases {
+            let json = serde_json::to_value(&e).unwrap();
+            let tag = json.get("event").and_then(|v| v.as_str()).expect("serde tag");
+            assert_eq!(
+                e.kind_str(),
+                tag,
+                "kind_str must match serde tag for {:?}",
+                e
+            );
+        }
     }
 
     #[test]
