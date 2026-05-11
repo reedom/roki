@@ -17,7 +17,7 @@ use crate::runtime;
 pub mod workflow;
 // pub mod log;     // wired in Task 7
 // pub mod events;  // wired in Task 10
-// pub mod repo;    // wired in Task 6
+pub mod repo;
 pub mod shared;
 
 /// roki — Linear-driven coding-agent daemon.
@@ -48,6 +48,8 @@ pub enum CliCommand {
         #[command(subcommand)]
         cmd: workflow::WorkflowCmd,
     },
+    /// Resolve a ticket's worktree path (or ghq base fallback).
+    Repo(repo::RepoArgs),
 }
 
 /// Parse argv from the process and dispatch the matched subcommand.
@@ -64,6 +66,7 @@ pub async fn run() -> ExitCode {
             runtime::run(&config, runtime::DispatchMode::CleanupOnly).await
         }
         CliCommand::Workflow { cmd } => workflow::dispatch(cmd),
+        CliCommand::Repo(args) => repo::run(args).await,
     }
 }
 
