@@ -38,11 +38,13 @@ roki log --iter -1 --state impl --stream stderr --bytes 4096   # last 4 KiB
 
 # Cycle metadata
 roki log --list-visits   # per-visit (visit_n, state_id, exit_code) tuples
-roki log --meta          # cycle meta: kind, trigger, started_at, ended_at, terminal_id
+roki log --meta          # cycle meta from cycle.json: kind, trigger, started_at, ended_at, terminal_id
 
 # Cross-cycle within same ticket (operator must know the cycle id)
 roki log --cycle <uuid> --iter -1 --state impl --stream stdout
 ```
+
+Inside a state subprocess, `roki log` reads `paths.session_root` from `$ROKI_CONFIG_SESSION_ROOT`. External callers pass `--config <PATH>`.
 
 Streams: `stdout`, `stderr`, `events` (per-line JSON object stream from `<state_id>.events.jsonl` when the cli emits stream-json), `terminal` (parsed claude/codex stream-json `result` from `<state_id>.terminal.json`), `directive` (sentinel payload copied to `<state_id>.directive.json`), `exit_code` (numeric exit).
 
@@ -67,6 +69,8 @@ roki events --format human       # default: json
 roki events --offline --file /var/log/roki/daemon.jsonl --since 2026-05-06T12:00:00Z --kind cycle_started
 ```
 
+The HTTP API URL resolves in this order: `--api <URL>` flag, `$ROKI_API_URL` env, `[api]` section of `--config <roki.toml>`. If none resolve, `roki events` exits 1.
+
 Filters compose with AND. The default output is JSON Lines (the same format as the file destination); `--format human` is a one-line-per-event reformatter for terminal use.
 
 Scope: cross-ticket. The structured event stream covers the daemon as a whole (admission decisions, cycle starts, state outcomes, escalations, cold-start progress).
@@ -76,7 +80,7 @@ Scope: cross-ticket. The structured event stream covers the daemon as a whole (a
 Returns a directory the operator's state cli (or external tooling) can `cd` into.
 
 ```bash
-# Defaults: --ticket $ROKI_TICKET_ID --repo $ROKI_REPO
+# Defaults: --ticket $ROKI_TICKET_ID --repo $ROKI_REPO_GHQ
 roki repo                          # worktree path if it exists, otherwise ghq base path
 roki repo github.com/foo/bar       # explicit repo argument
 roki repo --auto-clone             # ghq get if the ghq base does not exist
@@ -94,7 +98,7 @@ The CLIs encapsulate this layout. Operators that need raw file access for debugg
 ```
 <session_root>/<ticket-id>/
   cycle-<uuid>/
-    meta.json
+    cycle.json
     visit-001/
       <state_id>.stdout
       <state_id>.stderr
@@ -106,7 +110,7 @@ The CLIs encapsulate this layout. Operators that need raw file access for debugg
       ...
 ```
 
-Each `visit-<n>` directory holds the files for one state visit; `<state_id>` is the operator-declared state id from `WORKFLOW.yaml`. `meta.json` is the per-cycle summary file (cycle id, kind, trigger, started_at, ended_at, terminal id, total visits). Schema is defined in [`docs/reference/artifacts.md`](../reference/artifacts.md).
+Each `visit-<n>` directory holds the files for one state visit; `<state_id>` is the operator-declared state id from `WORKFLOW.yaml`. `cycle.json` is the per-cycle summary file (cycle id, kind, trigger, started_at, ended_at, terminal id, total visits). Schema is defined in [`docs/reference/artifacts.md`](../reference/artifacts.md).
 
 The structured event log destination is set in `roki.toml [log]` (stdout / file / both). The HTTP API mirrors the live ring buffer ([10-http-api §Endpoints](10-http-api.md)).
 
