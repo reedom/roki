@@ -20,7 +20,7 @@
 
 use std::net::SocketAddr;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 
 use axum::{
     Json, Router,
@@ -92,6 +92,11 @@ async fn ready_gate_layer(State(gate): State<ReadyGate>, request: Request, next:
 #[derive(Clone)]
 pub struct WebhookState {
     pub sender: Arc<mpsc::Sender<NormalizedTicket>>,
+    /// Polling-fallback outage signal: the webhook handler bumps this to
+    /// `now_ms` on every successful 202, so `PollingTracker` can gate its
+    /// outage ticks on `now_ms - last_ms >= 2 * cadence`. `None` keeps the
+    /// existing test seams (router tests use no atom).
+    pub last_webhook_success: Option<Arc<AtomicI64>>,
 }
 
 /// Build the axum `Router` for the webhook receiver.
@@ -119,11 +124,17 @@ async fn handle(State(state): State<WebhookState>, body: Bytes) -> Response {
     };
 
     match state.sender.try_send(ticket) {
-        Ok(()) => (
-            StatusCode::ACCEPTED,
-            Json(serde_json::json!({"status": "accepted"})),
-        )
-            .into_response(),
+        Ok(()) => {
+            if let Some(atom) = &state.last_webhook_success {
+                let now_ms = time::OffsetDateTime::now_utc().unix_timestamp() * 1000;
+                atom.store(now_ms, Ordering::Relaxed);
+            }
+            (
+                StatusCode::ACCEPTED,
+                Json(serde_json::json!({"status": "accepted"})),
+            )
+                .into_response()
+        }
         // Channel buffer full: dispatcher hasn't drained yet. Linear
         // retries on 503 so the next POST gets through once the
         // dispatcher catches up.
@@ -284,6 +295,7 @@ mod tests {
         let (tx, rx) = mpsc::channel(1);
         let state = WebhookState {
             sender: Arc::new(tx),
+            last_webhook_success: None,
         };
         (state, rx)
     }

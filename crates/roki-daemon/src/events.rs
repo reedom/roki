@@ -214,6 +214,28 @@ pub enum Event {
         path: String,
         reason: SessionTempdirDeleteReason,
     },
+    ApiBindFailed {
+        ts: String,
+        bind: String,
+        port: u16,
+        error: String,
+    },
+    ApiDisabled {
+        ts: String,
+    },
+    PollingTick {
+        ts: String,
+        trigger: String,
+        status_set: Vec<String>,
+        enumerated: u32,
+        admitted: u32,
+    },
+    RefreshNudgeAcknowledged {
+        ts: String,
+        coalesced: bool,
+        backoff_active: bool,
+        client_addr: String,
+    },
 }
 
 impl Event {
@@ -240,6 +262,10 @@ impl Event {
             Event::StatusFilterDropped { .. } => "status_filter_dropped",
             Event::LinearBackoffApplied { .. } => "linear_backoff_applied",
             Event::SessionTempdirDeleted { .. } => "session_tempdir_deleted",
+            Event::ApiBindFailed { .. } => "api_bind_failed",
+            Event::ApiDisabled { .. } => "api_disabled",
+            Event::PollingTick { .. } => "polling_tick",
+            Event::RefreshNudgeAcknowledged { .. } => "refresh_nudge_acknowledged",
         }
     }
 
@@ -278,6 +304,10 @@ impl Event {
             Event::StatusFilterDropped { .. } => (None, None),
             Event::LinearBackoffApplied { .. } => (None, None),
             Event::SessionTempdirDeleted { ticket_id, .. } => (Some(ticket_id.as_str()), None),
+            Event::ApiBindFailed { .. } => (None, None),
+            Event::ApiDisabled { .. } => (None, None),
+            Event::PollingTick { .. } => (None, None),
+            Event::RefreshNudgeAcknowledged { .. } => (None, None),
         }
     }
 }

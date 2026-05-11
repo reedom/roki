@@ -81,9 +81,11 @@ Attached to every event via tracing spans (when in scope).
 |---|---|---|
 | `api_disabled` | `[api].port` unset at startup | Info severity; no socket bound |
 | `api_listening` | API server bound | Bind addr, port |
-| `api_bind_failure` | API server failed to bind | Port, OS error. Daemon continues without API |
+| `api_bind_failed` | API server failed to bind | `bind`, `port`, `error`. Daemon continues without API |
 | `api_non_loopback_warn` | `[api].bind` resolves outside `127.0.0.0/8` and `::1/128` | Bind host (warns about absent authentication) |
 | `api_request` | Per-request metadata | Method, path, response status, duration, client address, correlation id (no body) |
+| `refresh_nudge_acknowledged` | `POST /api/refresh` returned an ack | `coalesced`, `backoff_active`, `client_addr` |
+| `polling_tick` | PollingTracker fired one tick (outage- or nudge-driven) | `trigger` ∈ `outage` / `nudge`, `status_set`, `enumerated`, `admitted` |
 
 ## Daemon lifecycle
 
