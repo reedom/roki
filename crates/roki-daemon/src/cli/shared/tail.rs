@@ -1,10 +1,17 @@
 //! Tail-suffix readers for byte- and line-oriented file slicing.
 //!
-//! Both functions read the file in its entirety for simplicity since
-//! roki state files (cycle.log, events.jsonl) are small and bounded.
+//! `tail_bytes` seeks directly to `len - n` and reads only the suffix.
+//! `tail_lines` walks the file backward in fixed-size chunks so a
+//! multi-MB capture never has to be slurped to retrieve its last few
+//! lines.
 
 use std::io::{Read, Seek, SeekFrom};
 use std::path::Path;
+
+/// Chunk size used by `tail_lines` when walking the file backwards.
+/// Power-of-two, larger than any reasonable single log line, small
+/// enough that a few iterations cover most --tail N requests.
+const TAIL_CHUNK_BYTES: u64 = 64 * 1024;
 
 /// Return the last `n` bytes of `path`, or the whole file when it is
 /// shorter than `n`.
@@ -21,30 +28,57 @@ pub fn tail_bytes(path: &Path, n: u64) -> std::io::Result<Vec<u8>> {
 /// Return the last `n` newline-delimited lines of `path` (including
 /// their terminators). A missing trailing newline on the last line is
 /// preserved verbatim.
+///
+/// Implementation note: walks the file backward in [`TAIL_CHUNK_BYTES`]
+/// windows, counting newlines as it grows the working buffer. Allocates
+/// O(window) memory until enough newlines are seen or BOF is reached,
+/// so a 200 MB capture file with `n = 50` lines stays bounded.
 pub fn tail_lines(path: &Path, n: usize) -> std::io::Result<Vec<u8>> {
-    let bytes = std::fs::read(path)?;
-    if n == 0 || bytes.is_empty() {
+    if n == 0 {
         return Ok(Vec::new());
     }
-    // Walk backwards through the byte slice counting newline boundaries.
-    let mut newlines: usize = 0;
-    // Skip a final trailing newline so it doesn't count as a delimiter for line n.
-    let last_is_nl = *bytes.last().unwrap() == b'\n';
-    let scan_end = if last_is_nl {
-        bytes.len() - 1
-    } else {
-        bytes.len()
-    };
-    for i in (0..scan_end).rev() {
-        if bytes[i] == b'\n' {
-            newlines += 1;
-            if newlines == n {
-                let start = i + 1;
-                return Ok(bytes[start..].to_vec());
+    let mut f = std::fs::File::open(path)?;
+    let len = f.metadata()?.len();
+    if len == 0 {
+        return Ok(Vec::new());
+    }
+    // Window grows toward BOF. `window_start` is the absolute file offset
+    // at which `buf` begins; `buf` always contains bytes[window_start..len].
+    let mut window_start = len;
+    let mut buf: Vec<u8> = Vec::new();
+    loop {
+        let next_start = window_start.saturating_sub(TAIL_CHUNK_BYTES);
+        let read_len = (window_start - next_start) as usize;
+        let mut chunk = vec![0u8; read_len];
+        f.seek(SeekFrom::Start(next_start))?;
+        f.read_exact(&mut chunk)?;
+        // Prepend chunk in front of buf so buf stays in file order.
+        chunk.extend_from_slice(&buf);
+        buf = chunk;
+        window_start = next_start;
+
+        // Skip a final trailing newline so it doesn't count as a delimiter.
+        let last_is_nl = *buf.last().unwrap() == b'\n';
+        let scan_end = if last_is_nl { buf.len() - 1 } else { buf.len() };
+        let mut newlines: usize = 0;
+        let mut found_start: Option<usize> = None;
+        for i in (0..scan_end).rev() {
+            if buf[i] == b'\n' {
+                newlines += 1;
+                if newlines == n {
+                    found_start = Some(i + 1);
+                    break;
+                }
             }
         }
+        if let Some(start) = found_start {
+            return Ok(buf[start..].to_vec());
+        }
+        if window_start == 0 {
+            // BOF reached — fewer than n line boundaries; return everything.
+            return Ok(buf);
+        }
     }
-    Ok(bytes)
 }
 
 #[cfg(test)]
@@ -91,5 +125,33 @@ mod tests {
         let f = fixture("xy");
         let out = tail_bytes(f.path(), 100).unwrap();
         assert_eq!(out, b"xy");
+    }
+
+    #[test]
+    fn lines_handles_file_larger_than_chunk_window() {
+        // Build a file whose last lines straddle the TAIL_CHUNK_BYTES
+        // boundary so the loop must consume more than one chunk.
+        let mut body = String::new();
+        // 100k lines of "X\n" = 200 KB, well above 64 KB chunk.
+        for _ in 0..100_000 {
+            body.push_str("X\n");
+        }
+        body.push_str("LAST1\n");
+        body.push_str("LAST2\n");
+        let f = fixture(&body);
+        let out = tail_lines(f.path(), 2).unwrap();
+        assert_eq!(out, b"LAST1\nLAST2\n");
+    }
+
+    #[test]
+    fn lines_reads_all_when_n_exceeds_file() {
+        // Multi-chunk file, ask for many more lines than exist.
+        let mut body = String::new();
+        for i in 0..1000 {
+            body.push_str(&format!("line{i}\n"));
+        }
+        let f = fixture(&body);
+        let out = tail_lines(f.path(), 10_000).unwrap();
+        assert_eq!(out.len(), body.len());
     }
 }
