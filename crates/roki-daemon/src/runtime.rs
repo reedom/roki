@@ -457,7 +457,7 @@ pub(crate) async fn run_inner(config_path: &Path, mode: DispatchMode) -> Result<
         let _ = w.emit(&Event::ShutdownWindowExceeded {
             ts: now_rfc3339(),
             aborted,
-            aborted_ticket_ids,
+            offenders: Vec::new(),
         });
         return Err(SkeletonError::ShutdownWindowExceeded);
     }

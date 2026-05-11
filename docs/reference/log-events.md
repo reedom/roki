@@ -103,7 +103,8 @@ Emitted by the TUI process to its own stderr (JSON Lines). Not part of the daemo
 | `daemon_ready` | All subsystems up + cold start complete | Webhook receiver bind, API bind (if enabled) |
 | `daemon_shutdown_began` | SIGINT / SIGTERM received | Active cycle count |
 | `daemon_shutdown_completed` | Graceful exit | Cycles drained count |
-| `shutdown_window_exceeded` | Warn-severity event when one or more in-flight subprocesses failed to drain inside the shutdown window | Offending subprocess descriptors |
+| `shutdown_window_exceeded` | One or more in-flight cycles did not drain inside the shutdown window | `ts`, `aborted` (count), `offenders[]` (`ticket_id`, `cycle_id`, `state_id`, `visit`, `pid`) |
+| `daemon_dependency_missing` | Required external binary is absent at startup | `ts`, `binary`, `remediation` |
 
 ## Per-visit capture (Tier 2)
 
