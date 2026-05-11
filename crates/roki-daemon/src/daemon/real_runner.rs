@@ -226,8 +226,7 @@ impl RealCycleRunner {
             CycleTrigger::Runtime => "runtime",
             CycleTrigger::ColdStart => "cold_start",
         };
-        let handler_states: Vec<String> =
-            handler.state_machine.states.keys().cloned().collect();
+        let handler_states: Vec<String> = handler.state_machine.states.keys().cloned().collect();
         let _ = crate::daemon::cycle_metadata::write_cycle_start(
             &self.cfg.paths.session_root,
             &admitted.ticket.id,

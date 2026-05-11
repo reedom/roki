@@ -253,8 +253,7 @@ pub(crate) async fn run_inner(config_path: &Path, mode: DispatchMode) -> Result<
     //      `POST /admin/refresh-now` handler. The on-tick callback emits
     //      `polling_tick`; the full enumerate-on-tick wiring is deferred
     //      to slice 10 per design spec §9 Documented divergence.
-    let polling_cadence =
-        std::time::Duration::from_secs(cfg.linear.polling.cadence_seconds as u64);
+    let polling_cadence = std::time::Duration::from_secs(cfg.linear.polling.cadence_seconds as u64);
     let daemon_writer_for_tick = daemon_events.clone();
     let nudge_handle = crate::linear::polling::PollingTracker::spawn(
         polling_cadence,
@@ -318,9 +317,7 @@ pub(crate) async fn run_inner(config_path: &Path, mode: DispatchMode) -> Result<
         });
     } else {
         let mut w = daemon_events.lock().await;
-        let _ = w.emit(&Event::ApiDisabled {
-            ts: now_rfc3339(),
-        });
+        let _ = w.emit(&Event::ApiDisabled { ts: now_rfc3339() });
     }
     // Keep the nudge handle alive until daemon shutdown; without this the
     // PollingTracker's `recv` returns None and the task exits.

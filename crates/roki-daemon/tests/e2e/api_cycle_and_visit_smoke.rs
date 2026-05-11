@@ -153,14 +153,11 @@ port = {api_port}
         .as_str()
         .expect("cycles[0].cycle_id");
     // First declared state on this cycle's chain.
+    // `states` only appears in the on-disk shape (cycle.json), not
+    // necessarily in `CycleSummary`. Fall back to the hard-coded single
+    // task id when the wire shape elides it.
     let state_id = cycles["cycles"][0]["states"][0]
         .as_str()
-        .or_else(|| {
-            // `states` only appears in the on-disk shape (cycle.json), not
-            // necessarily in `CycleSummary`. Fall back to the hard-coded
-            // single task id.
-            None
-        })
         .unwrap_or("solo");
 
     let stdout = client

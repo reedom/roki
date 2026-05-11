@@ -4,7 +4,11 @@ use time::OffsetDateTime;
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RefreshAck {
     pub coalesced: bool,
-    #[serde(default, with = "time::serde::rfc3339::option", skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        with = "time::serde::rfc3339::option",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub earliest_fire_at: Option<OffsetDateTime>,
     pub backoff_active: bool,
 }

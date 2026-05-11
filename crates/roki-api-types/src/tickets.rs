@@ -45,7 +45,11 @@ pub struct CycleSummary {
     pub trigger: CycleTrigger,
     #[serde(with = "time::serde::rfc3339")]
     pub started_at: OffsetDateTime,
-    #[serde(default, with = "time::serde::rfc3339::option", skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        with = "time::serde::rfc3339::option",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub ended_at: Option<OffsetDateTime>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub terminal_id: Option<String>,

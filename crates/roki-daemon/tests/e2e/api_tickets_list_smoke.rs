@@ -126,7 +126,12 @@ port = {api_port}
         }
     });
     let client = reqwest::Client::new();
-    let resp = client.post(&webhook_url).json(&payload).send().await.unwrap();
+    let resp = client
+        .post(&webhook_url)
+        .json(&payload)
+        .send()
+        .await
+        .unwrap();
     assert_eq!(resp.status().as_u16(), 202);
 
     let events_path = session_root.join(format!("{ticket_id}.events.jsonl"));

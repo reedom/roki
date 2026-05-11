@@ -290,7 +290,10 @@ impl Event {
                 ticket_id,
                 cycle_id,
                 ..
-            } => (Some(ticket_id.as_str()), cycle_id.as_deref().map(parse_cycle)),
+            } => (
+                Some(ticket_id.as_str()),
+                cycle_id.as_deref().map(parse_cycle),
+            ),
             Event::ApiRequest { .. } => (None, None),
             Event::DaemonStarted { .. } => (None, None),
             Event::DaemonReady { .. } => (None, None),
@@ -323,8 +326,7 @@ impl EventTap {
     pub fn record(&self, event: &Event) {
         let kind = event.kind_str();
         let (ticket, cycle) = event.routing_keys();
-        let payload =
-            serde_json::to_value(event).expect("Event derives Serialize infallibly");
+        let payload = serde_json::to_value(event).expect("Event derives Serialize infallibly");
         self.ring.record(kind, ticket, cycle, payload);
     }
 }
@@ -664,7 +666,10 @@ mod tests {
         ];
         for e in cases {
             let json = serde_json::to_value(&e).unwrap();
-            let tag = json.get("event").and_then(|v| v.as_str()).expect("serde tag");
+            let tag = json
+                .get("event")
+                .and_then(|v| v.as_str())
+                .expect("serde tag");
             assert_eq!(
                 e.kind_str(),
                 tag,

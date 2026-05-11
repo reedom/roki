@@ -16,9 +16,7 @@ use axum::routing::{get, post};
 use serde::Deserialize;
 use uuid::Uuid;
 
-use roki_api_types::{
-    ApiEscalation, EventsPage, Healthz, RefreshAck, TicketDetail, TicketSummary,
-};
+use roki_api_types::{ApiEscalation, EventsPage, Healthz, RefreshAck, TicketDetail, TicketSummary};
 
 use crate::api::ApiState;
 use crate::api::log_layer;
@@ -219,10 +217,7 @@ struct EventsQuery {
     limit: Option<usize>,
 }
 
-async fn events_page(
-    State(state): State<Arc<ApiState>>,
-    Query(q): Query<EventsQuery>,
-) -> Response {
+async fn events_page(State(state): State<Arc<ApiState>>, Query(q): Query<EventsQuery>) -> Response {
     let cycle = match q.cycle.as_deref() {
         Some(s) => match Uuid::parse_str(s) {
             Ok(u) => Some(u),
