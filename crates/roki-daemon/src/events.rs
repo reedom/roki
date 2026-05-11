@@ -559,7 +559,7 @@ mod tests {
     }
 
     #[test]
-    fn shutdown_window_exceeded_carries_aborted_ids() {
+    fn shutdown_window_exceeded_carries_offenders() {
         let ev = Event::ShutdownWindowExceeded {
             ts: "2026-05-08T00:00:00Z".into(),
             aborted: 1,
@@ -577,6 +577,7 @@ mod tests {
         assert!(s.contains("\"state_id\":\"phase-1\""));
         assert!(s.contains("\"visit\":1"));
         assert!(s.contains("\"pid\":9999"));
+        assert!(s.contains("\"cycle_id\":\"00000000-0000-0000-0000-000000000001\""));
     }
 
     #[test]
