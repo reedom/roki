@@ -1,9 +1,37 @@
 //! E2E: `roki log --follow` picks up late writes.
+use std::io::{BufRead, BufReader, Write};
 use std::process::{Command, Stdio};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 fn bin() -> &'static str {
     env!("CARGO_BIN_EXE_roki")
+}
+
+/// Poll the child's stdout (line-buffered via BufReader) until `marker`
+/// appears, with a deadline. Returns the collected lines so the caller
+/// can assert on the prefix as well as the marker line.
+fn read_until(
+    reader: &mut BufReader<std::process::ChildStdout>,
+    marker: &str,
+    timeout: Duration,
+) -> Vec<String> {
+    let start = Instant::now();
+    let mut out: Vec<String> = Vec::new();
+    while start.elapsed() < timeout {
+        let mut line = String::new();
+        match reader.read_line(&mut line) {
+            Ok(0) => return out, // EOF
+            Ok(_) => {
+                let saw_marker = line.contains(marker);
+                out.push(line);
+                if saw_marker {
+                    return out;
+                }
+            }
+            Err(_) => return out,
+        }
+    }
+    out
 }
 
 #[test]
@@ -19,7 +47,7 @@ fn follow_streams_late_appends_then_exits_on_exit_code() {
     let stdout = vd.join("impl.stdout");
     std::fs::write(&stdout, b"first\n").unwrap();
 
-    let child = Command::new(bin())
+    let mut child = Command::new(bin())
         .env("ROKI_CONFIG_SESSION_ROOT", tmp.path())
         .env("ROKI_TICKET_ID", "ENG-9")
         .env("ROKI_CYCLE_ID", cycle)
@@ -37,19 +65,37 @@ fn follow_streams_late_appends_then_exits_on_exit_code() {
         .spawn()
         .unwrap();
 
-    std::thread::sleep(Duration::from_millis(100));
-    use std::io::Write;
+    let child_stdout = child.stdout.take().expect("piped stdout");
+    let mut reader = BufReader::new(child_stdout);
+
+    // Drain `first\n` before appending so the late-write ordering is
+    // observable rather than timing-coupled.
+    let initial = read_until(&mut reader, "first", Duration::from_secs(2));
+    assert!(
+        initial.iter().any(|l| l.contains("first")),
+        "missing initial: {initial:?}"
+    );
+
+    // Append `second\n`, then wait for the follower to emit it before
+    // writing the exit-code sentinel. This is the de-flake: the test no
+    // longer races a fixed sleep against the polling cadence.
     let mut f = std::fs::OpenOptions::new()
         .append(true)
         .open(&stdout)
         .unwrap();
     f.write_all(b"second\n").unwrap();
-    std::thread::sleep(Duration::from_millis(100));
+    drop(f);
+
+    let after = read_until(&mut reader, "second", Duration::from_secs(2));
+    assert!(
+        after.iter().any(|l| l.contains("second")),
+        "missing late append: {after:?}"
+    );
+
+    // Now signal end-of-visit. Any stragglers between this and the next
+    // poll get drained in `follow_loop`'s post-sentinel drain branch.
     std::fs::write(vd.join("impl.exit_code"), "0\n").unwrap();
 
     let waited = child.wait_with_output().unwrap();
-    assert!(waited.status.success());
-    let s = String::from_utf8(waited.stdout).unwrap();
-    assert!(s.contains("first"));
-    assert!(s.contains("second"));
+    assert!(waited.status.success(), "follower exited non-zero");
 }
