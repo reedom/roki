@@ -20,7 +20,9 @@ pub async fn run(
             _ = focus_rx.changed() => {}
             _ = interval.tick() => {}
         }
-        let Some(ticket_id) = focus_rx.borrow().clone() else { continue };
+        let Some(ticket_id) = focus_rx.borrow().clone() else {
+            continue;
+        };
         let detail = client.fetch_ticket_detail(&ticket_id).await;
         let cycles = client.fetch_cycles(&ticket_id).await;
         match detail {
@@ -54,9 +56,7 @@ pub async fn run(
                                 .await
                             {
                                 Ok(body) => {
-                                    let _ = tx
-                                        .send(Update::Tail { visit_n: n, body })
-                                        .await;
+                                    let _ = tx.send(Update::Tail { visit_n: n, body }).await;
                                 }
                                 Err(e) => {
                                     let _ = tx

@@ -37,7 +37,9 @@ pub fn emit_decode_error<W: Write>(mut out: W, endpoint: &str, error: &str) -> s
 
 fn now_rfc3339() -> String {
     use time::format_description::well_known::Rfc3339;
-    time::OffsetDateTime::now_utc().format(&Rfc3339).unwrap_or_default()
+    time::OffsetDateTime::now_utc()
+        .format(&Rfc3339)
+        .unwrap_or_default()
 }
 
 #[cfg(test)]
@@ -48,7 +50,13 @@ mod tests {
     fn emit_writes_one_json_line() {
         let mut buf = Vec::new();
         let cfg = PollingSection::default();
-        emit(&mut buf, "http://127.0.0.1:8080", &cfg, Palette::IndexedAnsi16).unwrap();
+        emit(
+            &mut buf,
+            "http://127.0.0.1:8080",
+            &cfg,
+            Palette::IndexedAnsi16,
+        )
+        .unwrap();
         let line = String::from_utf8(buf).unwrap();
         assert!(line.contains("\"event\":\"roki_tui_started\""));
         assert!(line.contains("\"palette\":\"indexed_ansi16\""));

@@ -1,7 +1,7 @@
 use roki_api_types::CycleSummary;
 use uuid::Uuid;
 
-use super::{get_json, get_text, ApiClient, ClientError};
+use super::{ApiClient, ClientError, get_json, get_text};
 
 impl ApiClient {
     pub async fn fetch_cycles(&self, id: &str) -> Result<Vec<CycleSummary>, ClientError> {

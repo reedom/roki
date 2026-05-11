@@ -7,8 +7,8 @@ pub mod status_bar;
 pub mod ticket_detail;
 pub mod tickets;
 
-use ratatui::layout::{Constraint, Direction, Layout};
 use ratatui::Frame;
+use ratatui::layout::{Constraint, Direction, Layout};
 
 use crate::model::{AppModel, View};
 
@@ -34,8 +34,8 @@ pub fn draw(frame: &mut Frame, model: &AppModel) {
 
 #[cfg(test)]
 mod tests {
-    use ratatui::backend::TestBackend;
     use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
 
     use crate::model::AppModel;
     use crate::palette::Palette;
@@ -48,7 +48,7 @@ mod tests {
         let model = AppModel::new(Palette::IndexedAnsi16);
         term.draw(|f| draw(f, &model)).unwrap();
         let buf = term.backend().buffer();
-        let cell = buf.get(0, 0);
+        let cell = &buf[(0, 0)];
         assert!(!cell.symbol().is_empty());
     }
 }

@@ -57,7 +57,11 @@ pub(crate) async fn get_json<T: serde::de::DeserializeOwned>(
     http: &reqwest::Client,
     url: Url,
 ) -> Result<T, ClientError> {
-    let resp = http.get(url).header("Accept", "application/json").send().await?;
+    let resp = http
+        .get(url)
+        .header("Accept", "application/json")
+        .send()
+        .await?;
     let status = resp.status();
     let bytes = resp.bytes().await?;
     if !status.is_success() {
@@ -72,10 +76,7 @@ pub(crate) async fn get_json<T: serde::de::DeserializeOwned>(
     Ok(parsed)
 }
 
-pub(crate) async fn get_text(
-    http: &reqwest::Client,
-    url: Url,
-) -> Result<String, ClientError> {
+pub(crate) async fn get_text(http: &reqwest::Client, url: Url) -> Result<String, ClientError> {
     let resp = http.get(url).send().await?;
     let status = resp.status();
     let bytes = resp.bytes().await?;
@@ -86,13 +87,17 @@ pub(crate) async fn get_text(
         });
     }
     let raw = std::str::from_utf8(&bytes).map_err(|_| ClientError::InvalidUtf8)?;
-    Ok(crate::sanitize::control_strip(&crate::sanitize::ansi_strip(raw)))
+    Ok(crate::sanitize::control_strip(
+        &crate::sanitize::ansi_strip(raw),
+    ))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use roki_api_types::{ApiEscalation, ApiEvent, CycleSummary, EventsPage, RefreshAck, TicketDetail, TicketSummary};
+    use roki_api_types::{
+        ApiEscalation, ApiEvent, CycleSummary, EventsPage, RefreshAck, TicketDetail, TicketSummary,
+    };
     use time::OffsetDateTime;
     use uuid::Uuid;
     use wiremock::matchers::{method, path, query_param};

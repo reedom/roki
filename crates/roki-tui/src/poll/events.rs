@@ -18,7 +18,10 @@ pub async fn run(client: Arc<ApiClient>, cadence_seconds: u32, tx: mpsc::Sender<
             Ok(page) => {
                 last_seq = page.next_since.or(last_seq);
                 if tx
-                    .send(Update::Events { page, requested_since: requested })
+                    .send(Update::Events {
+                        page,
+                        requested_since: requested,
+                    })
                     .await
                     .is_err()
                 {

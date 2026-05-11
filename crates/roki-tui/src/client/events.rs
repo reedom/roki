@@ -1,6 +1,6 @@
 use roki_api_types::EventsPage;
 
-use super::{get_json, ApiClient, ClientError};
+use super::{ApiClient, ClientError, get_json};
 
 impl ApiClient {
     pub async fn fetch_events_since(&self, since: Option<u64>) -> Result<EventsPage, ClientError> {

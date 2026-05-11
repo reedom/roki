@@ -1,6 +1,6 @@
 use roki_api_types::ApiEscalation;
 
-use super::{get_json, ApiClient, ClientError};
+use super::{ApiClient, ClientError, get_json};
 
 impl ApiClient {
     pub async fn fetch_escalations(&self) -> Result<Vec<ApiEscalation>, ClientError> {

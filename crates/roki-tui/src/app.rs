@@ -9,20 +9,20 @@ use anyhow::Result;
 use crossterm::event::{Event, EventStream};
 use crossterm::execute;
 use crossterm::terminal::{
-    disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
+    EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
 };
 use futures_util::StreamExt;
-use ratatui::backend::CrosstermBackend;
 use ratatui::Terminal;
+use ratatui::backend::CrosstermBackend;
 use tokio::sync::mpsc;
 
 use crate::cli::Cli;
 use crate::client::ApiClient;
-use crate::config::{resolve, ResolvedConfig};
-use crate::input::{classify, Action};
+use crate::config::{ResolvedConfig, resolve};
+use crate::input::{Action, classify};
 use crate::model::{AppModel, PollSource, RefreshState, Update, View};
-use crate::palette::{detect, Palette};
-use crate::poll::{spawn as spawn_polls, PollHandles};
+use crate::palette::{Palette, detect};
+use crate::poll::{PollHandles, spawn as spawn_polls};
 use crate::startup_log;
 use crate::ui;
 
@@ -148,7 +148,10 @@ fn apply(
         Update::TicketDetail(d) => model.apply_ticket_detail(d),
         Update::Cycles(rows) => model.apply_cycles(rows),
         Update::Tail { visit_n, body } => model.apply_tail(visit_n, body),
-        Update::Events { page, requested_since } => model.events.merge_page(page, requested_since),
+        Update::Events {
+            page,
+            requested_since,
+        } => model.events.merge_page(page, requested_since),
         Update::Escalations(rows) => model.escalations.apply(rows),
         Update::RefreshAck(ack) => model.apply_refresh_ack(ack),
         Update::PollError { source, message } => {
@@ -204,42 +207,42 @@ fn apply_action(
                 }
             }
         }
-        Action::Refresh => {
-            match model.refresh {
-                RefreshState::Idle => {
-                    model.refresh = RefreshState::InFlight;
-                    let c = client.clone();
-                    let tx = tx.clone();
-                    tokio::spawn(async move {
-                        match c.post_refresh().await {
-                            Ok(ack) => {
-                                let _ = tx.send(Update::RefreshAck(ack)).await;
-                            }
-                            Err(e) => {
-                                let _ = tx
-                                    .send(Update::PollError {
-                                        source: PollSource::Refresh,
-                                        message: e.to_string(),
-                                    })
-                                    .await;
-                            }
+        Action::Refresh => match model.refresh {
+            RefreshState::Idle => {
+                model.refresh = RefreshState::InFlight;
+                let c = client.clone();
+                let tx = tx.clone();
+                tokio::spawn(async move {
+                    match c.post_refresh().await {
+                        Ok(ack) => {
+                            let _ = tx.send(Update::RefreshAck(ack)).await;
                         }
-                    });
-                }
-                RefreshState::InFlight => {
-                    model.status.set("refresh: already in flight");
-                }
-                RefreshState::DebouncedUntil(t) => {
-                    let now = std::time::Instant::now();
-                    let remaining = t.saturating_duration_since(now).as_secs();
-                    if remaining == 0 {
-                        model.refresh = RefreshState::Idle;
-                        return apply_action(model, Action::Refresh, handles, client, tx);
+                        Err(e) => {
+                            let _ = tx
+                                .send(Update::PollError {
+                                    source: PollSource::Refresh,
+                                    message: e.to_string(),
+                                })
+                                .await;
+                        }
                     }
-                    model.status.set(format!("refresh: debounced ({remaining}s)"));
-                }
+                });
             }
-        }
+            RefreshState::InFlight => {
+                model.status.set("refresh: already in flight");
+            }
+            RefreshState::DebouncedUntil(t) => {
+                let now = std::time::Instant::now();
+                let remaining = t.saturating_duration_since(now).as_secs();
+                if remaining == 0 {
+                    model.refresh = RefreshState::Idle;
+                    return apply_action(model, Action::Refresh, handles, client, tx);
+                }
+                model
+                    .status
+                    .set(format!("refresh: debounced ({remaining}s)"));
+            }
+        },
         Action::ToggleAck => {
             if model.focus == View::Escalations {
                 model.escalations.toggle_ack();
@@ -247,9 +250,10 @@ fn apply_action(
         }
         Action::PrintLogCmd => {
             if model.focus == View::TicketDetail {
-                if let (Some(ticket), Some(c)) =
-                    (model.ticket_detail.ticket_id.clone(), model.ticket_detail.selected_cycle())
-                {
+                if let (Some(ticket), Some(c)) = (
+                    model.ticket_detail.ticket_id.clone(),
+                    model.ticket_detail.selected_cycle(),
+                ) {
                     let state = c.last_state_id.clone().unwrap_or_default();
                     let n = c.total_visits.max(1);
                     model.status.set(format!(

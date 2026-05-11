@@ -1,6 +1,6 @@
+use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::widgets::{Block, Borders, List, ListItem};
-use ratatui::Frame;
 
 use crate::model::AppModel;
 
@@ -18,7 +18,9 @@ pub fn draw(frame: &mut Frame, area: Rect, model: &AppModel) {
                 e.seq,
                 e.event,
                 e.ticket_id.clone().unwrap_or_default(),
-                e.cycle_id.map(|u| format!(" cycle={u}")).unwrap_or_default(),
+                e.cycle_id
+                    .map(|u| format!(" cycle={u}"))
+                    .unwrap_or_default(),
             ))
         })
         .collect();

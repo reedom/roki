@@ -60,7 +60,10 @@ mod tests {
 
     #[test]
     fn maps_arrow_and_vi_motion() {
-        assert_eq!(classify(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE)), Action::Up);
+        assert_eq!(
+            classify(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE)),
+            Action::Up
+        );
         assert_eq!(classify(k('j')), Action::Down);
     }
 

@@ -14,16 +14,10 @@ pub struct ResolvedConfig {
     pub polling: PollingSection,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Default)]
 #[serde(deny_unknown_fields, default)]
 pub struct TuiConfig {
     pub polling: PollingSection,
-}
-
-impl Default for TuiConfig {
-    fn default() -> Self {
-        Self { polling: PollingSection::default() }
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
@@ -38,9 +32,15 @@ pub struct PollingSection {
 }
 
 impl PollingSection {
-    fn default_tickets() -> u32 { 2 }
-    fn default_events() -> u32 { 1 }
-    fn default_escalations() -> u32 { 5 }
+    fn default_tickets() -> u32 {
+        2
+    }
+    fn default_events() -> u32 {
+        1
+    }
+    fn default_escalations() -> u32 {
+        5
+    }
 }
 
 impl Default for PollingSection {
@@ -79,15 +79,24 @@ pub fn resolve(cli: Cli) -> Result<ResolvedConfig, ConfigError> {
         )));
     }
     if url.host_str().is_none_or(str::is_empty) {
-        return Err(ConfigError::InvalidApiUrl(format!("{}: empty host", cli.api_url)));
+        return Err(ConfigError::InvalidApiUrl(format!(
+            "{}: empty host",
+            cli.api_url
+        )));
     }
 
     let config = load_config_file(cli.config.as_deref())?;
 
     let mut polling = config.polling;
-    if let Some(v) = cli.tickets_cadence { polling.tickets_seconds = v; }
-    if let Some(v) = cli.events_cadence { polling.events_seconds = v; }
-    if let Some(v) = cli.escalations_cadence { polling.escalations_seconds = v; }
+    if let Some(v) = cli.tickets_cadence {
+        polling.tickets_seconds = v;
+    }
+    if let Some(v) = cli.events_cadence {
+        polling.events_seconds = v;
+    }
+    if let Some(v) = cli.escalations_cadence {
+        polling.escalations_seconds = v;
+    }
 
     if polling.tickets_seconds < 1 {
         return Err(ConfigError::InvalidTicketsCadence(polling.tickets_seconds));
@@ -96,7 +105,9 @@ pub fn resolve(cli: Cli) -> Result<ResolvedConfig, ConfigError> {
         return Err(ConfigError::InvalidEventsCadence(polling.events_seconds));
     }
     if polling.escalations_seconds < 1 {
-        return Err(ConfigError::InvalidEscalationsCadence(polling.escalations_seconds));
+        return Err(ConfigError::InvalidEscalationsCadence(
+            polling.escalations_seconds,
+        ));
     }
 
     Ok(ResolvedConfig {

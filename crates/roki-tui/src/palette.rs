@@ -86,7 +86,10 @@ mod tests {
 
     #[test]
     fn dumb_falls_back_to_16() {
-        assert_eq!(detect_with(&env(&[("TERM", "dumb")])), Palette::IndexedAnsi16);
+        assert_eq!(
+            detect_with(&env(&[("TERM", "dumb")])),
+            Palette::IndexedAnsi16
+        );
     }
 
     #[test]

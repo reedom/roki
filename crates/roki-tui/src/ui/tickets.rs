@@ -1,13 +1,19 @@
+use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
 use ratatui::widgets::{Block, Borders, Cell, Row, Table};
-use ratatui::Frame;
 
 use crate::model::AppModel;
 
 pub fn draw(frame: &mut Frame, area: Rect, model: &AppModel) {
     let header = Row::new(vec![
-        "TicketId", "Repo", "Status", "Labels", "Assignee", "InFlight", "LastEvent",
+        "TicketId",
+        "Repo",
+        "Status",
+        "Labels",
+        "Assignee",
+        "InFlight",
+        "LastEvent",
     ])
     .style(Style::default().add_modifier(Modifier::BOLD));
     let rows = model.tickets.rows.iter().enumerate().map(|(i, t)| {
@@ -22,7 +28,11 @@ pub fn draw(frame: &mut Frame, area: Rect, model: &AppModel) {
             Cell::from(t.status.clone()),
             Cell::from(t.labels.join(",")),
             Cell::from(t.assignee.clone()),
-            Cell::from(t.in_flight_cycle_id.map(|u| u.to_string()).unwrap_or_default()),
+            Cell::from(
+                t.in_flight_cycle_id
+                    .map(|u| u.to_string())
+                    .unwrap_or_default(),
+            ),
             Cell::from(t.last_event_at.to_string()),
         ])
         .style(style)

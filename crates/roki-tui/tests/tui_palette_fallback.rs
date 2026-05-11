@@ -1,9 +1,13 @@
-use roki_tui::palette::{detect_with, EnvProbe, Palette};
+use roki_tui::palette::{EnvProbe, Palette, detect_with};
 
 struct DumbEnv;
 impl EnvProbe for DumbEnv {
     fn get(&self, key: &str) -> Option<String> {
-        if key == "TERM" { Some("dumb".into()) } else { None }
+        if key == "TERM" {
+            Some("dumb".into())
+        } else {
+            None
+        }
     }
 }
 

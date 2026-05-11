@@ -174,7 +174,11 @@ port = {api_port}
     let cycles = cycles_json["cycles"]
         .as_array()
         .expect("response must have a cycles array");
-    assert_eq!(cycles.len(), 1, "expected exactly one cycle, got: {cycles_json}");
+    assert_eq!(
+        cycles.len(),
+        1,
+        "expected exactly one cycle, got: {cycles_json}"
+    );
 
     let cycle = &cycles[0];
 

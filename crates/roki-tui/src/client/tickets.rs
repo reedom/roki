@@ -1,6 +1,6 @@
 use roki_api_types::{TicketDetail, TicketSummary};
 
-use super::{get_json, ApiClient, ClientError};
+use super::{ApiClient, ClientError, get_json};
 
 impl ApiClient {
     pub async fn fetch_tickets(&self) -> Result<Vec<TicketSummary>, ClientError> {

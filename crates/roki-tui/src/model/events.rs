@@ -49,11 +49,19 @@ mod tests {
     fn merges_in_order_and_tracks_seq() {
         let mut v = EventsView::default();
         v.merge_page(
-            EventsPage { events: vec![ev(1), ev(2)], gap: false, next_since: Some(2) },
+            EventsPage {
+                events: vec![ev(1), ev(2)],
+                gap: false,
+                next_since: Some(2),
+            },
             None,
         );
         v.merge_page(
-            EventsPage { events: vec![ev(3)], gap: false, next_since: Some(3) },
+            EventsPage {
+                events: vec![ev(3)],
+                gap: false,
+                next_since: Some(3),
+            },
             Some(2),
         );
         assert_eq!(v.last_seq, Some(3));
@@ -65,12 +73,20 @@ mod tests {
     fn gap_flag_sticks_until_clean_page_arrives() {
         let mut v = EventsView::default();
         v.merge_page(
-            EventsPage { events: vec![ev(10)], gap: true, next_since: Some(10) },
+            EventsPage {
+                events: vec![ev(10)],
+                gap: true,
+                next_since: Some(10),
+            },
             Some(0),
         );
         assert!(v.gap_pending);
         v.merge_page(
-            EventsPage { events: vec![ev(11)], gap: false, next_since: Some(11) },
+            EventsPage {
+                events: vec![ev(11)],
+                gap: false,
+                next_since: Some(11),
+            },
             Some(10),
         );
         assert!(!v.gap_pending);
@@ -81,7 +97,11 @@ mod tests {
         let mut v = EventsView::default();
         let big: Vec<_> = (0..(MAX_ROWS as u64 + 5)).map(ev).collect();
         v.merge_page(
-            EventsPage { events: big, gap: false, next_since: Some(MAX_ROWS as u64 + 4) },
+            EventsPage {
+                events: big,
+                gap: false,
+                next_since: Some(MAX_ROWS as u64 + 4),
+            },
             None,
         );
         assert_eq!(v.rows.len(), MAX_ROWS);

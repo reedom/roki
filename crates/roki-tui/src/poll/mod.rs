@@ -19,16 +19,25 @@ pub struct PollHandles {
     pub focus_tx: watch::Sender<Option<String>>,
 }
 
-pub fn spawn(
-    client: Arc<ApiClient>,
-    cfg: PollingSection,
-    tx: mpsc::Sender<Update>,
-) -> PollHandles {
+pub fn spawn(client: Arc<ApiClient>, cfg: PollingSection, tx: mpsc::Sender<Update>) -> PollHandles {
     let (focus_tx, focus_rx) = watch::channel(None);
-    tokio::spawn(tickets::run(client.clone(), cfg.tickets_seconds, tx.clone()));
+    tokio::spawn(tickets::run(
+        client.clone(),
+        cfg.tickets_seconds,
+        tx.clone(),
+    ));
     tokio::spawn(events::run(client.clone(), cfg.events_seconds, tx.clone()));
-    tokio::spawn(escalations::run(client.clone(), cfg.escalations_seconds, tx.clone()));
-    tokio::spawn(ticket_detail::run(client, cfg.tickets_seconds, focus_rx, tx));
+    tokio::spawn(escalations::run(
+        client.clone(),
+        cfg.escalations_seconds,
+        tx.clone(),
+    ));
+    tokio::spawn(ticket_detail::run(
+        client,
+        cfg.tickets_seconds,
+        focus_rx,
+        tx,
+    ));
     PollHandles { focus_tx }
 }
 
@@ -52,7 +61,10 @@ mod tests {
         let srv = MockServer::start().await;
         Mock::given(method("GET"))
             .and(path("/api/tickets"))
-            .respond_with(ResponseTemplate::new(200).set_body_json::<Vec<roki_api_types::TicketSummary>>(vec![]))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json::<Vec<roki_api_types::TicketSummary>>(vec![]),
+            )
             .mount(&srv)
             .await;
         let client = Arc::new(ApiClient::new(&srv.uri()).unwrap());

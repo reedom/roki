@@ -1,7 +1,7 @@
+use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
 use ratatui::widgets::{Block, Borders, Cell, Row, Table};
-use ratatui::Frame;
 
 use crate::model::AppModel;
 
@@ -9,7 +9,11 @@ pub fn draw(frame: &mut Frame, area: Rect, model: &AppModel) {
     let header = Row::new(vec!["Ack", "Kind", "StateId", "Ticket", "Cycle", "Error"])
         .style(Style::default().add_modifier(Modifier::BOLD));
     let rows = model.escalations.rows.iter().enumerate().map(|(i, e)| {
-        let glyph = if model.escalations.is_acked(e) { "[*]" } else { "[ ]" };
+        let glyph = if model.escalations.is_acked(e) {
+            "[*]"
+        } else {
+            "[ ]"
+        };
         let mut style = Style::default();
         if i == model.escalations.selected {
             style = style.add_modifier(Modifier::REVERSED);

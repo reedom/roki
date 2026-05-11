@@ -29,7 +29,9 @@ pub fn ansi_strip(s: &str) -> String {
         fn esc_dispatch(&mut self, _: &[u8], _: bool, _: u8) {}
     }
     let mut parser = Parser::<DefaultCharAccumulator>::new();
-    let mut sink = Sink { out: String::with_capacity(s.len()) };
+    let mut sink = Sink {
+        out: String::with_capacity(s.len()),
+    };
     for &byte in s.as_bytes() {
         parser.advance(&mut sink, byte);
     }

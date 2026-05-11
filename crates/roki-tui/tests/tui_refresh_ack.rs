@@ -13,11 +13,13 @@ async fn post_refresh_ack_lands_in_status() {
     let srv = MockServer::start().await;
     Mock::given(method("POST"))
         .and(path("/api/refresh"))
-        .respond_with(ResponseTemplate::new(202).set_body_json(roki_api_types::RefreshAck {
-            coalesced: false,
-            earliest_fire_at: None,
-            backoff_active: false,
-        }))
+        .respond_with(
+            ResponseTemplate::new(202).set_body_json(roki_api_types::RefreshAck {
+                coalesced: false,
+                earliest_fire_at: None,
+                backoff_active: false,
+            }),
+        )
         .mount(&srv)
         .await;
 

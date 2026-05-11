@@ -11,7 +11,7 @@ use std::time::Instant;
 
 use crossterm::event::KeyEvent;
 use roki_api_types::{
-    ApiEscalation, ApiEvent, CycleSummary, EventsPage, RefreshAck, TicketDetail, TicketSummary,
+    ApiEscalation, CycleSummary, EventsPage, RefreshAck, TicketDetail, TicketSummary,
 };
 
 use crate::palette::Palette;
@@ -35,12 +35,21 @@ pub enum Update {
     Tickets(Vec<TicketSummary>),
     TicketDetail(TicketDetail),
     Cycles(Vec<CycleSummary>),
-    Tail { visit_n: u32, body: String },
-    Events { page: EventsPage, requested_since: Option<u64> },
+    Tail {
+        visit_n: u32,
+        body: String,
+    },
+    Events {
+        page: EventsPage,
+        requested_since: Option<u64>,
+    },
     Escalations(Vec<ApiEscalation>),
     RefreshAck(RefreshAck),
     Input(KeyEvent),
-    PollError { source: PollSource, message: String },
+    PollError {
+        source: PollSource,
+        message: String,
+    },
     Quit,
 }
 
@@ -98,8 +107,8 @@ impl AppModel {
     pub fn apply_cycles(&mut self, cycles: Vec<CycleSummary>) {
         let prev_selected = self.ticket_detail.selected_cycle;
         self.ticket_detail.cycles = cycles;
-        self.ticket_detail.selected_cycle = prev_selected
-            .min(self.ticket_detail.cycles.len().saturating_sub(1));
+        self.ticket_detail.selected_cycle =
+            prev_selected.min(self.ticket_detail.cycles.len().saturating_sub(1));
     }
 
     pub fn apply_tail(&mut self, visit_n: u32, body: String) {
@@ -108,7 +117,7 @@ impl AppModel {
     }
 
     pub fn apply_refresh_ack(&mut self, ack: RefreshAck) {
-        let parts = vec![
+        let parts = [
             format!("coalesced={}", ack.coalesced),
             format!("backoff_active={}", ack.backoff_active),
             match ack.earliest_fire_at {
@@ -117,7 +126,8 @@ impl AppModel {
             },
         ];
         self.status.set(format!("refresh: {}", parts.join(" ")));
-        self.refresh = RefreshState::DebouncedUntil(Instant::now() + std::time::Duration::from_secs(5));
+        self.refresh =
+            RefreshState::DebouncedUntil(Instant::now() + std::time::Duration::from_secs(5));
     }
 }
 
