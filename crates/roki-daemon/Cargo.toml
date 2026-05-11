@@ -180,6 +180,46 @@ path = "tests/e2e/per_repo_override_smoke.rs"
 name = "workflow_graph_cli_smoke"
 path = "tests/e2e/workflow_graph_cli_smoke.rs"
 
+[[test]]
+name = "api_disabled_smoke"
+path = "tests/e2e/api_disabled_smoke.rs"
+
+[[test]]
+name = "api_healthz_smoke"
+path = "tests/e2e/api_healthz_smoke.rs"
+
+[[test]]
+name = "api_tickets_list_smoke"
+path = "tests/e2e/api_tickets_list_smoke.rs"
+
+[[test]]
+name = "api_cycle_and_visit_smoke"
+path = "tests/e2e/api_cycle_and_visit_smoke.rs"
+
+[[test]]
+name = "api_events_since_smoke"
+path = "tests/e2e/api_events_since_smoke.rs"
+
+[[test]]
+name = "api_escalations_smoke"
+path = "tests/e2e/api_escalations_smoke.rs"
+
+[[test]]
+name = "api_refresh_coalesce_smoke"
+path = "tests/e2e/api_refresh_coalesce_smoke.rs"
+
+[[test]]
+name = "api_refresh_backoff_smoke"
+path = "tests/e2e/api_refresh_backoff_smoke.rs"
+
+[[test]]
+name = "api_non_loopback_warn_smoke"
+path = "tests/e2e/api_non_loopback_warn_smoke.rs"
+
+[[test]]
+name = "api_bind_failure_smoke"
+path = "tests/e2e/api_bind_failure_smoke.rs"
+
 [features]
 # Test-only seam: gates the `ROKI_LINEAR_GRAPHQL_URL` env-var override inside
 # `linear::client` so the release binary always targets the hardcoded endpoint.
