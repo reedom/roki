@@ -1,5 +1,9 @@
-//! ~/.config/roki-tui/config.toml loader + CLI merge. Missing file → defaults.
-//! Validation failure refuses startup with a one-line error on stderr.
+//! ~/.config/roki-tui/config.toml loader + CLI merge.
+//!
+//! Resolution: explicit `--config <path>` is required to exist (otherwise
+//! `ConfigError::ConfigNotFound`). When `--config` is omitted, the default
+//! path is probed and a missing file falls back to defaults. Parse failure
+//! refuses startup with a one-line error on stderr.
 
 use std::path::{Path, PathBuf};
 

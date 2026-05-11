@@ -5,8 +5,8 @@
 use anstyle_parse::{DefaultCharAccumulator, Params, Parser, Perform};
 
 /// Remove ANSI escape sequences (CSI / OSC / SGR / etc.) while preserving
-/// printable bytes. Treats invalid UTF-8 by replacing with U+FFFD upstream;
-/// this function operates on &str.
+/// printable bytes. Operates on &str; callers reject invalid UTF-8 upstream
+/// (see `client::get_text`, which returns `ClientError::InvalidUtf8`).
 pub fn ansi_strip(s: &str) -> String {
     struct Sink {
         out: String,
