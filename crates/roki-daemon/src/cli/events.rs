@@ -8,12 +8,13 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use clap::{Args, ValueEnum};
-use roki_api_types::ApiEvent;
+use roki_api_types::{ApiEvent, EventsPage};
 use thiserror::Error;
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
 use uuid::Uuid;
 
+use crate::cli::shared::config_resolve::resolve_api_url;
 use crate::cli::shared::events_format::format_human;
 
 #[derive(Debug, Default, Args)]
@@ -98,10 +99,112 @@ async fn run_offline_dispatch(args: EventsArgs, format: Format) -> ExitCode {
     }
 }
 
-async fn run_online_dispatch(_args: EventsArgs, _format: Format) -> ExitCode {
-    // Wired in Task 9.
-    eprintln!("roki events: online mode not yet implemented (slice 11 Task 9)");
-    ExitCode::from(70)
+async fn run_online_dispatch(args: EventsArgs, _format: Format) -> ExitCode {
+    let base = match resolve_api_url(args.api.as_deref(), args.config.as_deref()) {
+        Ok(u) => u,
+        Err(e) => {
+            eprintln!("roki events: {e}");
+            return ExitCode::from(1);
+        }
+    };
+    let mut sink = StdoutSink;
+    match run_online(args, base, &mut sink).await {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(err) => {
+            eprintln!("{err}");
+            ExitCode::from(1)
+        }
+    }
+}
+
+/// Output sink. Lets tests capture lines without touching real stdout.
+trait Sink {
+    fn write_line(&mut self, line: &str) -> Result<(), EventsError>;
+}
+
+struct StdoutSink;
+
+impl Sink for StdoutSink {
+    fn write_line(&mut self, line: &str) -> Result<(), EventsError> {
+        use std::io::Write;
+        let stdout = std::io::stdout();
+        let mut lock = stdout.lock();
+        lock.write_all(line.as_bytes())?;
+        lock.write_all(b"\n")?;
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+#[derive(Default)]
+struct StringSink(String);
+
+#[cfg(test)]
+impl Sink for StringSink {
+    fn write_line(&mut self, line: &str) -> Result<(), EventsError> {
+        self.0.push_str(line);
+        self.0.push('\n');
+        Ok(())
+    }
+}
+
+async fn run_online(
+    args: EventsArgs,
+    base: String,
+    sink: &mut dyn Sink,
+) -> Result<(), EventsError> {
+    let client = reqwest::Client::new();
+    let filter = Filter::from_args(&args)?;
+    let mut since: u64 = filter.since_seq.unwrap_or(0);
+    let url = format!("{}/api/events", base.trim_end_matches('/'));
+    loop {
+        let mut req = client.get(&url).query(&[("since", since.to_string())]);
+        if let Some(k) = &args.kind {
+            req = req.query(&[("kind", k.as_str())]);
+        }
+        if let Some(t) = &args.ticket {
+            req = req.query(&[("ticket", t.as_str())]);
+        }
+        if let Some(c) = &args.cycle {
+            req = req.query(&[("cycle", c.as_str())]);
+        }
+        let page: EventsPage = req
+            .send()
+            .await
+            .map_err(|e| EventsError::Http(format!("{e}")))?
+            .error_for_status()
+            .map_err(|e| EventsError::Http(format!("{e}")))?
+            .json::<EventsPage>()
+            .await
+            .map_err(|e| EventsError::Http(format!("{e}")))?;
+        if page.gap {
+            eprintln!("# roki events: ring gap detected; consult [log].file_path");
+        }
+        for ev in &page.events {
+            if !filter.accept_after_seq_cursor(ev) {
+                continue;
+            }
+            match args.format {
+                Format::Json => {
+                    let line = serde_json::to_string(ev)
+                        .map_err(|e| EventsError::BadLine(format!("{e}")))?;
+                    sink.write_line(&line)?;
+                }
+                Format::Human => {
+                    sink.write_line(&format_human(ev))?;
+                }
+            }
+        }
+        match page.next_since {
+            Some(n) => since = n,
+            None => break,
+        }
+        if !args.tail {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(args.cadence_ms)).await;
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -109,7 +212,21 @@ pub(crate) async fn run_capture(args: EventsArgs) -> Result<String, EventsError>
     if args.offline {
         return run_offline_capture(args).await;
     }
-    Err(EventsError::Resolve("test path is offline-only".into()))
+    run_capture_online(args).await
+}
+
+#[cfg(test)]
+pub(crate) async fn run_capture_online(args: EventsArgs) -> Result<String, EventsError> {
+    let base = resolve_api_url(args.api.as_deref(), args.config.as_deref())
+        .map_err(|e| EventsError::Resolve(format!("{e}")))?;
+    let mut sink = StringSink::default();
+    run_online(args, base, &mut sink).await?;
+    // Trim trailing newline so callers can `out.lines()` cleanly.
+    let mut out = sink.0;
+    if out.ends_with('\n') {
+        out.pop();
+    }
+    Ok(out)
 }
 
 async fn run_offline_capture(args: EventsArgs) -> Result<String, EventsError> {
@@ -217,9 +334,7 @@ impl Filter {
     // Server-side seq cursor is already applied via the `since` query
     // param. For RFC3339 cutoffs the client must drop strictly-older
     // events. Other filters are server-applied in online mode, so we
-    // skip them here. Defined now so Task 9 lands without re-touching
-    // this `impl` block.
-    #[cfg_attr(not(test), allow(dead_code))]
+    // skip them here.
     fn accept_after_seq_cursor(&self, ev: &ApiEvent) -> bool {
         if let Some(ts) = self.since_ts
             && ev.ts < ts
@@ -301,6 +416,52 @@ mod tests {
         let first = out.lines().next().unwrap();
         assert!(first.starts_with("1  "));
         assert!(first.contains("ticket=ENG-1"));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn online_dump_against_wiremock() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        let body = serde_json::json!({
+            "events": [{
+                "seq": 1,
+                "ts": "2026-05-11T10:00:00Z",
+                "event": "webhook_received",
+                "ticket_id": "ENG-1",
+                "payload": {"foo": "bar"}
+            }],
+            "gap": false,
+            "next_since": 2,
+        });
+        Mock::given(method("GET"))
+            .and(path("/api/events"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(body))
+            .mount(&server)
+            .await;
+
+        let out = run_capture_online(EventsArgs {
+            api: Some(server.uri()),
+            format: Format::Json,
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+        assert!(out.contains("\"seq\":1"), "out was: {out}");
+        assert!(out.contains("webhook_received"), "out was: {out}");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn online_resolve_api_url_errors_with_no_source() {
+        let err = temp_env::async_with_vars([("ROKI_API_URL", None::<&str>)], async {
+            run_capture_online(EventsArgs::default()).await.unwrap_err()
+        })
+        .await;
+        assert!(
+            format!("{err}").contains("cannot resolve API URL"),
+            "err was: {err}"
+        );
     }
 
     #[tokio::test]
