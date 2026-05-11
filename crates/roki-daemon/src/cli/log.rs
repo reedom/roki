@@ -1,0 +1,352 @@
+//! `roki log` — read per-ticket subprocess captures.
+
+use std::path::PathBuf;
+use std::process::ExitCode;
+
+use clap::{Args, ValueEnum};
+use thiserror::Error;
+
+use crate::cli::shared::{
+    config_resolve::{enforce_same_ticket, resolve_session_root, resolve_ticket_and_cycle},
+    tail::{tail_bytes, tail_lines},
+    visit_lookup::{list_visits, resolve_iter, visit_dir},
+};
+
+#[derive(Debug, Default, Args)]
+pub struct LogArgs {
+    #[arg(long = "ticket", value_name = "ID")]
+    pub ticket: Option<String>,
+    #[arg(long = "cycle", value_name = "UUID")]
+    pub cycle: Option<String>,
+    #[arg(long = "state", value_name = "STATE_ID")]
+    pub state: Option<String>,
+    #[arg(long = "iter", value_name = "N", allow_negative_numbers = true)]
+    pub iter: Option<i32>,
+    #[arg(long = "stream", value_enum)]
+    pub stream: Option<Stream>,
+    #[arg(long = "tail", value_name = "N", conflicts_with = "bytes")]
+    pub tail: Option<usize>,
+    #[arg(long = "bytes", value_name = "N")]
+    pub bytes: Option<u64>,
+    #[arg(long = "list-visits")]
+    pub list_visits: bool,
+    #[arg(long = "meta")]
+    pub meta: bool,
+    #[arg(long = "follow")]
+    pub follow: bool,
+    #[arg(
+        long = "follow-poll-ms",
+        value_name = "MS",
+        default_value_t = 200,
+        hide = true
+    )]
+    pub follow_poll_ms: u64,
+    #[arg(long = "config", value_name = "PATH")]
+    pub config: Option<PathBuf>,
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+#[value(rename_all = "snake_case")]
+pub enum Stream {
+    Stdout,
+    Stderr,
+    Events,
+    Terminal,
+    Directive,
+    ExitCode,
+}
+
+impl Stream {
+    fn file_suffix(self) -> &'static str {
+        match self {
+            Stream::Stdout => ".stdout",
+            Stream::Stderr => ".stderr",
+            Stream::Events => ".events.jsonl",
+            Stream::Terminal => ".terminal.json",
+            Stream::Directive => ".directive.json",
+            Stream::ExitCode => ".exit_code",
+        }
+    }
+}
+
+#[derive(Debug, Error)]
+pub enum LogError {
+    #[error("roki log: cannot resolve session_root (set --config or run from a state subprocess)")]
+    NoSessionRoot,
+    #[error("roki log: {0}")]
+    Resolve(String),
+    #[error("roki log: cross-ticket read refused")]
+    CrossTicket,
+    #[error("roki log: {0:?} not found")]
+    NotFound(PathBuf),
+    #[error("roki log: io: {0}")]
+    Io(#[from] std::io::Error),
+    #[error("roki log: {0}")]
+    Other(String),
+}
+
+pub async fn run(args: LogArgs) -> ExitCode {
+    match run_bytes(args).await {
+        Ok(bytes) => {
+            use std::io::Write;
+            let _ = std::io::stdout().write_all(&bytes);
+            ExitCode::SUCCESS
+        }
+        Err(LogError::CrossTicket) => {
+            eprintln!("{}", LogError::CrossTicket);
+            ExitCode::from(2)
+        }
+        Err(err) => {
+            eprintln!("{err}");
+            ExitCode::from(1)
+        }
+    }
+}
+
+#[cfg(test)]
+pub(crate) async fn run_capture(args: LogArgs) -> Result<String, LogError> {
+    let bytes = run_capture_inner(args).await?;
+    Ok(String::from_utf8_lossy(&bytes).into_owned())
+}
+
+#[cfg(test)]
+async fn run_capture_inner(args: LogArgs) -> Result<Vec<u8>, LogError> {
+    run_bytes(args).await
+}
+
+async fn run_bytes(args: LogArgs) -> Result<Vec<u8>, LogError> {
+    enforce_same_ticket(args.ticket.as_deref()).map_err(|_| LogError::CrossTicket)?;
+    let session_root =
+        resolve_session_root(args.config.as_deref()).map_err(|_| LogError::NoSessionRoot)?;
+    let (ticket, cycle) = resolve_ticket_and_cycle(args.ticket.as_deref(), args.cycle.as_deref())
+        .map_err(|e| LogError::Resolve(format!("{e}")))?;
+    let cycle_dir = session_root.join(&ticket).join(format!("cycle-{cycle}"));
+
+    if args.list_visits {
+        return list_visits_jsonl(&cycle_dir);
+    }
+    if args.meta {
+        let p = cycle_dir.join("cycle.json");
+        return std::fs::read(&p).map_err(|_| LogError::NotFound(p));
+    }
+    // Stream read.
+    let stream = args.stream.ok_or_else(|| {
+        LogError::Other("roki log: --stream required (or pass --list-visits / --meta)".into())
+    })?;
+    let state = args
+        .state
+        .ok_or_else(|| LogError::Other("roki log: --state required for stream reads".into()))?;
+    let visit = resolve_iter(&cycle_dir, args.iter).map_err(|e| LogError::Other(format!("{e}")))?;
+    let file = visit_dir(&cycle_dir, visit).join(format!("{state}{}", stream.file_suffix()));
+    if !file.exists() {
+        return Err(LogError::NotFound(file));
+    }
+    if let Some(n) = args.tail {
+        return tail_lines(&file, n).map_err(LogError::Io);
+    }
+    if let Some(n) = args.bytes {
+        return tail_bytes(&file, n).map_err(LogError::Io);
+    }
+    std::fs::read(&file).map_err(|_| LogError::NotFound(file))
+}
+
+fn list_visits_jsonl(cycle_dir: &std::path::Path) -> Result<Vec<u8>, LogError> {
+    let visits = list_visits(cycle_dir).map_err(|e| LogError::Other(format!("{e}")))?;
+    let mut out = String::new();
+    for n in visits {
+        let vd = visit_dir(cycle_dir, n);
+        let (state_id, exit_code) = pick_state_and_exit(&vd);
+        out.push_str(&match exit_code {
+            Some(code) => {
+                format!("{{\"visit_n\":{n},\"state_id\":\"{state_id}\",\"exit_code\":{code}}}\n")
+            }
+            None => format!("{{\"visit_n\":{n},\"state_id\":\"{state_id}\"}}\n"),
+        });
+    }
+    Ok(out.into_bytes())
+}
+
+fn pick_state_and_exit(visit_dir: &std::path::Path) -> (String, Option<i32>) {
+    let mut state_id = String::new();
+    let mut exit_code: Option<i32> = None;
+    if let Ok(read) = std::fs::read_dir(visit_dir) {
+        for entry in read.flatten() {
+            if let Some(name) = entry.file_name().to_str()
+                && let Some(rest) = name.strip_suffix(".exit_code")
+            {
+                state_id = rest.to_string();
+                if let Ok(s) = std::fs::read_to_string(entry.path())
+                    && let Ok(n) = s.trim().parse::<i32>()
+                {
+                    exit_code = Some(n);
+                }
+                break;
+            }
+        }
+    }
+    (state_id, exit_code)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn fixture(session_root: &std::path::Path, ticket: &str, cycle: &str) -> std::path::PathBuf {
+        let cycle_dir = session_root.join(ticket).join(format!("cycle-{cycle}"));
+        for n in 1..=2u32 {
+            let vd = cycle_dir.join(format!("visit-{n:03}"));
+            std::fs::create_dir_all(&vd).unwrap();
+            std::fs::write(vd.join("impl.stdout"), format!("v{n} stdout\n")).unwrap();
+            std::fs::write(vd.join("impl.stderr"), format!("v{n} stderr\n")).unwrap();
+            std::fs::write(vd.join("impl.exit_code"), "0\n").unwrap();
+        }
+        cycle_dir
+    }
+
+    #[tokio::test]
+    async fn list_visits_emits_jsonl_for_each_visit() {
+        let tmp = tempfile::tempdir().unwrap();
+        let _ = fixture(tmp.path(), "ENG-1", "00000000-0000-0000-0000-000000000001");
+        let env = [
+            (
+                "ROKI_CONFIG_SESSION_ROOT",
+                Some(tmp.path().to_str().unwrap()),
+            ),
+            ("ROKI_TICKET_ID", Some("ENG-1")),
+            (
+                "ROKI_CYCLE_ID",
+                Some("00000000-0000-0000-0000-000000000001"),
+            ),
+        ];
+        let out = temp_env::async_with_vars(env, async {
+            run_capture(LogArgs {
+                list_visits: true,
+                ..Default::default()
+            })
+            .await
+        })
+        .await
+        .unwrap();
+        let lines: Vec<&str> = out.lines().collect();
+        assert_eq!(lines.len(), 2);
+        assert!(lines[0].contains("\"visit_n\":1"));
+        assert!(lines[1].contains("\"visit_n\":2"));
+        assert!(lines[0].contains("\"exit_code\":0"));
+    }
+
+    #[tokio::test]
+    async fn stream_stdout_default_iter_is_latest() {
+        let tmp = tempfile::tempdir().unwrap();
+        let _ = fixture(tmp.path(), "ENG-1", "00000000-0000-0000-0000-000000000001");
+        let env = [
+            (
+                "ROKI_CONFIG_SESSION_ROOT",
+                Some(tmp.path().to_str().unwrap()),
+            ),
+            ("ROKI_TICKET_ID", Some("ENG-1")),
+            (
+                "ROKI_CYCLE_ID",
+                Some("00000000-0000-0000-0000-000000000001"),
+            ),
+        ];
+        let out = temp_env::async_with_vars(env, async {
+            run_capture(LogArgs {
+                state: Some("impl".into()),
+                stream: Some(Stream::Stdout),
+                ..Default::default()
+            })
+            .await
+        })
+        .await
+        .unwrap();
+        assert_eq!(out, "v2 stdout\n");
+    }
+
+    #[tokio::test]
+    async fn stream_stdout_relative_iter_minus_one_reads_previous() {
+        let tmp = tempfile::tempdir().unwrap();
+        let _ = fixture(tmp.path(), "ENG-1", "00000000-0000-0000-0000-000000000001");
+        let env = [
+            (
+                "ROKI_CONFIG_SESSION_ROOT",
+                Some(tmp.path().to_str().unwrap()),
+            ),
+            ("ROKI_TICKET_ID", Some("ENG-1")),
+            (
+                "ROKI_CYCLE_ID",
+                Some("00000000-0000-0000-0000-000000000001"),
+            ),
+        ];
+        let out = temp_env::async_with_vars(env, async {
+            run_capture(LogArgs {
+                state: Some("impl".into()),
+                stream: Some(Stream::Stdout),
+                iter: Some(-1),
+                ..Default::default()
+            })
+            .await
+        })
+        .await
+        .unwrap();
+        // -1 is the latest = visit-002 by convention in this plan; the spec
+        // §4.2 step 3 defines "Relative -N → take dirs.len() - N (1-indexed)".
+        assert_eq!(out, "v2 stdout\n");
+    }
+
+    #[tokio::test]
+    async fn meta_emits_cycle_json_bytes() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cycle_dir = fixture(tmp.path(), "ENG-1", "00000000-0000-0000-0000-000000000001");
+        std::fs::write(cycle_dir.join("cycle.json"), r#"{"hello":"world"}"#).unwrap();
+        let env = [
+            (
+                "ROKI_CONFIG_SESSION_ROOT",
+                Some(tmp.path().to_str().unwrap()),
+            ),
+            ("ROKI_TICKET_ID", Some("ENG-1")),
+            (
+                "ROKI_CYCLE_ID",
+                Some("00000000-0000-0000-0000-000000000001"),
+            ),
+        ];
+        let out = temp_env::async_with_vars(env, async {
+            run_capture(LogArgs {
+                meta: true,
+                ..Default::default()
+            })
+            .await
+        })
+        .await
+        .unwrap();
+        assert_eq!(out, r#"{"hello":"world"}"#);
+    }
+
+    #[tokio::test]
+    async fn cross_ticket_refused_when_env_set_and_flag_differs() {
+        let tmp = tempfile::tempdir().unwrap();
+        let _ = fixture(tmp.path(), "ABC-1", "00000000-0000-0000-0000-000000000001");
+        let env = [
+            (
+                "ROKI_CONFIG_SESSION_ROOT",
+                Some(tmp.path().to_str().unwrap()),
+            ),
+            ("ROKI_TICKET_ID", Some("ABC-1")),
+            (
+                "ROKI_CYCLE_ID",
+                Some("00000000-0000-0000-0000-000000000001"),
+            ),
+        ];
+        let err = temp_env::async_with_vars(env, async {
+            run_capture(LogArgs {
+                ticket: Some("XYZ-9".into()),
+                state: Some("impl".into()),
+                stream: Some(Stream::Stdout),
+                ..Default::default()
+            })
+            .await
+        })
+        .await
+        .unwrap_err();
+        assert!(format!("{err}").contains("cross-ticket read refused"));
+    }
+}

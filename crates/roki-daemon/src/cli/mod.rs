@@ -14,8 +14,8 @@ use clap::{Parser, Subcommand};
 
 use crate::runtime;
 
+pub mod log;
 pub mod workflow;
-// pub mod log;     // wired in Task 7
 // pub mod events;  // wired in Task 10
 pub mod repo;
 pub mod shared;
@@ -50,6 +50,8 @@ pub enum CliCommand {
     },
     /// Resolve a ticket's worktree path (or ghq base fallback).
     Repo(repo::RepoArgs),
+    /// Read per-ticket subprocess captures (fr:09 §`roki log`).
+    Log(log::LogArgs),
 }
 
 /// Parse argv from the process and dispatch the matched subcommand.
@@ -67,6 +69,7 @@ pub async fn run() -> ExitCode {
         }
         CliCommand::Workflow { cmd } => workflow::dispatch(cmd),
         CliCommand::Repo(args) => repo::run(args).await,
+        CliCommand::Log(args) => log::run(args).await,
     }
 }
 
