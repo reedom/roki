@@ -421,7 +421,6 @@ pub(crate) async fn run_inner(config_path: &Path, mode: DispatchMode) -> Result<
     };
 
     let mut drained: usize = 0;
-    let mut aborted_ticket_ids: Vec<String> = Vec::new();
 
     for (ticket_id, handle) in entries {
         let crate::daemon::dispatcher::TicketHandle { inbox, join } = handle;
@@ -438,22 +437,46 @@ pub(crate) async fn run_inner(config_path: &Path, mode: DispatchMode) -> Result<
                 drained += 1;
             }
             Ok(Err(join_err)) => {
-                // Task panicked; treat as aborted so the operator sees
-                // it on the shutdown line.
                 tracing::error!(
                     ticket_id = %ticket_id,
                     error = %join_err,
                     "ticket task join error during shutdown"
                 );
-                aborted_ticket_ids.push(ticket_id);
             }
             Err(_) => {
-                aborted_ticket_ids.push(ticket_id);
+                // Timed out — drain window expired before the task joined.
             }
         }
     }
 
-    let aborted = aborted_ticket_ids.len();
+    // Read the live-subprocess registry. Anything still here at deadline
+    // is an offender that did not honour SIGTERM within the window.
+    let mut offenders_raw = inflight.snapshot().await;
+    // Stable order keyed by ticket_id for a deterministic event payload.
+    offenders_raw.sort_by(|a, b| a.ticket_id.cmp(&b.ticket_id));
+
+    // SIGKILL each surviving pid. ESRCH (already-exited race) is ignored.
+    for off in &offenders_raw {
+        if off.pid != 0 {
+            let _ = nix::sys::signal::kill(
+                nix::unistd::Pid::from_raw(off.pid as i32),
+                nix::sys::signal::Signal::SIGKILL,
+            );
+        }
+    }
+
+    let offenders: Vec<crate::events::ShutdownOffender> = offenders_raw
+        .into_iter()
+        .map(|off| crate::events::ShutdownOffender {
+            ticket_id: off.ticket_id,
+            cycle_id: off.cycle_id.to_string(),
+            state_id: off.state_id,
+            visit: off.visit,
+            pid: off.pid,
+        })
+        .collect();
+
+    let aborted = offenders.len();
 
     {
         let mut w = daemon_events.lock().await;
@@ -484,7 +507,7 @@ pub(crate) async fn run_inner(config_path: &Path, mode: DispatchMode) -> Result<
         let _ = w.emit(&Event::ShutdownWindowExceeded {
             ts: now_rfc3339(),
             aborted,
-            offenders: Vec::new(),
+            offenders,
         });
         return Err(SkeletonError::ShutdownWindowExceeded);
     }

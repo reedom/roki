@@ -11,7 +11,7 @@
 //!
 //! Assertions:
 //!   - `shutdown_window_exceeded` has `aborted >= 1`.
-//!   - `shutdown_window_exceeded` has `aborted_ticket_ids` containing "ENG-100".
+//!   - `shutdown_window_exceeded` carries `offenders[].ticket_id` containing "ENG-100".
 
 use std::net::{SocketAddr, TcpListener};
 use std::time::Duration;
@@ -52,8 +52,10 @@ async fn sigint_long_cycle_emits_shutdown_window_exceeded() {
     let ticket_id = "ENG-100";
 
     let workflow_path = work.path().join("WORKFLOW.yaml");
-    // Single rule: matches in_progress; run sleeps 30s — robustly longer than
-    // the 1s shutdown_window_seconds so the window always expires first.
+    // Single rule: matches in_progress; run ignores SIGTERM and sleeps 30s.
+    // `trap '' TERM` makes the shell ignore SIGTERM so terminate_child_external's
+    // 5s grace period elapses before SIGKILL, guaranteeing the 1s shutdown
+    // window is exceeded before the ticket task's subprocess dies.
     let workflow_body = r#"
 admission:
   assignee: u1
@@ -65,7 +67,7 @@ rules:
       status: in_progress
     tasks:
       - id: run0
-        run: 'sh -c ''sleep 30'''
+        run: 'sh -c ''trap """" TERM; sleep 30'''
       - id: post0
         run: 'printf ''{\"directive\":\"end\"}'''
 "#;
@@ -189,16 +191,18 @@ session_root = "{session_root}"
         "shutdown_window_exceeded must have aborted >= 1; got: {exceeded_event}"
     );
 
-    // Assert shutdown_window_exceeded carries aborted_ticket_ids containing "ENG-100".
-    let ticket_ids = exceeded_event["aborted_ticket_ids"]
+    let offenders = exceeded_event["offenders"]
         .as_array()
         .unwrap_or_else(|| {
-            panic!("missing aborted_ticket_ids in shutdown_window_exceeded: {exceeded_event}")
+            panic!("missing offenders in shutdown_window_exceeded: {exceeded_event}")
         });
-    let contains_eng100 = ticket_ids.iter().any(|v| v.as_str() == Some("ENG-100"));
+    let ticket_ids: Vec<&str> = offenders
+        .iter()
+        .filter_map(|o| o["ticket_id"].as_str())
+        .collect();
     assert!(
-        contains_eng100,
-        "aborted_ticket_ids must contain \"ENG-100\"; got: {exceeded_event}"
+        ticket_ids.contains(&"ENG-100"),
+        "offenders[].ticket_id must contain \"ENG-100\"; got: {exceeded_event}"
     );
 }
 
