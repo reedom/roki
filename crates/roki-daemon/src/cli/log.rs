@@ -86,35 +86,176 @@ pub enum LogError {
 }
 
 pub async fn run(args: LogArgs) -> ExitCode {
-    match run_bytes(args).await {
-        Ok(bytes) => {
-            use std::io::Write;
-            let _ = std::io::stdout().write_all(&bytes);
-            ExitCode::SUCCESS
+    if args.follow {
+        match run_follow_streaming(args).await {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(LogError::CrossTicket) => {
+                eprintln!("{}", LogError::CrossTicket);
+                ExitCode::from(2)
+            }
+            Err(err) => {
+                eprintln!("{err}");
+                ExitCode::from(1)
+            }
         }
-        Err(LogError::CrossTicket) => {
-            eprintln!("{}", LogError::CrossTicket);
-            ExitCode::from(2)
-        }
-        Err(err) => {
-            eprintln!("{err}");
-            ExitCode::from(1)
+    } else {
+        match run_capture_inner(args).await {
+            Ok(bytes) => {
+                use std::io::Write;
+                let _ = std::io::stdout().write_all(&bytes);
+                ExitCode::SUCCESS
+            }
+            Err(LogError::CrossTicket) => {
+                eprintln!("{}", LogError::CrossTicket);
+                ExitCode::from(2)
+            }
+            Err(err) => {
+                eprintln!("{err}");
+                ExitCode::from(1)
+            }
         }
     }
 }
 
 #[cfg(test)]
 pub(crate) async fn run_capture(args: LogArgs) -> Result<String, LogError> {
+    if args.follow {
+        let bytes = follow_file_for_test(args).await?;
+        return Ok(String::from_utf8_lossy(&bytes).into_owned());
+    }
     let bytes = run_capture_inner(args).await?;
     Ok(String::from_utf8_lossy(&bytes).into_owned())
 }
 
 #[cfg(test)]
-async fn run_capture_inner(args: LogArgs) -> Result<Vec<u8>, LogError> {
-    run_bytes(args).await
+async fn follow_file_for_test(args: LogArgs) -> Result<Vec<u8>, LogError> {
+    enforce_same_ticket(args.ticket.as_deref()).map_err(|_| LogError::CrossTicket)?;
+    let session_root =
+        resolve_session_root(args.config.as_deref()).map_err(|_| LogError::NoSessionRoot)?;
+    let (ticket, cycle) = resolve_ticket_and_cycle(args.ticket.as_deref(), args.cycle.as_deref())
+        .map_err(|e| LogError::Resolve(format!("{e}")))?;
+    let cycle_dir = session_root.join(&ticket).join(format!("cycle-{cycle}"));
+    let stream = args
+        .stream
+        .ok_or_else(|| LogError::Other("roki log: --stream required for --follow".into()))?;
+    if !matches!(stream, Stream::Stdout | Stream::Stderr) {
+        return Err(LogError::Other(
+            "roki log: --follow supported only with --stream stdout|stderr".into(),
+        ));
+    }
+    let state = args
+        .state
+        .ok_or_else(|| LogError::Other("roki log: --state required for --follow".into()))?;
+    let visit = resolve_iter(&cycle_dir, args.iter).map_err(|e| LogError::Other(format!("{e}")))?;
+    let file = visit_dir(&cycle_dir, visit).join(format!("{state}{}", stream.file_suffix()));
+    if !file.exists() {
+        return Err(LogError::NotFound(file));
+    }
+    follow_file(&file, &cycle_dir, &state, args.follow_poll_ms).await
 }
 
-async fn run_bytes(args: LogArgs) -> Result<Vec<u8>, LogError> {
+async fn follow_file(
+    file: &std::path::Path,
+    _cycle_dir: &std::path::Path,
+    state: &str,
+    poll_ms: u64,
+) -> Result<Vec<u8>, LogError> {
+    use tokio::io::{AsyncReadExt, AsyncSeekExt};
+    let mut collected = Vec::new();
+    let mut f = tokio::fs::File::open(file).await.map_err(LogError::Io)?;
+    let mut offset: u64 = 0;
+    let exit_sentinel = file.with_file_name(format!("{state}.exit_code"));
+    // Each iteration: read whatever is new, sleep, then check the exit-code
+    // sentinel that marks "writer is done".
+    loop {
+        let len = f.metadata().await.map_err(LogError::Io)?.len();
+        if len > offset {
+            let mut buf = vec![0u8; (len - offset) as usize];
+            f.seek(std::io::SeekFrom::Start(offset))
+                .await
+                .map_err(LogError::Io)?;
+            f.read_exact(&mut buf).await.map_err(LogError::Io)?;
+            collected.extend_from_slice(&buf);
+            offset = len;
+        }
+        // Termination signal: the daemon writes `<state>.exit_code` when the
+        // visit finishes. Once present, drain any final bytes and exit.
+        if exit_sentinel.exists() {
+            let len = f.metadata().await.map_err(LogError::Io)?.len();
+            if len > offset {
+                let mut buf = vec![0u8; (len - offset) as usize];
+                f.seek(std::io::SeekFrom::Start(offset))
+                    .await
+                    .map_err(LogError::Io)?;
+                f.read_exact(&mut buf).await.map_err(LogError::Io)?;
+                collected.extend_from_slice(&buf);
+            }
+            return Ok(collected);
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(poll_ms)).await;
+    }
+}
+
+async fn run_follow_streaming(args: LogArgs) -> Result<(), LogError> {
+    // Resolve block duplicated from run_capture_inner so chunks can stream
+    // directly to stdout instead of accumulating.
+    enforce_same_ticket(args.ticket.as_deref()).map_err(|_| LogError::CrossTicket)?;
+    let session_root =
+        resolve_session_root(args.config.as_deref()).map_err(|_| LogError::NoSessionRoot)?;
+    let (ticket, cycle) = resolve_ticket_and_cycle(args.ticket.as_deref(), args.cycle.as_deref())
+        .map_err(|e| LogError::Resolve(format!("{e}")))?;
+    let cycle_dir = session_root.join(&ticket).join(format!("cycle-{cycle}"));
+    let stream = args
+        .stream
+        .ok_or_else(|| LogError::Other("roki log: --stream required for --follow".into()))?;
+    if !matches!(stream, Stream::Stdout | Stream::Stderr) {
+        return Err(LogError::Other(
+            "roki log: --follow supported only with --stream stdout|stderr".into(),
+        ));
+    }
+    let state = args
+        .state
+        .ok_or_else(|| LogError::Other("roki log: --state required for --follow".into()))?;
+    let visit = resolve_iter(&cycle_dir, args.iter).map_err(|e| LogError::Other(format!("{e}")))?;
+    let file = visit_dir(&cycle_dir, visit).join(format!("{state}{}", stream.file_suffix()));
+    if !file.exists() {
+        return Err(LogError::NotFound(file));
+    }
+    use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
+    let mut f = tokio::fs::File::open(&file).await.map_err(LogError::Io)?;
+    let mut offset: u64 = 0;
+    let exit_sentinel = file.with_file_name(format!("{state}.exit_code"));
+    let mut stdout = tokio::io::stdout();
+    loop {
+        let len = f.metadata().await.map_err(LogError::Io)?.len();
+        if len > offset {
+            let mut buf = vec![0u8; (len - offset) as usize];
+            f.seek(std::io::SeekFrom::Start(offset))
+                .await
+                .map_err(LogError::Io)?;
+            f.read_exact(&mut buf).await.map_err(LogError::Io)?;
+            stdout.write_all(&buf).await.map_err(LogError::Io)?;
+            stdout.flush().await.map_err(LogError::Io)?;
+            offset = len;
+        }
+        if exit_sentinel.exists() {
+            let len = f.metadata().await.map_err(LogError::Io)?.len();
+            if len > offset {
+                let mut buf = vec![0u8; (len - offset) as usize];
+                f.seek(std::io::SeekFrom::Start(offset))
+                    .await
+                    .map_err(LogError::Io)?;
+                f.read_exact(&mut buf).await.map_err(LogError::Io)?;
+                stdout.write_all(&buf).await.map_err(LogError::Io)?;
+                stdout.flush().await.map_err(LogError::Io)?;
+            }
+            return Ok(());
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(args.follow_poll_ms)).await;
+    }
+}
+
+async fn run_capture_inner(args: LogArgs) -> Result<Vec<u8>, LogError> {
     enforce_same_ticket(args.ticket.as_deref()).map_err(|_| LogError::CrossTicket)?;
     let session_root =
         resolve_session_root(args.config.as_deref()).map_err(|_| LogError::NoSessionRoot)?;
@@ -319,6 +460,56 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(out, r#"{"hello":"world"}"#);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn follow_picks_up_late_writes() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cycle = "00000000-0000-0000-0000-000000000002";
+        let cycle_dir = tmp.path().join("ENG-2").join(format!("cycle-{cycle}"));
+        let vd = cycle_dir.join("visit-001");
+        std::fs::create_dir_all(&vd).unwrap();
+        let stdout_path = vd.join("impl.stdout");
+        std::fs::write(&stdout_path, b"first\n").unwrap();
+
+        // Writer task appends after 100 ms.
+        let path_clone = stdout_path.clone();
+        let writer = tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            use std::io::Write;
+            let mut f = std::fs::OpenOptions::new()
+                .append(true)
+                .open(&path_clone)
+                .unwrap();
+            f.write_all(b"second\n").unwrap();
+            // signal end-of-test by writing the sentinel file the follower watches
+            tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+            std::fs::write(path_clone.with_extension("exit_code"), "0\n").unwrap();
+        });
+
+        let env = [
+            (
+                "ROKI_CONFIG_SESSION_ROOT",
+                Some(tmp.path().to_str().unwrap()),
+            ),
+            ("ROKI_TICKET_ID", Some("ENG-2")),
+            ("ROKI_CYCLE_ID", Some(cycle)),
+        ];
+        let collected = temp_env::async_with_vars(env, async {
+            run_capture(LogArgs {
+                state: Some("impl".into()),
+                stream: Some(Stream::Stdout),
+                follow: true,
+                follow_poll_ms: 50,
+                ..Default::default()
+            })
+            .await
+        })
+        .await
+        .unwrap();
+        writer.await.unwrap();
+        assert!(collected.contains("first"));
+        assert!(collected.contains("second"));
     }
 
     #[tokio::test]
