@@ -9,7 +9,7 @@ use thiserror::Error;
 use crate::cli::shared::{
     config_resolve::{enforce_same_ticket, resolve_session_root, resolve_ticket_and_cycle},
     tail::{tail_bytes, tail_lines},
-    visit_lookup::{list_visits, resolve_iter, visit_dir},
+    visit_lookup::{list_visits, resolve_iter_for_state, visit_dir},
 };
 
 #[derive(Debug, Default, Args)]
@@ -131,8 +131,53 @@ pub(crate) async fn run_capture(args: LogArgs) -> Result<String, LogError> {
     Ok(String::from_utf8_lossy(&bytes).into_owned())
 }
 
+/// Output sink for the follow loop. Production writes chunks directly to
+/// stdout; tests accumulate into a `Vec<u8>` so the bytes can be asserted.
+trait FollowSink: Send {
+    fn write_chunk<'a>(
+        &'a mut self,
+        bytes: &'a [u8],
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = std::io::Result<()>> + Send + 'a>>;
+}
+
+struct StdoutFollowSink {
+    stdout: tokio::io::Stdout,
+}
+
+impl FollowSink for StdoutFollowSink {
+    fn write_chunk<'a>(
+        &'a mut self,
+        bytes: &'a [u8],
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = std::io::Result<()>> + Send + 'a>> {
+        Box::pin(async move {
+            use tokio::io::AsyncWriteExt;
+            self.stdout.write_all(bytes).await?;
+            self.stdout.flush().await
+        })
+    }
+}
+
 #[cfg(test)]
-async fn follow_file_for_test(args: LogArgs) -> Result<Vec<u8>, LogError> {
+struct CapturingFollowSink(Vec<u8>);
+
+#[cfg(test)]
+impl FollowSink for CapturingFollowSink {
+    fn write_chunk<'a>(
+        &'a mut self,
+        bytes: &'a [u8],
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = std::io::Result<()>> + Send + 'a>> {
+        let owned = bytes.to_vec();
+        Box::pin(async move {
+            self.0.extend_from_slice(&owned);
+            Ok(())
+        })
+    }
+}
+
+/// Common --follow prelude shared between production and tests. Resolves
+/// every CLI input down to the capture file path and the state id (used
+/// to build the exit-code sentinel).
+fn resolve_follow_target(args: &LogArgs) -> Result<(std::path::PathBuf, String, u64), LogError> {
     enforce_same_ticket(args.ticket.as_deref()).map_err(|_| LogError::CrossTicket)?;
     let session_root =
         resolve_session_root(args.config.as_deref()).map_err(|_| LogError::NoSessionRoot)?;
@@ -149,28 +194,31 @@ async fn follow_file_for_test(args: LogArgs) -> Result<Vec<u8>, LogError> {
     }
     let state = args
         .state
+        .clone()
         .ok_or_else(|| LogError::Usage("--state required for --follow".into()))?;
-    let visit = resolve_iter(&cycle_dir, args.iter).map_err(|e| LogError::Other(format!("{e}")))?;
+    let visit = resolve_iter_for_state(&cycle_dir, args.iter, Some(&state))
+        .map_err(|e| LogError::Other(format!("{e}")))?;
     let file = visit_dir(&cycle_dir, visit).join(format!("{state}{}", stream.file_suffix()));
     if !file.exists() {
         return Err(LogError::NotFound(file));
     }
-    follow_file(&file, &cycle_dir, &state, args.follow_poll_ms).await
+    Ok((file, state, args.follow_poll_ms))
 }
 
-async fn follow_file(
+/// Single follow loop body shared by production and tests. Polls the
+/// capture file for new bytes, writes them to `sink`, terminates after
+/// draining any final bytes once the visit's `<state>.exit_code`
+/// sentinel appears on disk.
+async fn follow_loop(
     file: &std::path::Path,
-    _cycle_dir: &std::path::Path,
     state: &str,
     poll_ms: u64,
-) -> Result<Vec<u8>, LogError> {
+    sink: &mut dyn FollowSink,
+) -> Result<(), LogError> {
     use tokio::io::{AsyncReadExt, AsyncSeekExt};
-    let mut collected = Vec::new();
     let mut f = tokio::fs::File::open(file).await.map_err(LogError::Io)?;
     let mut offset: u64 = 0;
     let exit_sentinel = file.with_file_name(format!("{state}.exit_code"));
-    // Each iteration: read whatever is new, sleep, then check the exit-code
-    // sentinel that marks "writer is done".
     loop {
         let len = f.metadata().await.map_err(LogError::Io)?.len();
         if len > offset {
@@ -179,12 +227,12 @@ async fn follow_file(
                 .await
                 .map_err(LogError::Io)?;
             f.read_exact(&mut buf).await.map_err(LogError::Io)?;
-            collected.extend_from_slice(&buf);
+            sink.write_chunk(&buf).await.map_err(LogError::Io)?;
             offset = len;
         }
-        // Termination signal: the daemon writes `<state>.exit_code` when the
-        // visit finishes. Once present, drain any final bytes and exit.
         if exit_sentinel.exists() {
+            // Drain any bytes appended between the last poll and the
+            // sentinel write so the consumer sees the full capture.
             let len = f.metadata().await.map_err(LogError::Io)?.len();
             if len > offset {
                 let mut buf = vec![0u8; (len - offset) as usize];
@@ -192,71 +240,28 @@ async fn follow_file(
                     .await
                     .map_err(LogError::Io)?;
                 f.read_exact(&mut buf).await.map_err(LogError::Io)?;
-                collected.extend_from_slice(&buf);
+                sink.write_chunk(&buf).await.map_err(LogError::Io)?;
             }
-            return Ok(collected);
+            return Ok(());
         }
         tokio::time::sleep(std::time::Duration::from_millis(poll_ms)).await;
     }
 }
 
 async fn run_follow_streaming(args: LogArgs) -> Result<(), LogError> {
-    // Resolve block duplicated from run_capture_inner so chunks can stream
-    // directly to stdout instead of accumulating.
-    enforce_same_ticket(args.ticket.as_deref()).map_err(|_| LogError::CrossTicket)?;
-    let session_root =
-        resolve_session_root(args.config.as_deref()).map_err(|_| LogError::NoSessionRoot)?;
-    let (ticket, cycle) = resolve_ticket_and_cycle(args.ticket.as_deref(), args.cycle.as_deref())
-        .map_err(|e| LogError::Resolve(format!("{e}")))?;
-    let cycle_dir = session_root.join(&ticket).join(format!("cycle-{cycle}"));
-    let stream = args
-        .stream
-        .ok_or_else(|| LogError::Usage("--stream required for --follow".into()))?;
-    if !matches!(stream, Stream::Stdout | Stream::Stderr) {
-        return Err(LogError::Usage(
-            "--follow supported only with --stream stdout|stderr".into(),
-        ));
-    }
-    let state = args
-        .state
-        .ok_or_else(|| LogError::Usage("--state required for --follow".into()))?;
-    let visit = resolve_iter(&cycle_dir, args.iter).map_err(|e| LogError::Other(format!("{e}")))?;
-    let file = visit_dir(&cycle_dir, visit).join(format!("{state}{}", stream.file_suffix()));
-    if !file.exists() {
-        return Err(LogError::NotFound(file));
-    }
-    use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
-    let mut f = tokio::fs::File::open(&file).await.map_err(LogError::Io)?;
-    let mut offset: u64 = 0;
-    let exit_sentinel = file.with_file_name(format!("{state}.exit_code"));
-    let mut stdout = tokio::io::stdout();
-    loop {
-        let len = f.metadata().await.map_err(LogError::Io)?.len();
-        if len > offset {
-            let mut buf = vec![0u8; (len - offset) as usize];
-            f.seek(std::io::SeekFrom::Start(offset))
-                .await
-                .map_err(LogError::Io)?;
-            f.read_exact(&mut buf).await.map_err(LogError::Io)?;
-            stdout.write_all(&buf).await.map_err(LogError::Io)?;
-            stdout.flush().await.map_err(LogError::Io)?;
-            offset = len;
-        }
-        if exit_sentinel.exists() {
-            let len = f.metadata().await.map_err(LogError::Io)?.len();
-            if len > offset {
-                let mut buf = vec![0u8; (len - offset) as usize];
-                f.seek(std::io::SeekFrom::Start(offset))
-                    .await
-                    .map_err(LogError::Io)?;
-                f.read_exact(&mut buf).await.map_err(LogError::Io)?;
-                stdout.write_all(&buf).await.map_err(LogError::Io)?;
-                stdout.flush().await.map_err(LogError::Io)?;
-            }
-            return Ok(());
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(args.follow_poll_ms)).await;
-    }
+    let (file, state, poll_ms) = resolve_follow_target(&args)?;
+    let mut sink = StdoutFollowSink {
+        stdout: tokio::io::stdout(),
+    };
+    follow_loop(&file, &state, poll_ms, &mut sink).await
+}
+
+#[cfg(test)]
+async fn follow_file_for_test(args: LogArgs) -> Result<Vec<u8>, LogError> {
+    let (file, state, poll_ms) = resolve_follow_target(&args)?;
+    let mut sink = CapturingFollowSink(Vec::new());
+    follow_loop(&file, &state, poll_ms, &mut sink).await?;
+    Ok(sink.0)
 }
 
 async fn run_capture_inner(args: LogArgs) -> Result<Vec<u8>, LogError> {
@@ -281,7 +286,8 @@ async fn run_capture_inner(args: LogArgs) -> Result<Vec<u8>, LogError> {
     let state = args
         .state
         .ok_or_else(|| LogError::Usage("--state required for stream reads".into()))?;
-    let visit = resolve_iter(&cycle_dir, args.iter).map_err(|e| LogError::Other(format!("{e}")))?;
+    let visit = resolve_iter_for_state(&cycle_dir, args.iter, Some(&state))
+        .map_err(|e| LogError::Other(format!("{e}")))?;
     let file = visit_dir(&cycle_dir, visit).join(format!("{state}{}", stream.file_suffix()));
     if !file.exists() {
         return Err(LogError::NotFound(file));
@@ -543,5 +549,110 @@ mod tests {
         .await
         .unwrap_err();
         assert!(format!("{err}").contains("cross-ticket read refused"));
+    }
+
+    #[tokio::test]
+    async fn stream_tail_returns_last_n_lines() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cycle = "00000000-0000-0000-0000-00000000000d";
+        let vd = tmp
+            .path()
+            .join("ENG-1")
+            .join(format!("cycle-{cycle}"))
+            .join("visit-001");
+        std::fs::create_dir_all(&vd).unwrap();
+        std::fs::write(vd.join("impl.stdout"), b"a\nb\nc\nd\ne\n").unwrap();
+        std::fs::write(vd.join("impl.exit_code"), "0\n").unwrap();
+        let env = [
+            (
+                "ROKI_CONFIG_SESSION_ROOT",
+                Some(tmp.path().to_str().unwrap()),
+            ),
+            ("ROKI_TICKET_ID", Some("ENG-1")),
+            ("ROKI_CYCLE_ID", Some(cycle)),
+        ];
+        let out = temp_env::async_with_vars(env, async {
+            run_capture(LogArgs {
+                state: Some("impl".into()),
+                stream: Some(Stream::Stdout),
+                tail: Some(2),
+                ..Default::default()
+            })
+            .await
+        })
+        .await
+        .unwrap();
+        assert_eq!(out, "d\ne\n");
+    }
+
+    #[tokio::test]
+    async fn stream_bytes_returns_byte_suffix() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cycle = "00000000-0000-0000-0000-00000000000e";
+        let vd = tmp
+            .path()
+            .join("ENG-1")
+            .join(format!("cycle-{cycle}"))
+            .join("visit-001");
+        std::fs::create_dir_all(&vd).unwrap();
+        std::fs::write(vd.join("impl.stdout"), b"abcdef").unwrap();
+        std::fs::write(vd.join("impl.exit_code"), "0\n").unwrap();
+        let env = [
+            (
+                "ROKI_CONFIG_SESSION_ROOT",
+                Some(tmp.path().to_str().unwrap()),
+            ),
+            ("ROKI_TICKET_ID", Some("ENG-1")),
+            ("ROKI_CYCLE_ID", Some(cycle)),
+        ];
+        let out = temp_env::async_with_vars(env, async {
+            run_capture(LogArgs {
+                state: Some("impl".into()),
+                stream: Some(Stream::Stdout),
+                bytes: Some(3),
+                ..Default::default()
+            })
+            .await
+        })
+        .await
+        .unwrap();
+        assert_eq!(out, "def");
+    }
+
+    #[tokio::test]
+    async fn list_visits_omits_exit_code_for_in_flight_visit() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cycle = "00000000-0000-0000-0000-00000000000f";
+        let cycle_dir = tmp.path().join("ENG-1").join(format!("cycle-{cycle}"));
+        // visit-001 finished (exit_code present); visit-002 still in flight.
+        let v1 = cycle_dir.join("visit-001");
+        std::fs::create_dir_all(&v1).unwrap();
+        std::fs::write(v1.join("impl.stdout"), b"x").unwrap();
+        std::fs::write(v1.join("impl.exit_code"), "0\n").unwrap();
+        let v2 = cycle_dir.join("visit-002");
+        std::fs::create_dir_all(&v2).unwrap();
+        std::fs::write(v2.join("impl.stdout"), b"y").unwrap();
+        // No exit_code file for visit-002.
+        let env = [
+            (
+                "ROKI_CONFIG_SESSION_ROOT",
+                Some(tmp.path().to_str().unwrap()),
+            ),
+            ("ROKI_TICKET_ID", Some("ENG-1")),
+            ("ROKI_CYCLE_ID", Some(cycle)),
+        ];
+        let out = temp_env::async_with_vars(env, async {
+            run_capture(LogArgs {
+                list_visits: true,
+                ..Default::default()
+            })
+            .await
+        })
+        .await
+        .unwrap();
+        let lines: Vec<&str> = out.lines().collect();
+        assert_eq!(lines.len(), 2);
+        assert!(lines[0].contains("\"exit_code\":0"), "{}", lines[0]);
+        assert!(!lines[1].contains("\"exit_code\""), "{}", lines[1]);
     }
 }
