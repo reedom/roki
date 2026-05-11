@@ -137,6 +137,16 @@ pub enum Event {
         cycle_id: Option<String>,
         reason: WorktreeDeleteReason,
     },
+    ApiRequest {
+        ts: String,
+        method: String,
+        path: String,
+        query_keys: Vec<String>,
+        status: u16,
+        duration_ms: u32,
+        client_addr: String,
+        correlation_id: String,
+    },
     DaemonStarted {
         ts: String,
         config_path: String,
@@ -217,6 +227,7 @@ impl Event {
             Event::FailureUnhandled { .. } => "failure_unhandled",
             Event::EscalationAdded { .. } => "escalation_added",
             Event::WorktreeDeleteRequested { .. } => "worktree_delete_requested",
+            Event::ApiRequest { .. } => "api_request",
             Event::DaemonStarted { .. } => "daemon_started",
             Event::DaemonReady { .. } => "daemon_ready",
             Event::DaemonShutdownBegan { .. } => "daemon_shutdown_began",
@@ -254,6 +265,7 @@ impl Event {
                 cycle_id,
                 ..
             } => (Some(ticket_id.as_str()), cycle_id.as_deref().map(parse_cycle)),
+            Event::ApiRequest { .. } => (None, None),
             Event::DaemonStarted { .. } => (None, None),
             Event::DaemonReady { .. } => (None, None),
             Event::DaemonShutdownBegan { .. } => (None, None),
