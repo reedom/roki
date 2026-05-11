@@ -7,8 +7,11 @@
 use std::fs::{File, OpenOptions};
 use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use serde::Serialize;
+
+use crate::observability::EventRing;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -201,6 +204,83 @@ pub enum Event {
         path: String,
         reason: SessionTempdirDeleteReason,
     },
+}
+
+impl Event {
+    /// Canonical lowercase discriminator matching the `#[serde(tag = "event",
+    /// rename_all = "snake_case")]` mapping. Read on the ring fast path so
+    /// the caller does not need to re-serialize the event just to learn its
+    /// kind.
+    pub fn kind_str(&self) -> &'static str {
+        match self {
+            Event::CycleCompleted { .. } => "cycle_completed",
+            Event::FailureUnhandled { .. } => "failure_unhandled",
+            Event::EscalationAdded { .. } => "escalation_added",
+            Event::WorktreeDeleteRequested { .. } => "worktree_delete_requested",
+            Event::DaemonStarted { .. } => "daemon_started",
+            Event::DaemonReady { .. } => "daemon_ready",
+            Event::DaemonShutdownBegan { .. } => "daemon_shutdown_began",
+            Event::DaemonShutdownCompleted { .. } => "daemon_shutdown_completed",
+            Event::ShutdownWindowExceeded { .. } => "shutdown_window_exceeded",
+            Event::WebhookSkipped { .. } => "webhook_skipped",
+            Event::ColdStartBegan { .. } => "cold_start_began",
+            Event::ColdStartCompleted { .. } => "cold_start_completed",
+            Event::OrphanReconcileSkipped { .. } => "orphan_reconcile_skipped",
+            Event::StatusFilterDropped { .. } => "status_filter_dropped",
+            Event::LinearBackoffApplied { .. } => "linear_backoff_applied",
+            Event::SessionTempdirDeleted { .. } => "session_tempdir_deleted",
+        }
+    }
+
+    /// Extract the routing keys `(ticket_id, cycle_id)` carried by this event
+    /// variant. Returned as owned strings so the caller can hand them to the
+    /// ring without holding a borrow on `self`.
+    pub fn routing_keys(&self) -> (Option<String>, Option<String>) {
+        match self {
+            Event::CycleCompleted { cycle_id, .. } => (None, Some(cycle_id.clone())),
+            Event::FailureUnhandled { cycle_id, .. } => (None, Some(cycle_id.clone())),
+            Event::EscalationAdded {
+                ticket_id,
+                cycle_id,
+                ..
+            } => (ticket_id.clone(), cycle_id.clone()),
+            Event::WorktreeDeleteRequested {
+                ticket_id,
+                cycle_id,
+                ..
+            } => (Some(ticket_id.clone()), cycle_id.clone()),
+            Event::DaemonStarted { .. } => (None, None),
+            Event::DaemonReady { .. } => (None, None),
+            Event::DaemonShutdownBegan { .. } => (None, None),
+            Event::DaemonShutdownCompleted { .. } => (None, None),
+            Event::ShutdownWindowExceeded { .. } => (None, None),
+            Event::WebhookSkipped { ticket_id, .. } => (Some(ticket_id.clone()), None),
+            Event::ColdStartBegan { .. } => (None, None),
+            Event::ColdStartCompleted { .. } => (None, None),
+            Event::OrphanReconcileSkipped { .. } => (None, None),
+            Event::StatusFilterDropped { .. } => (None, None),
+            Event::LinearBackoffApplied { .. } => (None, None),
+            Event::SessionTempdirDeleted { ticket_id, .. } => (Some(ticket_id.clone()), None),
+        }
+    }
+}
+
+/// Thin adapter that records an `Event` into the in-memory `EventRing` after
+/// extracting the routing keys + JSON payload. Lives next to the file-backed
+/// `EventWriter` so emit sites can route a single event through both sinks.
+pub struct EventTap {
+    pub ring: Arc<EventRing>,
+}
+
+impl EventTap {
+    pub fn record(&self, event: &Event) {
+        let kind = event.kind_str();
+        let (ticket, cycle) = event.routing_keys();
+        let payload = serde_json::to_value(event).unwrap_or(serde_json::Value::Null);
+        let cycle_uuid = cycle.and_then(|s| uuid::Uuid::parse_str(&s).ok());
+        self.ring
+            .record(kind, ticket.as_deref(), cycle_uuid, payload);
+    }
 }
 
 pub fn events_path(session_root: &Path, ticket_id: &str) -> PathBuf {
@@ -464,6 +544,23 @@ mod tests {
             "{s}"
         );
         assert!(s.contains("\"kind\":\"fs_poison\""), "{s}");
+    }
+
+    #[test]
+    fn tap_records_event_into_ring() {
+        let ring = EventRing::new(10);
+        let tap = EventTap { ring: ring.clone() };
+        tap.record(&Event::CycleCompleted {
+            ts: "2026-05-11T00:00:00Z".into(),
+            cycle_id: uuid::Uuid::nil().to_string(),
+            cycle_kind: "rule".into(),
+            iters: 1,
+            terminal_id: Some("__success__".into()),
+            outcome: Some("success".into()),
+        });
+        let p = ring.page(None, None, None, None, 10);
+        assert_eq!(p.events.len(), 1);
+        assert_eq!(p.events[0].event, "cycle_completed");
     }
 
     #[test]

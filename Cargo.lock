@@ -1368,6 +1368,7 @@ dependencies = [
  "liquid",
  "nix",
  "reqwest",
+ "roki-api-types",
  "serde",
  "serde_json",
  "serde_yaml_ng",
