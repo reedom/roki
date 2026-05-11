@@ -343,6 +343,9 @@ pub enum SkeletonError {
 
     #[error("shutdown window exceeded; aborted in-flight ticket tasks")]
     ShutdownWindowExceeded,
+
+    #[error("missing required CLI dependency: {}", binaries.join(", "))]
+    MissingDependency { binaries: Vec<String> },
 }
 
 #[cfg(test)]

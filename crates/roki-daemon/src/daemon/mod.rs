@@ -6,6 +6,7 @@
 
 pub mod cache;
 pub mod cold_start;
+pub mod deps;
 pub mod cycle_metadata;
 pub mod dispatcher;
 pub mod orphan;
