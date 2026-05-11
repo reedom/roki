@@ -9,8 +9,11 @@ pub struct MissingDependency {
 }
 
 const REQUIRED: &[(&str, &str)] = &[
-    ("wt",  "install worktree manager 'wt' and put it on PATH"),
-    ("ghq", "install ghq (https://github.com/x-motemen/ghq) and put it on PATH"),
+    ("wt", "install worktree manager 'wt' and put it on PATH"),
+    (
+        "ghq",
+        "install ghq (https://github.com/x-motemen/ghq) and put it on PATH",
+    ),
 ];
 
 pub fn check() -> Result<(), Vec<MissingDependency>> {
@@ -24,7 +27,11 @@ fn check_with<F: Fn(&str) -> bool>(found: F) -> Result<(), Vec<MissingDependency
         .filter(|(bin, _)| !found(bin))
         .map(|(binary, hint)| MissingDependency { binary, hint })
         .collect();
-    if missing.is_empty() { Ok(()) } else { Err(missing) }
+    if missing.is_empty() {
+        Ok(())
+    } else {
+        Err(missing)
+    }
 }
 
 #[cfg(test)]

@@ -78,7 +78,13 @@ impl CycleRunner for RealCycleRunner {
         };
 
         let cycle_id = Uuid::new_v4();
-        let runner = build_runner(&self.cfg, admitted, cycle_id, self.shutdown.clone(), self.inflight.clone());
+        let runner = build_runner(
+            &self.cfg,
+            admitted,
+            cycle_id,
+            self.shutdown.clone(),
+            self.inflight.clone(),
+        );
         let mut ctx = build_cycle_context(&self.cfg, admitted, cycle_id, kind, cycle_trigger, None);
 
         // Best-effort write of cycle.json at cycle start so the slice 9 HTTP
@@ -212,7 +218,13 @@ impl RealCycleRunner {
         };
 
         let handler_cycle_id = Uuid::new_v4();
-        let handler_runner = build_runner(&self.cfg, admitted, handler_cycle_id, self.shutdown.clone(), self.inflight.clone());
+        let handler_runner = build_runner(
+            &self.cfg,
+            admitted,
+            handler_cycle_id,
+            self.shutdown.clone(),
+            self.inflight.clone(),
+        );
         let mut handler_ctx = build_cycle_context(
             &self.cfg,
             admitted,

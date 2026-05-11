@@ -191,11 +191,9 @@ session_root = "{session_root}"
         "shutdown_window_exceeded must have aborted >= 1; got: {exceeded_event}"
     );
 
-    let offenders = exceeded_event["offenders"]
-        .as_array()
-        .unwrap_or_else(|| {
-            panic!("missing offenders in shutdown_window_exceeded: {exceeded_event}")
-        });
+    let offenders = exceeded_event["offenders"].as_array().unwrap_or_else(|| {
+        panic!("missing offenders in shutdown_window_exceeded: {exceeded_event}")
+    });
     let ticket_ids: Vec<&str> = offenders
         .iter()
         .filter_map(|o| o["ticket_id"].as_str())
