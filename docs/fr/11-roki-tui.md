@@ -9,6 +9,8 @@ refs:
     - fr:06-failure-handling
     - fr:10-http-api
     - fr:09-log-access-cli
+  modules:
+    - crates/roki-tui/src/palette.rs
 ---
 
 # FR 11: roki-tui
