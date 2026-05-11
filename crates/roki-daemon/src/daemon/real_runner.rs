@@ -335,8 +335,22 @@ fn build_cycle_context(
         "config".into(),
         serde_json::json!({
             "max_iterations": cfg.engine.max_iterations,
+            "session_root": cfg.paths.session_root.to_string_lossy(),
         }),
     );
+    if let Some(port) = cfg.api.port {
+        let bind = if cfg.api.bind.is_empty() {
+            "127.0.0.1".to_string()
+        } else {
+            cfg.api.bind.clone()
+        };
+        if let Some(serde_json::Value::Object(m)) = globals.get_mut("config") {
+            m.insert(
+                "api_url".into(),
+                serde_json::Value::String(format!("http://{bind}:{port}")),
+            );
+        }
+    }
     if let Some(meta) = failure {
         globals.insert(
             "failure".into(),
@@ -405,4 +419,91 @@ fn _silence_unused_path() {
     let _: PathBuf = PathBuf::new();
     let _: &[RuleEntry] = &[];
     let _: Option<&StateMachine> = None;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::linear::ticket::NormalizedTicket;
+
+    fn admitted_ticket() -> AdmittedTicket {
+        AdmittedTicket {
+            ticket: NormalizedTicket::new(
+                "ENG-1".into(),
+                None,
+                "Backlog".into(),
+                vec![],
+                "t".into(),
+                "b".into(),
+            ),
+            ghq: "github.com/x/y".into(),
+        }
+    }
+
+    #[test]
+    fn build_cycle_context_exports_session_root_into_globals_config() {
+        let cfg = RokiConfig::test_default(std::path::Path::new("/tmp/sess-x"));
+        let admitted = admitted_ticket();
+        let cx = build_cycle_context(
+            &cfg,
+            &admitted,
+            Uuid::nil(),
+            CycleKind::Rule,
+            CycleTrigger::Runtime,
+            None,
+        );
+        let cfg_obj = cx
+            .globals
+            .get("config")
+            .and_then(|v| v.as_object())
+            .expect("config namespace present");
+        assert_eq!(
+            cfg_obj.get("session_root").and_then(|v| v.as_str()),
+            Some("/tmp/sess-x")
+        );
+    }
+
+    #[test]
+    fn build_cycle_context_exports_api_url_when_port_set() {
+        let mut cfg = RokiConfig::test_default(std::path::Path::new("/tmp/sess-x"));
+        cfg.api.port = Some(7777);
+        // bind defaults to 127.0.0.1 in test_default; verify the synthesized URL.
+        let admitted = admitted_ticket();
+        let cx = build_cycle_context(
+            &cfg,
+            &admitted,
+            Uuid::nil(),
+            CycleKind::Rule,
+            CycleTrigger::Runtime,
+            None,
+        );
+        let url = cx
+            .globals
+            .get("config")
+            .and_then(|v| v.get("api_url"))
+            .and_then(|v| v.as_str())
+            .expect("api_url present");
+        assert_eq!(url, "http://127.0.0.1:7777");
+    }
+
+    #[test]
+    fn build_cycle_context_omits_api_url_when_port_unset() {
+        let cfg = RokiConfig::test_default(std::path::Path::new("/tmp/sess-x"));
+        assert!(cfg.api.port.is_none());
+        let admitted = admitted_ticket();
+        let cx = build_cycle_context(
+            &cfg,
+            &admitted,
+            Uuid::nil(),
+            CycleKind::Rule,
+            CycleTrigger::Runtime,
+            None,
+        );
+        let cfg_obj = cx
+            .globals
+            .get("config")
+            .and_then(|v| v.as_object())
+            .unwrap();
+        assert!(cfg_obj.get("api_url").is_none());
+    }
 }

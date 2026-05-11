@@ -646,6 +646,10 @@ mod tests {
             "cycle".into(),
             serde_json::json!({ "id": "00000000-0000-0000-0000-000000000000", "kind": "rule", "trigger": "runtime", "iter": 0 }),
         );
+        ctx.globals.insert(
+            "config".into(),
+            serde_json::json!({ "session_root": "/tmp/sess-x" }),
+        );
         ctx
     }
 
@@ -957,6 +961,11 @@ mod tests {
         assert!(names.contains(&"ROKI_TICKET_ID"));
         assert!(names.contains(&"ROKI_CYCLE_KIND"));
         assert!(names.contains(&"ROKI_CYCLE_ITER"));
+        assert!(names.contains(&"ROKI_CONFIG_SESSION_ROOT"));
+        // ROKI_API_URL is only set when the test fixture configures [api].port.
+        // The default fixture leaves the API server disabled, so assert absence
+        // to lock the gating behavior.
+        assert!(!names.contains(&"ROKI_API_URL"));
     }
 
     #[test]
