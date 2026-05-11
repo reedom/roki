@@ -145,4 +145,21 @@ mod tests {
             "root help should list cleanup: {help}"
         );
     }
+
+    #[test]
+    fn cleanup_help_names_config_and_roki_toml() {
+        let cli = Cli::command();
+        let cleanup = cli
+            .find_subcommand("cleanup")
+            .expect("cleanup subcommand exists");
+        let help = cleanup.clone().render_help().to_string();
+        assert!(
+            help.contains("--config"),
+            "cleanup help missing --config: {help}"
+        );
+        assert!(
+            help.contains("roki.toml"),
+            "cleanup help should mention roki.toml: {help}"
+        );
+    }
 }
