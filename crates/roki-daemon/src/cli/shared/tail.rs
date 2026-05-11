@@ -30,7 +30,11 @@ pub fn tail_lines(path: &Path, n: usize) -> std::io::Result<Vec<u8>> {
     let mut newlines: usize = 0;
     // Skip a final trailing newline so it doesn't count as a delimiter for line n.
     let last_is_nl = *bytes.last().unwrap() == b'\n';
-    let scan_end = if last_is_nl { bytes.len() - 1 } else { bytes.len() };
+    let scan_end = if last_is_nl {
+        bytes.len() - 1
+    } else {
+        bytes.len()
+    };
     for i in (0..scan_end).rev() {
         if bytes[i] == b'\n' {
             newlines += 1;

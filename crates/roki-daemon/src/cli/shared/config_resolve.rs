@@ -72,11 +72,19 @@ pub fn resolve_ticket_and_cycle(
 ) -> Result<(String, String), ResolveError> {
     let ticket = ticket_flag
         .map(|s| s.to_string())
-        .or_else(|| std::env::var("ROKI_TICKET_ID").ok().filter(|s| !s.is_empty()))
+        .or_else(|| {
+            std::env::var("ROKI_TICKET_ID")
+                .ok()
+                .filter(|s| !s.is_empty())
+        })
         .ok_or_else(|| ResolveError::Config("ticket missing".into()))?;
     let cycle = cycle_flag
         .map(|s| s.to_string())
-        .or_else(|| std::env::var("ROKI_CYCLE_ID").ok().filter(|s| !s.is_empty()))
+        .or_else(|| {
+            std::env::var("ROKI_CYCLE_ID")
+                .ok()
+                .filter(|s| !s.is_empty())
+        })
         .ok_or_else(|| ResolveError::Config("cycle missing".into()))?;
     Ok((ticket, cycle))
 }
@@ -102,11 +110,9 @@ mod tests {
 
     #[test]
     fn env_wins_over_config_path() {
-        let result = temp_env::with_var(
-            "ROKI_CONFIG_SESSION_ROOT",
-            Some("/from/env"),
-            || resolve_session_root(None).unwrap(),
-        );
+        let result = temp_env::with_var("ROKI_CONFIG_SESSION_ROOT", Some("/from/env"), || {
+            resolve_session_root(None).unwrap()
+        });
         assert_eq!(result, PathBuf::from("/from/env"));
     }
 
@@ -164,9 +170,8 @@ session_root = "/from/toml"
 
     #[test]
     fn api_url_errors_when_nothing_resolves() {
-        let err = temp_env::with_var_unset("ROKI_API_URL", || {
-            resolve_api_url(None, None).unwrap_err()
-        });
+        let err =
+            temp_env::with_var_unset("ROKI_API_URL", || resolve_api_url(None, None).unwrap_err());
         assert!(matches!(err, ResolveError::NoApiUrl));
     }
 
