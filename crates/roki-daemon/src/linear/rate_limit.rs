@@ -37,6 +37,23 @@ impl RateLimitState {
         self.backoff_until_ms.load(Ordering::Acquire) > now
     }
 
+    /// Returns the earliest legal `Instant` at which the next request may
+    /// fire. `None` means "no backoff active". The instant is derived from
+    /// the stored epoch-ms deadline relative to wall-clock now, so callers
+    /// can compare against `Instant::now()` directly.
+    pub fn next_legal_at(&self) -> Option<std::time::Instant> {
+        let until_ms = self.backoff_until_ms.load(Ordering::Acquire);
+        if until_ms == 0 {
+            return None;
+        }
+        let now = now_ms();
+        if until_ms <= now {
+            return None;
+        }
+        let remaining = std::time::Duration::from_millis(until_ms - now);
+        Some(std::time::Instant::now() + remaining)
+    }
+
     pub async fn wait_if_backoff(&self) {
         let now = now_ms();
         let until = self.backoff_until_ms.load(Ordering::Acquire);
