@@ -188,10 +188,13 @@ pub(crate) async fn run_inner(config_path: &Path, mode: DispatchMode) -> Result<
 
     // 7. Build runner. Slice 8: the runner constructs a `RealStateRunner`
     //    per cycle internally, sourced from `cfg.default_ai`.
+    let inflight = Arc::new(crate::daemon::inflight::InflightRegistry::new());
     let runner = Arc::new(RealCycleRunner {
         workflow: workflow.clone(),
         cfg: cfg.clone(),
         escalation: escalation.clone(),
+        shutdown: shutdown.clone(),
+        inflight: inflight.clone(),
     });
 
     // 9. Build cache + dispatcher.

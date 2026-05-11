@@ -11,6 +11,7 @@
 
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
+use std::sync::Arc;
 use std::time::Instant;
 
 use async_trait::async_trait;
@@ -21,6 +22,8 @@ use tokio::process::Command;
 use uuid::Uuid;
 
 use crate::capture;
+use crate::daemon::inflight::{Inflight, InflightRegistry};
+use crate::daemon::shutdown::ShutdownToken;
 use crate::engine::cwd;
 use crate::engine::sentinel::{self, DirectivePayload, SentinelError};
 use crate::engine::stall::{StallOutcome, Watchdog};
@@ -53,6 +56,12 @@ pub struct RealStateRunner {
     pub session_tempdir: PathBuf,
     /// Stable cycle UUID; appears in capture paths as `cycle-<uuid>/`.
     pub cycle_id: Uuid,
+    /// Fires on SIGINT / SIGTERM. The runner SIGTERMs the live child when
+    /// this becomes ready and reaps normally afterward.
+    pub shutdown: ShutdownToken,
+    /// Process-wide live-subprocess registry. The runner registers right
+    /// after spawn and clears right after reap.
+    pub inflight: Arc<InflightRegistry>,
 }
 
 #[async_trait]
@@ -212,10 +221,22 @@ impl StateRunner for RealStateRunner {
             }
         };
 
+        let pid = child.id().unwrap_or(0);
+        self.inflight
+            .register(Inflight {
+                ticket_id: self.ticket_id.clone(),
+                cycle_id: self.cycle_id,
+                state_id: state.id.clone(),
+                visit: visit_n,
+                pid,
+            })
+            .await;
+
         // 12. Write stdin once if needed.
         if let Some(body) = stdin_rendered.as_ref() {
             if let Some(mut stdin) = child.stdin.take() {
                 if let Err(err) = stdin.write_all(body.as_bytes()).await {
+                    self.inflight.clear(&self.ticket_id).await;
                     return StateOutcome::Failure {
                         kind: FailureKind::ProcessCrash,
                         error_text: format!("stdin write: {err}"),
@@ -249,8 +270,25 @@ impl StateRunner for RealStateRunner {
             drain_stderr(stderr_pipe, stderr_file).await;
         });
 
-        // 14. Watchdog runs to completion (Healthy or StalledThenTerminated).
-        let stall_outcome = watchdog.run(&mut child).await;
+        // 14. Watchdog runs in parallel with a shutdown observer. On shutdown
+        // fire we SIGTERM the live child (reusing `engine::stall::
+        // terminate_child_external`, which does TERM → 5 s grace → KILL
+        // → reap). The watchdog's `Healthy` short-circuit covers the race
+        // where the child exits cleanly before SIGTERM lands.
+        let stall_outcome = {
+            let shutdown = self.shutdown.clone();
+            tokio::select! {
+                biased;
+                outcome = watchdog.run(&mut child) => outcome,
+                _ = shutdown.wait() => {
+                    crate::engine::stall::terminate_child_external(&mut child).await;
+                    // Treat as "Healthy" for the wait-and-reap path below;
+                    // the resulting exit_status is a signal kill, which
+                    // step 17 already classifies as `ProcessCrash`.
+                    StallOutcome::Healthy
+                }
+            }
+        };
         let terminal_payload = stdout_task.await.unwrap_or(None);
         let _ = stderr_task.await;
 
@@ -264,6 +302,7 @@ impl StateRunner for RealStateRunner {
                 };
             }
         };
+        self.inflight.clear(&self.ticket_id).await;
         let duration_seconds = started.elapsed().as_secs();
 
         // 16. Stall trumps everything else.
@@ -629,6 +668,8 @@ mod tests {
             session_root: tmp.to_path_buf(),
             session_tempdir: tmp.join(ticket),
             cycle_id: Uuid::nil(),
+            shutdown: crate::daemon::shutdown::ShutdownToken::new(),
+            inflight: std::sync::Arc::new(crate::daemon::inflight::InflightRegistry::new()),
         }
     }
 

@@ -27,6 +27,8 @@ pub struct RealCycleRunner {
     pub workflow: Arc<WorkflowConfig>,
     pub cfg: Arc<RokiConfig>,
     pub escalation: Arc<EscalationQueue>,
+    pub shutdown: crate::daemon::shutdown::ShutdownToken,
+    pub inflight: Arc<crate::daemon::inflight::InflightRegistry>,
 }
 
 #[async_trait::async_trait]
@@ -76,7 +78,7 @@ impl CycleRunner for RealCycleRunner {
         };
 
         let cycle_id = Uuid::new_v4();
-        let runner = build_runner(&self.cfg, admitted, cycle_id);
+        let runner = build_runner(&self.cfg, admitted, cycle_id, self.shutdown.clone(), self.inflight.clone());
         let mut ctx = build_cycle_context(&self.cfg, admitted, cycle_id, kind, cycle_trigger, None);
 
         // Best-effort write of cycle.json at cycle start so the slice 9 HTTP
@@ -210,7 +212,7 @@ impl RealCycleRunner {
         };
 
         let handler_cycle_id = Uuid::new_v4();
-        let handler_runner = build_runner(&self.cfg, admitted, handler_cycle_id);
+        let handler_runner = build_runner(&self.cfg, admitted, handler_cycle_id, self.shutdown.clone(), self.inflight.clone());
         let mut handler_ctx = build_cycle_context(
             &self.cfg,
             admitted,
@@ -286,7 +288,13 @@ impl RealCycleRunner {
     }
 }
 
-fn build_runner(cfg: &RokiConfig, admitted: &AdmittedTicket, cycle_id: Uuid) -> RealStateRunner {
+fn build_runner(
+    cfg: &RokiConfig,
+    admitted: &AdmittedTicket,
+    cycle_id: Uuid,
+    shutdown: crate::daemon::shutdown::ShutdownToken,
+    inflight: Arc<crate::daemon::inflight::InflightRegistry>,
+) -> RealStateRunner {
     let session_root = cfg.paths.session_root.clone();
     let session_tempdir =
         session_root.join(crate::capture::sanitize_ticket_id(&admitted.ticket.id));
@@ -298,6 +306,8 @@ fn build_runner(cfg: &RokiConfig, admitted: &AdmittedTicket, cycle_id: Uuid) -> 
         session_root,
         session_tempdir,
         cycle_id,
+        shutdown,
+        inflight,
     }
 }
 
