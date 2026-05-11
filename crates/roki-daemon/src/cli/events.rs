@@ -118,7 +118,7 @@ async fn run_online_dispatch(args: EventsArgs, _format: Format) -> ExitCode {
 }
 
 /// Output sink. Lets tests capture lines without touching real stdout.
-trait Sink {
+trait Sink: Send {
     fn write_line(&mut self, line: &str) -> Result<(), EventsError>;
 }
 
@@ -157,6 +157,9 @@ async fn run_online(
     let filter = Filter::from_args(&args)?;
     let mut since: u64 = filter.since_seq.unwrap_or(0);
     let url = format!("{}/api/events", base.trim_end_matches('/'));
+    // Surface ring gaps to stderr at most once per contiguous run so tail
+    // mode doesn't spam when the server keeps returning gap=true.
+    let mut gap_reported = false;
     loop {
         let mut req = client.get(&url).query(&[("since", since.to_string())]);
         if let Some(k) = &args.kind {
@@ -168,17 +171,27 @@ async fn run_online(
         if let Some(c) = &args.cycle {
             req = req.query(&[("cycle", c.as_str())]);
         }
-        let page: EventsPage = req
-            .send()
-            .await
-            .map_err(|e| EventsError::Http(format!("{e}")))?
-            .error_for_status()
-            .map_err(|e| EventsError::Http(format!("{e}")))?
-            .json::<EventsPage>()
-            .await
-            .map_err(|e| EventsError::Http(format!("{e}")))?;
+        let page: EventsPage = match fetch_page(req).await {
+            Ok(p) => p,
+            Err(err) if args.tail => {
+                // Transient errors in --tail mode are reported and retried.
+                // Non-tail callers still get the failure as exit 1.
+                eprintln!("# roki events: transient http error: {err}; retrying");
+                tokio::time::sleep(std::time::Duration::from_millis(args.cadence_ms)).await;
+                continue;
+            }
+            Err(err) => return Err(err),
+        };
         if page.gap {
-            eprintln!("# roki events: ring gap detected; consult [log].file_path");
+            if !gap_reported {
+                eprintln!("# roki events: ring gap detected; consult [log].file_path");
+                gap_reported = true;
+            }
+            // Also emit a structured marker into the output stream so JSON
+            // consumers piping events downstream see the discontinuity.
+            sink.write_line(&gap_marker_line(args.format, since))?;
+        } else {
+            gap_reported = false;
         }
         for ev in &page.events {
             if !filter.accept_after_seq_cursor(ev) {
@@ -210,6 +223,24 @@ async fn run_online(
     Ok(())
 }
 
+async fn fetch_page(req: reqwest::RequestBuilder) -> Result<EventsPage, EventsError> {
+    req.send()
+        .await
+        .map_err(|e| EventsError::Http(format!("{e}")))?
+        .error_for_status()
+        .map_err(|e| EventsError::Http(format!("{e}")))?
+        .json::<EventsPage>()
+        .await
+        .map_err(|e| EventsError::Http(format!("{e}")))
+}
+
+fn gap_marker_line(format: Format, since: u64) -> String {
+    match format {
+        Format::Json => format!(r#"{{"event":"__gap__","since":{since},"detail":"ring overrun"}}"#),
+        Format::Human => format!("-  -  __gap__  since={since}  detail=ring overrun"),
+    }
+}
+
 #[cfg(test)]
 pub(crate) async fn run_capture(args: EventsArgs) -> Result<String, EventsError> {
     if args.offline {
@@ -233,18 +264,25 @@ pub(crate) async fn run_capture_online(args: EventsArgs) -> Result<String, Event
 }
 
 async fn run_offline_capture(args: EventsArgs) -> Result<String, EventsError> {
-    let file = args.file.clone().ok_or(EventsError::NoFile)?;
-    let raw = std::fs::read_to_string(&file)?;
+    use std::io::BufRead;
+    let file_path = args.file.clone().ok_or(EventsError::NoFile)?;
+    let file = std::fs::File::open(&file_path)?;
+    let reader = std::io::BufReader::new(file);
     let filter = Filter::from_args(&args)?;
     let mut out = String::new();
-    for line in raw.lines() {
+    for (idx, line) in reader.lines().enumerate() {
+        let line = line?;
         if line.trim().is_empty() {
             continue;
         }
-        let ev: ApiEvent = match serde_json::from_str(line) {
+        let ev: ApiEvent = match serde_json::from_str(&line) {
             Ok(e) => e,
-            Err(_) => {
-                eprintln!("# roki events: skipping malformed line");
+            Err(err) => {
+                eprintln!(
+                    "# roki events: {}:{}: malformed line skipped: {err}",
+                    file_path.display(),
+                    idx + 1
+                );
                 continue;
             }
         };
@@ -253,7 +291,7 @@ async fn run_offline_capture(args: EventsArgs) -> Result<String, EventsError> {
         }
         match args.format {
             Format::Json => {
-                out.push_str(line);
+                out.push_str(&line);
                 out.push('\n');
             }
             Format::Human => {
@@ -464,6 +502,162 @@ mod tests {
         .unwrap();
         assert!(out.contains("\"seq\":1"), "out was: {out}");
         assert!(out.contains("webhook_received"), "out was: {out}");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn online_emits_structured_gap_marker_when_server_reports_gap() {
+        use wiremock::matchers::{method, path, query_param};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        let page1 = serde_json::json!({
+            "events": [{
+                "seq": 5,
+                "ts": "2026-05-11T10:00:00Z",
+                "event": "cycle_started",
+                "ticket_id": "ENG-9",
+                "payload": {}
+            }],
+            "gap": true,
+            "next_since": 6,
+        });
+        let page2 = serde_json::json!({ "events": [], "gap": false });
+        Mock::given(method("GET"))
+            .and(path("/api/events"))
+            .and(query_param("since", "0"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(page1))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/api/events"))
+            .and(query_param("since", "6"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(page2))
+            .mount(&server)
+            .await;
+
+        let out = run_capture_online(EventsArgs {
+            api: Some(server.uri()),
+            format: Format::Json,
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+        assert!(out.contains("__gap__"), "expected gap marker in out: {out}");
+        // Loop continued past the gap and consumed page2.
+        assert!(out.contains("\"seq\":5"), "expected event after gap: {out}");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn online_tail_retries_after_transient_http_error() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        // First match returns 503 (transient); a second `up_to_n_times` lets the
+        // retry observe a 200. wiremock matches in registration order; mount the
+        // failure first with `up_to_n_times(1)`, then the success with
+        // `up_to_n_times(1)`, then a final empty drain page.
+        Mock::given(method("GET"))
+            .and(path("/api/events"))
+            .respond_with(ResponseTemplate::new(503))
+            .up_to_n_times(1)
+            .mount(&server)
+            .await;
+        let page = serde_json::json!({
+            "events": [{
+                "seq": 1,
+                "ts": "2026-05-11T10:00:00Z",
+                "event": "webhook_received",
+                "ticket_id": "ENG-1",
+                "payload": {}
+            }],
+            "gap": false,
+        });
+        Mock::given(method("GET"))
+            .and(path("/api/events"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(page))
+            .up_to_n_times(1)
+            .mount(&server)
+            .await;
+        // After the success page, tail keeps polling — return drain pages so the
+        // test can observe the first success without hanging.
+        let drain = serde_json::json!({ "events": [], "gap": false });
+        Mock::given(method("GET"))
+            .and(path("/api/events"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(drain))
+            .mount(&server)
+            .await;
+
+        // Drive the loop in a background task so we can stop it once the
+        // success page lands in the sink.
+        let (sink_tx, mut sink_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+        struct ChanSink(tokio::sync::mpsc::UnboundedSender<String>);
+        impl Sink for ChanSink {
+            fn write_line(&mut self, line: &str) -> Result<(), EventsError> {
+                let _ = self.0.send(line.to_string());
+                Ok(())
+            }
+        }
+        let args = EventsArgs {
+            api: Some(server.uri()),
+            tail: true,
+            cadence_ms: 50,
+            ..Default::default()
+        };
+        let base = resolve_api_url(args.api.as_deref(), None).unwrap();
+        let task = tokio::spawn(async move {
+            let mut sink = ChanSink(sink_tx);
+            let _ = run_online(args, base, &mut sink).await;
+        });
+        let line = tokio::time::timeout(std::time::Duration::from_secs(2), sink_rx.recv())
+            .await
+            .expect("event delivered after 503 retry")
+            .expect("sink received line");
+        assert!(line.contains("\"seq\":1"), "got: {line}");
+        task.abort();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn online_since_rfc3339_filters_strictly_older() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        let body = serde_json::json!({
+            "events": [
+                {
+                    "seq": 1,
+                    "ts": "2026-05-11T10:00:00Z",
+                    "event": "webhook_received",
+                    "ticket_id": "ENG-1",
+                    "payload": {}
+                },
+                {
+                    "seq": 2,
+                    "ts": "2026-05-11T10:00:05Z",
+                    "event": "cycle_started",
+                    "ticket_id": "ENG-1",
+                    "payload": {}
+                }
+            ],
+            "gap": false,
+        });
+        Mock::given(method("GET"))
+            .and(path("/api/events"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(body))
+            .mount(&server)
+            .await;
+        let out = run_capture_online(EventsArgs {
+            api: Some(server.uri()),
+            since: Some("2026-05-11T10:00:05Z".into()),
+            format: Format::Json,
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+        // Only seq=2 (ts == cutoff) survives the client-side rfc3339 filter.
+        assert!(!out.contains("\"seq\":1"), "older event leaked: {out}");
+        assert!(out.contains("\"seq\":2"), "expected event missing: {out}");
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
