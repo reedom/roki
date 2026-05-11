@@ -19,7 +19,7 @@ fn follow_streams_late_appends_then_exits_on_exit_code() {
     let stdout = vd.join("impl.stdout");
     std::fs::write(&stdout, b"first\n").unwrap();
 
-    let mut child = Command::new(bin())
+    let child = Command::new(bin())
         .env("ROKI_CONFIG_SESSION_ROOT", tmp.path())
         .env("ROKI_TICKET_ID", "ENG-9")
         .env("ROKI_CYCLE_ID", cycle)
