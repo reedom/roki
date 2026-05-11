@@ -244,6 +244,10 @@ path = "tests/e2e/cli_events_offline_smoke.rs"
 name = "cli_repo_smoke"
 path = "tests/e2e/cli_repo_smoke.rs"
 
+[[test]]
+name = "daemon_dependency_missing_smoke"
+path = "tests/e2e/daemon_dependency_missing_smoke.rs"
+
 [features]
 # Test-only seam: gates the `ROKI_LINEAR_GRAPHQL_URL` env-var override inside
 # `linear::client` so the release binary always targets the hardcoded endpoint.
