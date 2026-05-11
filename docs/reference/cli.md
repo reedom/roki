@@ -25,6 +25,7 @@ The single `roki` binary exposes one daemon subcommand, three observability subc
 | `roki repo` | Resolve per-ticket repo path | [fr:09-log-access-cli](../fr/09-log-access-cli.md) |
 | `roki workflow validate` | Sugar-expand + validate a `WORKFLOW.yaml` file | [fr:02-configuration](../fr/02-configuration.md) |
 | `roki workflow graph` | Render any rule's state machine as ASCII or DOT | [fr:02-configuration](../fr/02-configuration.md) |
+| `roki-tui` | Terminal UI client for the observability HTTP API | [fr:11-roki-tui](../fr/11-roki-tui.md) |
 
 ## `roki run`
 
@@ -116,6 +117,27 @@ Render any rule's state machine as ASCII or DOT. Useful for operator review of c
 | `--out <path>` | path | Write to file. Stdout when omitted. |
 
 Validation runs before rendering. A validation error exits non-zero without rendering.
+
+## `roki-tui`
+
+Standalone `ratatui` binary. Connects to the observability HTTP API and renders four views.
+
+| Flag | Argument | Overrides | Purpose |
+|---|---|---|---|
+| (positional) | `API_URL` | (none) | Base URL of the API (http or https). Required. |
+| `--config <path>` | path | (none) | Override `~/.config/roki-tui/config.toml`. Required to exist when supplied. |
+| `--tickets-cadence <secs>` | int | `[polling].tickets_seconds` | Tickets refresh cadence (min 1). |
+| `--events-cadence <secs>` | int | `[polling].events_seconds` | Events tail cadence (min 1). |
+| `--escalations-cadence <secs>` | int | `[polling].escalations_seconds` | Escalations refresh cadence (min 1). |
+
+Configuration file schema:
+
+````toml
+[polling]
+tickets_seconds = 2       # default 2, min 1
+events_seconds = 1        # default 1, min 1
+escalations_seconds = 5   # default 5, min 1
+````
 
 ## When adding a new flag
 

@@ -9,6 +9,7 @@ refs:
     - fr:03-linear-admission
     - fr:06-failure-handling
     - fr:10-http-api
+    - fr:11-roki-tui
     - fr:12-daemon-lifecycle
 ---
 
@@ -84,6 +85,15 @@ Attached to every event via tracing spans (when in scope).
 | `api_request` | Per-request metadata | `method`, `path`, `query_keys` (key names only; values redacted), `status`, `duration_ms`, `client_addr`, `correlation_id` (no body) |
 | `refresh_nudge_acknowledged` | `POST /api/refresh` returned an ack | `coalesced`, `backoff_active`, `client_addr` |
 | `polling_tick` | PollingTracker fired one tick (outage- or nudge-driven) | `trigger` ∈ `outage` / `nudge`, `status_set`, `enumerated`, `admitted` |
+
+## roki-tui events
+
+Emitted by the TUI process to its own stderr (JSON Lines). Not part of the daemon's tracing pipeline.
+
+| Event | When | Carries |
+|---|---|---|
+| `roki_tui_started` | TUI process startup, after config resolution | `ts` (RFC 3339), `api_url`, `polling.tickets_seconds`, `polling.events_seconds`, `polling.escalations_seconds`, `palette` |
+| `roki_tui_decode_error` | API response body fails to deserialize | `ts`, `endpoint`, `error` |
 
 ## Daemon lifecycle
 
