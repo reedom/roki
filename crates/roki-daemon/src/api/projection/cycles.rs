@@ -76,6 +76,7 @@ pub fn read_cycle_states(
 }
 
 fn parse(d: OnDisk) -> CycleSummary {
+    let last_state_id = d.states.last().cloned();
     CycleSummary {
         cycle_id: d.cycle_id,
         kind: match d.kind.as_str() {
@@ -91,7 +92,7 @@ fn parse(d: OnDisk) -> CycleSummary {
         ended_at: d.ended_at,
         terminal_id: d.terminal_id,
         failure_kind: d.failure_kind,
-        last_state_id: None,
+        last_state_id,
         total_visits: d.total_visits,
     }
 }
@@ -102,21 +103,44 @@ mod tests {
     use tempfile::TempDir;
 
     #[test]
-    fn lists_cycles_descending_by_started_at() {
+    fn lists_cycles_descending_by_started_at_and_populates_last_state_id() {
         let dir = TempDir::new().unwrap();
         let ticket = dir.path().join("ENG-1");
-        for ts in ["2026-05-01T00:00:00Z", "2026-05-02T00:00:00Z"].iter() {
+        let mut ids = vec![];
+        for (i, ts) in ["2026-05-01T00:00:00Z", "2026-05-02T00:00:00Z"]
+            .iter()
+            .enumerate()
+        {
             let id = Uuid::new_v4();
+            ids.push(id);
             let cycle = ticket.join(format!("cycle-{id}"));
             std::fs::create_dir_all(&cycle).unwrap();
             let body = format!(
-                r#"{{"cycle_id":"{id}","kind":"rule","trigger":"runtime","started_at":"{ts}","total_visits":0,"states":[]}}"#
+                r#"{{"cycle_id":"{id}","kind":"rule","trigger":"runtime","started_at":"{ts}","total_visits":1,"states":["pre","post{i}"]}}"#
             );
             std::fs::write(cycle.join("cycle.json"), body).unwrap();
         }
         let (cycles, truncated) = list_cycles(dir.path(), "ENG-1", 10);
         assert_eq!(cycles.len(), 2);
         assert!(cycles[0].started_at > cycles[1].started_at);
+        assert_eq!(cycles[0].last_state_id.as_deref(), Some("post1"));
+        assert_eq!(cycles[1].last_state_id.as_deref(), Some("post0"));
         assert!(!truncated);
+    }
+
+    #[test]
+    fn last_state_id_is_none_when_states_array_is_empty() {
+        let dir = TempDir::new().unwrap();
+        let ticket = dir.path().join("ENG-2");
+        let id = Uuid::new_v4();
+        let cycle = ticket.join(format!("cycle-{id}"));
+        std::fs::create_dir_all(&cycle).unwrap();
+        let body = format!(
+            r#"{{"cycle_id":"{id}","kind":"rule","trigger":"runtime","started_at":"2026-05-01T00:00:00Z","total_visits":0,"states":[]}}"#
+        );
+        std::fs::write(cycle.join("cycle.json"), body).unwrap();
+        let (cycles, _) = list_cycles(dir.path(), "ENG-2", 10);
+        assert_eq!(cycles.len(), 1);
+        assert!(cycles[0].last_state_id.is_none());
     }
 }
