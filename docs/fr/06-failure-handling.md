@@ -75,15 +75,15 @@ Normal cycle failures with no `on_failure:` match surface via the `failure_unhan
 
 Each entry carries `(ticket_id | null, cycle_id | null, failure.kind, state_id | null, visit_n | null, timestamp, error_text, marker)`. `ticket_id`, `cycle_id`, `state_id`, and `visit_n` are null only for daemon-internal errors not associated with a specific cycle. Cycle-routed entries (failure-cycle-of-failure-cycle, cleanup-time fs error) always carry the originating cycle's `state_id`.
 
-`marker` discriminates which class of daemon-stuck failure produced the entry:
+`marker` discriminates which class of daemon-stuck failure produced the entry (planned — not yet propagated; current impl reports `marker = "none"` on every queue entry):
 
 | Marker | Source |
 |---|---|
-| `recursion_bound` | A failure cycle itself failed (case 1) |
-| `cleanup_fs` | Cleanup-time fs error (case 2) |
-| `daemon_internal` | Daemon-internal error with no cycle association (case 3) |
+| `recursion_bound` (planned) | A failure cycle itself failed (case 1) |
+| `cleanup_fs` (planned) | Cleanup-time fs error (case 2) |
+| `daemon_internal` (planned) | Daemon-internal error with no cycle association (case 3) |
 
-The same enum is exposed on the `escalation_added` structured event ([ref:log-events](../reference/log-events.md)) and on `GET /api/escalations` ([fr:10](10-http-api.md)). The complementary value `marker = none` appears only on `failure_unhandled` events (no entry is added to the queue in that case).
+The same enum is targeted for `GET /api/escalations` ([fr:10](10-http-api.md)). The `escalation_added` structured event ([ref:log-events](../reference/log-events.md)) does not currently carry `marker`; the discriminator will be added alongside the per-case wiring. The complementary value `marker = none` appears on `failure_unhandled` events (no entry is added to the queue in that case).
 
 The queue is bounded by `roki.toml [escalation].queue_size` ([ref:config](../reference/config.md)). When the cap is reached, the oldest entry is dropped to make room for the new one and a `warn`-severity log records the eviction.
 
