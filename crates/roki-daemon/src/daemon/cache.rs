@@ -13,10 +13,21 @@
 //!   and `pending_recheck` via `take_pending_recheck`.
 //! - Dispatcher additionally sets `pending_recheck` on the back-pressure
 //!   path (`try_send` Full); see `daemon::dispatcher`.
+//!
+//! ## Store dual-write (phase-2)
+//!
+//! Admission lifecycle (admit / evict) is mirrored to the SQLite control-plane
+//! store best-effort. On `observe`, the store is notified only when the entry
+//! transitions from absent to present (i.e. the in-memory `NewEntry` outcome);
+//! the SQL upsert is idempotent so repeated re-admissions of the same id are
+//! safe. On `evict`, the store row's `evicted_at` is set; `Store::NotFound`
+//! is swallowed for idempotency. Runtime working state (`pending_recheck`,
+//! `pending_evict`, `cycle_id`) is not mirrored — those are hot-path only.
 
 use std::collections::{BTreeSet, HashMap};
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use time::OffsetDateTime;
 use tokio::sync::RwLock;
@@ -87,33 +98,58 @@ impl DiffCache {
         }
 
         // Write path: insert new or update tracked triple.
-        let mut map = self.inner.write().await;
-        match map.get_mut(&admitted.ticket.id) {
-            Some(entry) => {
-                entry.status = triple_now.0;
-                entry.labels = triple_now.1;
-                entry.assignee = triple_now.2;
-                entry.last_event_at = OffsetDateTime::now_utc();
-                DiffOutcome::Changed
+        let outcome = {
+            let mut map = self.inner.write().await;
+            match map.get_mut(&admitted.ticket.id) {
+                Some(entry) => {
+                    entry.status = triple_now.0;
+                    entry.labels = triple_now.1;
+                    entry.assignee = triple_now.2;
+                    entry.last_event_at = OffsetDateTime::now_utc();
+                    DiffOutcome::Changed
+                }
+                None => {
+                    map.insert(
+                        admitted.ticket.id.clone(),
+                        CacheEntry {
+                            repo: admitted.ghq.clone(),
+                            workflow_path: None,
+                            status: triple_now.0,
+                            labels: triple_now.1,
+                            assignee: triple_now.2,
+                            cycle_id: None,
+                            pending_recheck: false,
+                            pending_evict: false,
+                            last_event_at: OffsetDateTime::now_utc(),
+                        },
+                    );
+                    DiffOutcome::NewEntry
+                }
             }
-            None => {
-                map.insert(
-                    admitted.ticket.id.clone(),
-                    CacheEntry {
-                        repo: admitted.ghq.clone(),
-                        workflow_path: None,
-                        status: triple_now.0,
-                        labels: triple_now.1,
-                        assignee: triple_now.2,
-                        cycle_id: None,
-                        pending_recheck: false,
-                        pending_evict: false,
-                        last_event_at: OffsetDateTime::now_utc(),
-                    },
-                );
-                DiffOutcome::NewEntry
+        };
+
+        // Phase-2 admission-audit dual-write. Only NewEntry transitions
+        // (absent -> present, including a prior evict + re-admit) hit the
+        // store. `Changed` is a triple update on an already-admitted ticket
+        // and the store row's admission timestamp must not flap on each
+        // status/label/assignee diff. The SQL `admit_ticket` is an upsert,
+        // so this is safe even if the store already has a row from a prior
+        // daemon boot (cold-start hint path).
+        if matches!(outcome, DiffOutcome::NewEntry) {
+            if let Some(store) = crate::store_handle::global_store() {
+                if let Err(err) =
+                    store.admit_ticket(&admitted.ticket.id, &admitted.ghq, now_millis())
+                {
+                    tracing::warn!(
+                        ticket_id = %admitted.ticket.id,
+                        error = %err,
+                        "store admit_ticket dual-write failed"
+                    );
+                }
             }
         }
+
+        outcome
     }
 
     pub async fn snapshot(&self, ticket_id: &str) -> Option<CacheEntry> {
@@ -182,7 +218,29 @@ impl DiffCache {
     }
 
     pub async fn evict(&self, ticket_id: &str) {
-        self.inner.write().await.remove(ticket_id);
+        let removed = self.inner.write().await.remove(ticket_id).is_some();
+
+        // Phase-2 admission-audit dual-write. We mirror eviction whether or
+        // not the in-memory entry existed: the store row may outlive the
+        // in-memory cache (e.g. cold-start hint races a cleanup), and the
+        // store's idempotency contract is what we lean on. `NotFound` means
+        // the store row is already evicted; treat as success.
+        let _ = removed;
+        if let Some(store) = crate::store_handle::global_store() {
+            match store.evict_ticket(ticket_id, now_millis()) {
+                Ok(()) => {}
+                Err(roki_store::Error::NotFound) => {
+                    // Already evicted (or never admitted). Idempotent no-op.
+                }
+                Err(err) => {
+                    tracing::warn!(
+                        ticket_id = %ticket_id,
+                        error = %err,
+                        "store evict_ticket dual-write failed"
+                    );
+                }
+            }
+        }
     }
 
     pub async fn in_flight_count(&self) -> usize {
@@ -193,6 +251,43 @@ impl DiffCache {
             .filter(|e| e.cycle_id.is_some())
             .count()
     }
+
+    /// Has this ticket been seen by the cache (regardless of triple)?
+    /// Used by cold-start to skip store-seeded entries that the GraphQL
+    /// enumerate has already overwritten with fresh truth.
+    pub async fn contains(&self, ticket_id: &str) -> bool {
+        self.inner.read().await.contains_key(ticket_id)
+    }
+
+    /// Cold-start hint seed (phase-2). Insert a minimal `CacheEntry`
+    /// derived from the SQLite store's last-admitted row, without going
+    /// through `observe` (which would dual-write back to the store on
+    /// NewEntry and emit a fresh `admitted_at`). The status/labels/assignee
+    /// triple is left empty so the GraphQL enumerate that immediately
+    /// follows will classify the next observe as `Changed` (or evict the
+    /// entry) once Linear truth is available.
+    pub async fn seed_from_store_hint(&self, ticket_id: &str, repo: &str) {
+        let mut map = self.inner.write().await;
+        map.entry(ticket_id.to_string())
+            .or_insert_with(|| CacheEntry {
+                repo: repo.to_string(),
+                workflow_path: None,
+                status: String::new(),
+                labels: BTreeSet::new(),
+                assignee: String::new(),
+                cycle_id: None,
+                pending_recheck: false,
+                pending_evict: false,
+                last_event_at: OffsetDateTime::now_utc(),
+            });
+    }
+}
+
+fn now_millis() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0)
 }
 
 #[cfg(test)]
