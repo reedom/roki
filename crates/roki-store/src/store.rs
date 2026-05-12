@@ -23,17 +23,17 @@ pub trait Store: Send + Sync {
     // --- cycles + FSM ---------------------------------------------------
 
     fn open_cycle(&self, c: NewCycle) -> Result<Cycle>;
-    fn set_current_state(&self, cycle_id: i64, state_id: &str, iter: u32) -> Result<()>;
-    fn bump_visit(&self, cycle_id: i64, state_id: &str) -> Result<u32>;
+    fn set_current_state(&self, cycle_id: &str, state_id: &str, iter: u32) -> Result<()>;
+    fn bump_visit(&self, cycle_id: &str, state_id: &str) -> Result<u32>;
     fn close_cycle(
         &self,
-        cycle_id: i64,
+        cycle_id: &str,
         outcome: CycleOutcome,
         ended_at: UnixMillis,
     ) -> Result<()>;
-    fn get_cycle(&self, cycle_id: i64) -> Result<Option<Cycle>>;
+    fn get_cycle(&self, cycle_id: &str) -> Result<Option<Cycle>>;
     fn list_inflight_cycles(&self) -> Result<Vec<Cycle>>;
-    fn visits_for_cycle(&self, cycle_id: i64) -> Result<Vec<StateVisit>>;
+    fn visits_for_cycle(&self, cycle_id: &str) -> Result<Vec<StateVisit>>;
 
     // --- events ---------------------------------------------------------
 
@@ -53,13 +53,13 @@ pub trait Store: Send + Sync {
     fn register_subprocess(&self, run: SubprocessRun) -> Result<()>;
     fn finish_subprocess(
         &self,
-        cycle_id: i64,
+        cycle_id: &str,
         state_id: &str,
         visit: u32,
         exit_code: i32,
         ended_at: UnixMillis,
     ) -> Result<()>;
-    fn list_subprocesses(&self, cycle_id: i64) -> Result<Vec<SubprocessRun>>;
+    fn list_subprocesses(&self, cycle_id: &str) -> Result<Vec<SubprocessRun>>;
 
     // --- escalations ----------------------------------------------------
 
