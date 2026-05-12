@@ -266,6 +266,18 @@ pub enum Event {
         backoff_active: bool,
         client_addr: String,
     },
+    /// Cold-start: a cycle row in the SQLite store has `ended_at IS NULL`
+    /// from a prior boot. The current daemon closes it out as a failure and
+    /// emits this event so operators can audit the previous crash window.
+    /// Phase-3 (fr:07 §Cold-start recovery).
+    CrashedCycleRecovered {
+        ts: String,
+        ticket_id: String,
+        cycle_id: String,
+        kind: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        last_state: Option<String>,
+    },
 }
 
 impl Event {
@@ -297,6 +309,7 @@ impl Event {
             Event::PollingTick { .. } => "polling_tick",
             Event::RefreshNudgeAcknowledged { .. } => "refresh_nudge_acknowledged",
             Event::DaemonDependencyMissing { .. } => "daemon_dependency_missing",
+            Event::CrashedCycleRecovered { .. } => "crashed_cycle_recovered",
         }
     }
 
@@ -343,6 +356,11 @@ impl Event {
             Event::PollingTick { .. } => (None, None),
             Event::RefreshNudgeAcknowledged { .. } => (None, None),
             Event::DaemonDependencyMissing { .. } => (None, None),
+            Event::CrashedCycleRecovered {
+                ticket_id,
+                cycle_id,
+                ..
+            } => (Some(ticket_id.as_str()), Some(parse_cycle(cycle_id))),
         }
     }
 }

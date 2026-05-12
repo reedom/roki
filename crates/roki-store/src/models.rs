@@ -55,7 +55,8 @@ pub struct Ticket {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Cycle {
-    pub id: i64,
+    /// Canonical hyphenated UUID owned by the daemon (`Uuid::to_string`).
+    pub id: String,
     pub ticket_id: String,
     pub kind: CycleKind,
     pub entry_name: String,
@@ -68,6 +69,10 @@ pub struct Cycle {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NewCycle {
+    /// Caller-supplied UUID (canonical hyphenated form). Phase-3+: the
+    /// daemon owns generation so the routing-key UUID on emitted events
+    /// matches the row in `cycles` without a second roundtrip.
+    pub id: String,
     pub ticket_id: String,
     pub kind: CycleKind,
     pub entry_name: String,
@@ -76,7 +81,7 @@ pub struct NewCycle {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StateVisit {
-    pub cycle_id: i64,
+    pub cycle_id: String,
     pub state_id: String,
     pub visits: u32,
 }
@@ -85,7 +90,7 @@ pub struct StateVisit {
 pub struct Event {
     pub seq: i64,
     pub ticket_id: String,
-    pub cycle_id: Option<i64>,
+    pub cycle_id: Option<String>,
     pub ts: UnixMillis,
     pub kind: String,
     /// Structured payload. Stored as JSON text; surfaced to callers as
@@ -97,7 +102,7 @@ pub struct Event {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NewEvent {
     pub ticket_id: String,
-    pub cycle_id: Option<i64>,
+    pub cycle_id: Option<String>,
     pub ts: UnixMillis,
     pub kind: String,
     pub payload: serde_json::Value,
@@ -105,7 +110,7 @@ pub struct NewEvent {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SubprocessRun {
-    pub cycle_id: i64,
+    pub cycle_id: String,
     pub state_id: String,
     pub visit: u32,
     pub started_at: UnixMillis,

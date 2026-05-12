@@ -164,6 +164,13 @@ impl<R: CycleRunner + 'static> ColdStart<R> {
                     );
                 }
             }
+
+            // Phase-3 cold-start recovery: close out cycles left in-flight by
+            // a previous boot. The fact that `ended_at IS NULL` after a clean
+            // shutdown is impossible (the runner stamps the row on terminal
+            // and failure paths). So every row we find here is from a crash
+            // or SIGKILL.
+            self.recover_inflight_cycles(&store, writer.clone()).await;
         }
 
         // Enumerate. Partial failure -> empty admitted set, skip orphan reconcile (§4.6).
@@ -248,6 +255,72 @@ impl<R: CycleRunner + 'static> ColdStart<R> {
         }
 
         report
+    }
+
+    /// Phase-3 cold-start recovery: walk every cycle row with `ended_at IS
+    /// NULL`, emit a `crashed_cycle_recovered` event, and stamp the row as
+    /// `failure` so subsequent boots ignore it. Best-effort throughout: a
+    /// failure to write back is logged via `tracing::warn` and the rest of
+    /// cold start continues unaffected.
+    async fn recover_inflight_cycles(
+        &self,
+        store: &std::sync::Arc<dyn roki_store::Store>,
+        writer: Arc<Mutex<EventWriter>>,
+    ) {
+        let inflight = match store.list_inflight_cycles() {
+            Ok(rows) => rows,
+            Err(err) => {
+                tracing::warn!(
+                    error = %err,
+                    "store list_inflight_cycles failed; skipping crash recovery"
+                );
+                return;
+            }
+        };
+
+        for cycle in inflight {
+            // Emit + close only when the row's id is a real UUID. Migration
+            // 0002 CASTs any legacy INTEGER ids to TEXT for safety, but the
+            // event's routing_keys helper parses cycle_id with Uuid::parse_str
+            // and panics on a non-UUID string — guard the emit site so a
+            // stray legacy row cannot crash the daemon at startup.
+            if uuid::Uuid::parse_str(&cycle.id).is_err() {
+                tracing::warn!(
+                    cycle_id = %cycle.id,
+                    ticket_id = %cycle.ticket_id,
+                    "skipping crash recovery for cycle with non-UUID id"
+                );
+                let ended_at = crate::store_handle::now_unix_millis();
+                let _ = store.close_cycle(
+                    &cycle.id,
+                    roki_store::models::CycleOutcome::Failure,
+                    ended_at,
+                );
+                continue;
+            }
+            {
+                let mut w = writer.lock().await;
+                let _ = w.emit(&Event::CrashedCycleRecovered {
+                    ts: now_rfc3339(),
+                    ticket_id: cycle.ticket_id.clone(),
+                    cycle_id: cycle.id.clone(),
+                    kind: cycle.kind.as_str().to_string(),
+                    last_state: cycle.current_state.clone(),
+                });
+            }
+            let ended_at = crate::store_handle::now_unix_millis();
+            if let Err(err) = store.close_cycle(
+                &cycle.id,
+                roki_store::models::CycleOutcome::Failure,
+                ended_at,
+            ) {
+                tracing::warn!(
+                    cycle_id = %cycle.id,
+                    error = %err,
+                    "close_cycle failed during crash recovery"
+                );
+            }
+        }
     }
 
     fn resolve_assignee_id_string(&self) -> String {

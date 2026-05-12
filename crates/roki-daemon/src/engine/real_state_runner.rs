@@ -750,6 +750,7 @@ mod tests {
             task_captures: BTreeMap::new(),
             iter: 0,
             max_iterations: 10,
+            cycle_id: String::new(),
         };
         ctx.globals
             .insert("ticket".into(), serde_json::json!({ "id": "ENG-1" }));

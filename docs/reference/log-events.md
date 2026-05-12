@@ -66,6 +66,7 @@ Events tagged "(planned)" are part of the target spec but not yet emitted; only 
 | `cold_start_completed` | Cold-start enumeration + reconciliation finished | `enumerated`, `admitted`, `cycles_spawned`, `orphans_deleted`, `enum_partial`; on partial: `partial_reason`, `partial_error_text` |
 | `orphan_reconcile_skipped` | Orphan reconciliation skipped (e.g. enumeration partial) | `reason` |
 | `status_filter_dropped` | Cold-start `[linear].status` entry rejected pre-enumeration | `entry`, `reason` |
+| `crashed_cycle_recovered` | A `cycles` row from a prior boot still had `ended_at IS NULL`. Cold start stamps it `outcome = failure` and emits this event ([fr:07 §Cold start](../fr/07-recovery.md), [fr:01 §Store mirror](../fr/01-engine-model.md)) | `ts`, `ticket_id`, `cycle_id`, `kind` ∈ `rule` / `cleanup` / `failure`, optional `last_state` |
 
 ## Linear admission
 

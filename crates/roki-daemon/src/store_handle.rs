@@ -29,6 +29,35 @@ pub fn global_store() -> Option<Arc<dyn Store>> {
     STORE.get().cloned()
 }
 
+/// Run `f` with the process-wide store when installed. Swallows the
+/// "no store" branch so callers do not have to litter every cycle-FSM site
+/// with `if let Some(store) = global_store()`. Errors are best-effort:
+/// they are surfaced via `tracing::warn` with the supplied `op` label and
+/// never propagate into FSM control flow (phase-3 store writes are
+/// observation-only).
+pub fn with_store<F>(op: &'static str, f: F)
+where
+    F: FnOnce(&Arc<dyn Store>) -> roki_store::Result<()>,
+{
+    let Some(store) = global_store() else {
+        return;
+    };
+    if let Err(err) = f(&store) {
+        tracing::warn!(
+            store_op = op,
+            error = %err,
+            "store write failed (best-effort)"
+        );
+    }
+}
+
+/// Unix milliseconds since the epoch, saturating to 0 on system clocks
+/// before 1970. Reused by every store-touching site so the timestamp
+/// vocabulary stays consistent across phase-2/3 writes.
+pub fn now_unix_millis() -> i64 {
+    now_millis()
+}
+
 /// Append an event to the global store if installed.
 ///
 /// Errors are logged via `tracing::warn` and swallowed: the JSONL file
@@ -39,7 +68,7 @@ pub fn append_event_best_effort(
     writer_ticket_id: &str,
     ev: &crate::events::Event,
 ) {
-    let (variant_ticket, _cycle_uuid) = ev.routing_keys();
+    let (variant_ticket, cycle_uuid) = ev.routing_keys();
     let ticket_id = variant_ticket.unwrap_or(writer_ticket_id).to_string();
 
     let payload = match serde_json::to_value(ev) {
@@ -56,10 +85,11 @@ pub fn append_event_best_effort(
 
     let new_event = NewEvent {
         ticket_id,
-        // Phase-1: cycle FSM still lives in the daemon process, so the
-        // store has no row to point at. Phase-3 will resolve the uuid
-        // against `cycles` and populate this field.
-        cycle_id: None,
+        // Phase-3: forward the variant's routing-key cycle UUID into the
+        // store column so events join back to the `cycles` row the cycle
+        // driver opened. Variants without a cycle context still write
+        // `NULL` (e.g. daemon lifecycle events).
+        cycle_id: cycle_uuid.map(|u| u.to_string()),
         ts: now_millis(),
         kind: ev.kind_str().to_string(),
         payload,

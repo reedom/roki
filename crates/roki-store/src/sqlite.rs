@@ -205,16 +205,21 @@ impl Store for SqliteStore {
         self.with_conn(|conn| {
             let tx = conn.transaction()?;
             tx.execute(
-                "INSERT INTO cycles(ticket_id, kind, entry_name, started_at, iter)
-                 VALUES(?1, ?2, ?3, ?4, 0);",
-                params![c.ticket_id, c.kind.as_str(), c.entry_name, c.started_at],
+                "INSERT INTO cycles(id, ticket_id, kind, entry_name, started_at, iter)
+                 VALUES(?1, ?2, ?3, ?4, ?5, 0);",
+                params![
+                    c.id,
+                    c.ticket_id,
+                    c.kind.as_str(),
+                    c.entry_name,
+                    c.started_at
+                ],
             )?;
-            let id = tx.last_insert_rowid();
             let cycle = tx.query_row(
                 "SELECT id, ticket_id, kind, entry_name, started_at, ended_at,
                         outcome, current_state, iter
                  FROM cycles WHERE id = ?1;",
-                params![id],
+                params![c.id],
                 map_cycle,
             )?;
             tx.commit()?;
@@ -222,7 +227,7 @@ impl Store for SqliteStore {
         })
     }
 
-    fn set_current_state(&self, cycle_id: i64, state_id: &str, iter: u32) -> Result<()> {
+    fn set_current_state(&self, cycle_id: &str, state_id: &str, iter: u32) -> Result<()> {
         self.with_conn(|c| {
             let n = c.execute(
                 "UPDATE cycles SET current_state = ?2, iter = ?3 WHERE id = ?1;",
@@ -235,7 +240,7 @@ impl Store for SqliteStore {
         })
     }
 
-    fn bump_visit(&self, cycle_id: i64, state_id: &str) -> Result<u32> {
+    fn bump_visit(&self, cycle_id: &str, state_id: &str) -> Result<u32> {
         self.with_conn(|c| {
             let tx = c.transaction()?;
             tx.execute(
@@ -255,7 +260,7 @@ impl Store for SqliteStore {
 
     fn close_cycle(
         &self,
-        cycle_id: i64,
+        cycle_id: &str,
         outcome: CycleOutcome,
         ended_at: UnixMillis,
     ) -> Result<()> {
@@ -272,7 +277,7 @@ impl Store for SqliteStore {
         })
     }
 
-    fn get_cycle(&self, cycle_id: i64) -> Result<Option<Cycle>> {
+    fn get_cycle(&self, cycle_id: &str) -> Result<Option<Cycle>> {
         self.with_conn(|c| {
             let row = c
                 .query_row(
@@ -301,7 +306,7 @@ impl Store for SqliteStore {
         })
     }
 
-    fn visits_for_cycle(&self, cycle_id: i64) -> Result<Vec<StateVisit>> {
+    fn visits_for_cycle(&self, cycle_id: &str) -> Result<Vec<StateVisit>> {
         self.with_conn(|c| {
             let mut stmt = c.prepare(
                 "SELECT cycle_id, state_id, visits FROM state_visits
@@ -420,7 +425,7 @@ impl Store for SqliteStore {
 
     fn finish_subprocess(
         &self,
-        cycle_id: i64,
+        cycle_id: &str,
         state_id: &str,
         visit: u32,
         exit_code: i32,
@@ -439,7 +444,7 @@ impl Store for SqliteStore {
         })
     }
 
-    fn list_subprocesses(&self, cycle_id: i64) -> Result<Vec<SubprocessRun>> {
+    fn list_subprocesses(&self, cycle_id: &str) -> Result<Vec<SubprocessRun>> {
         self.with_conn(|c| {
             let mut stmt = c.prepare(
                 "SELECT cycle_id, state_id, visit, started_at, ended_at, exit_code, capture_dir
@@ -554,19 +559,22 @@ mod tests {
     fn cycle_fsm_round_trip() {
         let s = store();
         s.admit_ticket("OPS-1", "r", 0).unwrap();
+        let cycle_id = "11111111-1111-1111-1111-111111111111";
         let c = s
             .open_cycle(NewCycle {
+                id: cycle_id.into(),
                 ticket_id: "OPS-1".into(),
                 kind: CycleKind::Rule,
                 entry_name: "first-rule".into(),
                 started_at: 1,
             })
             .unwrap();
-        s.set_current_state(c.id, "running", 1).unwrap();
-        assert_eq!(s.bump_visit(c.id, "running").unwrap(), 1);
-        assert_eq!(s.bump_visit(c.id, "running").unwrap(), 2);
-        s.close_cycle(c.id, CycleOutcome::Success, 9).unwrap();
-        let got = s.get_cycle(c.id).unwrap().unwrap();
+        assert_eq!(c.id, cycle_id);
+        s.set_current_state(&c.id, "running", 1).unwrap();
+        assert_eq!(s.bump_visit(&c.id, "running").unwrap(), 1);
+        assert_eq!(s.bump_visit(&c.id, "running").unwrap(), 2);
+        s.close_cycle(&c.id, CycleOutcome::Success, 9).unwrap();
+        let got = s.get_cycle(&c.id).unwrap().unwrap();
         assert_eq!(got.outcome, Some(CycleOutcome::Success));
         assert!(s.list_inflight_cycles().unwrap().is_empty());
     }
