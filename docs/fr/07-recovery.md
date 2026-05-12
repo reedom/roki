@@ -63,7 +63,7 @@ Only one cycle is in flight per ticket at a time. The cache's `cycle_id` field n
 
 #### Subscribers
 
-Other components (HTTP API, TUI, structured event log) observe cache changes via the structured event stream ([08-observability-logs](08-observability-logs.md)) — `cycle_started`, `cycle_completed`, `cycle_aborted`, `worktree_created`, `worktree_deleted`, `cold_start_began`, `cold_start_completed`. There is no in-process subscriber API for cache transitions; consumers subscribe to events through the public observability surface.
+Other components (HTTP API, TUI, structured event log) observe cache changes via the structured event stream ([08-observability-logs](08-observability-logs.md)) — `cycle_started` (planned), `cycle_completed`, `cycle_aborted` (planned), `worktree_created` (planned), `worktree_delete_requested`, `cold_start_began`, `cold_start_completed`. There is no in-process subscriber API for cache transitions; consumers subscribe to events through the public observability surface.
 
 ### Cold start and restart recovery
 

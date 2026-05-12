@@ -103,7 +103,7 @@ The daemon retains every completed state's summary within a cycle and exposes th
 |---|---|---|
 | `{{ ticket.id }}` | `ROKI_TICKET_ID` | Linear identifier |
 | `{{ ticket.title }}`, `{{ ticket.body }}`, `{{ ticket.labels }}`, `{{ ticket.assignee }}`, `{{ ticket.status }}` | (inline only) | Current Linear state |
-| `{{ repo.ghq }}` | `ROKI_REPO` | Admission-resolved repo |
+| `{{ repo.ghq }}` | `ROKI_REPO_GHQ` | Admission-resolved repo |
 | `{{ cycle.id }}` | `ROKI_CYCLE_ID` | UUID |
 | `{{ cycle.kind }}` | `ROKI_CYCLE_KIND` | `rule` / `cleanup` / `failure` |
 | `{{ cycle.trigger }}` | `ROKI_CYCLE_TRIGGER` | `runtime` (any runtime-detected diff: webhook delivery, polling fallback, or refresh nudge) / `cold_start` (daemon startup enumeration) |
