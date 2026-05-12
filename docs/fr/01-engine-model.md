@@ -196,6 +196,10 @@ A cleanup entry with no body (no `tasks:` / `states:` / `terminals:`) is shortha
 
 On daemon process start, the engine runs the same evaluation flow but with `cycle.trigger = "cold_start"`. See [07-recovery §Cold start](07-recovery.md) for the full enumeration / reconcile flow. Operators that need to suppress duplicate Linear comments on cold-start re-runs check `{% if cycle.trigger == "cold_start" %}` in their state body.
 
+### Store mirror
+
+Every cycle the daemon spawns is mirrored to the SQLite control-plane store: one row per cycle in `cycles`, one `state_visits` row per visit, and `outcome` + `ended_at` stamped on terminal or failure. Cycles whose row carries `ended_at IS NULL` at the next boot were interrupted mid-flight; cold start closes each one with `outcome = failure` and emits a `crashed_cycle_recovered` event before continuing the GraphQL enumerate / orphan reconcile pass.
+
 ## Capabilities
 
 - **Generic dispatch**: `cleanup:` / `rules:` / `on_failure:` are the only three lists the daemon evaluates. Each is first-match. Operators express any workflow within them.
