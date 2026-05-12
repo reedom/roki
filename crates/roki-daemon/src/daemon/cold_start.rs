@@ -142,6 +142,30 @@ impl<R: CycleRunner + 'static> ColdStart<R> {
 
         let page_size = page_size_from_env();
 
+        // Phase-2 cold-start hint: pre-seed the in-memory diff cache from
+        // the SQLite store's last-admitted set so operators see the previous
+        // admitted-ticket set immediately, even before the GraphQL enumerate
+        // response lands. The GraphQL pass that follows will overwrite each
+        // seeded entry (DiffOutcome::Changed) or, if Linear no longer admits
+        // it, leave it for the eviction path. Store errors are non-fatal.
+        if let Some(store) = crate::store_handle::global_store() {
+            match store.list_admitted() {
+                Ok(rows) => {
+                    for row in rows {
+                        if !self.cache.contains(&row.id).await {
+                            self.cache.seed_from_store_hint(&row.id, &row.repo).await;
+                        }
+                    }
+                }
+                Err(err) => {
+                    tracing::warn!(
+                        error = %err,
+                        "store list_admitted failed; cold-start continuing without hint"
+                    );
+                }
+            }
+        }
+
         // Enumerate. Partial failure -> empty admitted set, skip orphan reconcile (§4.6).
         let enumerated = match self
             .graphql
