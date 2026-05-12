@@ -8,8 +8,6 @@
 //! - Command-shape phase invocations call this per spawn so the cwd reflects
 //!   current worktree state (worktree may have been created mid-cycle).
 
-#![allow(dead_code)]
-
 use std::path::PathBuf;
 
 use tokio::process::Command;

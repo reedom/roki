@@ -115,6 +115,29 @@ pub(crate) async fn run_inner(config_path: &Path, mode: DispatchMode) -> Result<
         daemon_events.clone(),
     );
 
+    // Dependency check runs after the event writer is open so the failure
+    // surfaces in `_daemon.events.jsonl` in addition to the tracing line.
+    if let Err(missing) = crate::daemon::deps::check() {
+        for m in &missing {
+            let mut w = daemon_events.lock().await;
+            let _ = w.emit(&Event::DaemonDependencyMissing {
+                ts: now_rfc3339(),
+                binary: m.binary.into(),
+                remediation: m.hint.into(),
+            });
+            drop(w);
+            tracing::error!(
+                event_name = "daemon_dependency_missing",
+                binary = m.binary,
+                hint = m.hint,
+                "missing required CLI dependency"
+            );
+        }
+        return Err(SkeletonError::MissingDependency {
+            binaries: missing.iter().map(|m| m.binary.to_string()).collect(),
+        });
+    }
+
     // 5. Emit DaemonStarted.
     {
         let mut w = daemon_events.lock().await;
@@ -164,10 +187,13 @@ pub(crate) async fn run_inner(config_path: &Path, mode: DispatchMode) -> Result<
 
     // 7. Build runner. Slice 8: the runner constructs a `RealStateRunner`
     //    per cycle internally, sourced from `cfg.default_ai`.
+    let inflight = Arc::new(crate::daemon::inflight::InflightRegistry::new());
     let runner = Arc::new(RealCycleRunner {
         workflow: workflow.clone(),
         cfg: cfg.clone(),
         escalation: escalation.clone(),
+        shutdown: shutdown.clone(),
+        inflight: inflight.clone(),
     });
 
     // 9. Build cache + dispatcher.
@@ -265,15 +291,32 @@ pub(crate) async fn run_inner(config_path: &Path, mode: DispatchMode) -> Result<
                 crate::linear::polling::TickReason::Outage => "outage",
                 crate::linear::polling::TickReason::Nudge => "nudge",
             };
-            tokio::spawn(async move {
+            let handle = tokio::spawn(async move {
                 let mut w = writer.lock().await;
-                let _ = w.emit(&Event::PollingTick {
+                if let Err(err) = w.emit(&Event::PollingTick {
                     ts: now_rfc3339(),
                     trigger: trigger.into(),
                     status_set: Vec::new(),
                     enumerated: 0,
                     admitted: 0,
-                });
+                }) {
+                    tracing::error!(error = %err, "polling_tick event emit failed");
+                }
+            });
+            // Detach the handle but surface any panic on the runtime trace so a
+            // future regression in `EventWriter::emit` cannot make the task
+            // die silently.
+            tokio::spawn(async move {
+                if let Err(join_err) = handle.await
+                    && let Ok(panic) = join_err.try_into_panic()
+                {
+                    let payload = panic
+                        .downcast_ref::<&'static str>()
+                        .map(|s| s.to_string())
+                        .or_else(|| panic.downcast_ref::<String>().cloned())
+                        .unwrap_or_else(|| "<non-string panic payload>".into());
+                    tracing::error!(panic = %payload, "polling_tick emit task panicked");
+                }
             });
         }),
     );
@@ -282,7 +325,7 @@ pub(crate) async fn run_inner(config_path: &Path, mode: DispatchMode) -> Result<
     //      is set. Bind failure is logged as `api_bind_failed` rather
     //      than aborting the daemon — the operator can still observe
     //      cycles via the file-backed event log.
-    if cfg.api.port.is_some() {
+    let api_handle: Option<tokio::task::JoinHandle<()>> = if cfg.api.port.is_some() {
         if cfg.api.bind != "127.0.0.1" && cfg.api.bind != "::1" {
             tracing::warn!(
                 bind = %cfg.api.bind,
@@ -301,10 +344,16 @@ pub(crate) async fn run_inner(config_path: &Path, mode: DispatchMode) -> Result<
             daemon_writer: daemon_events.clone(),
         });
         let writer_for_log = daemon_events.clone();
-        tokio::spawn(async move {
+        Some(tokio::spawn(async move {
             match crate::api::serve(api_state).await {
                 Ok(()) => {}
                 Err(crate::api::ApiBindError::Bind { bind, port, source }) => {
+                    tracing::error!(
+                        bind = %bind,
+                        port = port,
+                        error = %source,
+                        "observability API bind failed"
+                    );
                     let mut w = writer_for_log.lock().await;
                     let _ = w.emit(&Event::ApiBindFailed {
                         ts: now_rfc3339(),
@@ -314,11 +363,12 @@ pub(crate) async fn run_inner(config_path: &Path, mode: DispatchMode) -> Result<
                     });
                 }
             }
-        });
+        }))
     } else {
         let mut w = daemon_events.lock().await;
         let _ = w.emit(&Event::ApiDisabled { ts: now_rfc3339() });
-    }
+        None
+    };
     // Keep the nudge handle alive until daemon shutdown; without this the
     // PollingTracker's `recv` returns None and the task exits.
     let _nudge_handle_keepalive = nudge_handle;
@@ -380,6 +430,23 @@ pub(crate) async fn run_inner(config_path: &Path, mode: DispatchMode) -> Result<
     // because we already saw the shutdown fire.
     signal_handle.abort();
     let _ = signal_handle.await;
+    // Tear down the observability API task. abort() is safe — axum::serve
+    // exits cleanly when its socket drops, and the task has no shutdown
+    // signal of its own. Surface panic payloads so a future regression in
+    // request handling does not vanish silently.
+    if let Some(h) = api_handle {
+        h.abort();
+        if let Err(join_err) = h.await
+            && let Ok(panic) = join_err.try_into_panic()
+        {
+            let payload = panic
+                .downcast_ref::<&'static str>()
+                .map(|s| s.to_string())
+                .or_else(|| panic.downcast_ref::<String>().cloned())
+                .unwrap_or_else(|| "<non-string panic payload>".into());
+            tracing::error!(panic = %payload, "observability API task panicked");
+        }
+    }
 
     // 16. Drain ticket tasks within the configured window.
     let window = Duration::from_secs(u64::from(cfg.engine.shutdown_window_seconds));
@@ -394,7 +461,6 @@ pub(crate) async fn run_inner(config_path: &Path, mode: DispatchMode) -> Result<
     };
 
     let mut drained: usize = 0;
-    let mut aborted_ticket_ids: Vec<String> = Vec::new();
 
     for (ticket_id, handle) in entries {
         let crate::daemon::dispatcher::TicketHandle { inbox, join } = handle;
@@ -411,22 +477,32 @@ pub(crate) async fn run_inner(config_path: &Path, mode: DispatchMode) -> Result<
                 drained += 1;
             }
             Ok(Err(join_err)) => {
-                // Task panicked; treat as aborted so the operator sees
-                // it on the shutdown line.
                 tracing::error!(
                     ticket_id = %ticket_id,
                     error = %join_err,
                     "ticket task join error during shutdown"
                 );
-                aborted_ticket_ids.push(ticket_id);
             }
             Err(_) => {
-                aborted_ticket_ids.push(ticket_id);
+                // Timed out — drain window expired before the task joined.
             }
         }
     }
 
-    let aborted = aborted_ticket_ids.len();
+    // Read the live-subprocess registry. Anything still here at deadline
+    // is an offender that did not honour SIGTERM within the window.
+    let mut offenders_raw = inflight.snapshot().await;
+    // Stable order keyed by ticket_id for a deterministic event payload.
+    offenders_raw.sort_by(|a, b| a.ticket_id.cmp(&b.ticket_id));
+
+    sigkill_offenders(&offenders_raw);
+
+    let offenders: Vec<crate::events::ShutdownOffender> = offenders_raw
+        .into_iter()
+        .map(crate::events::ShutdownOffender::from)
+        .collect();
+
+    let aborted = offenders.len();
 
     {
         let mut w = daemon_events.lock().await;
@@ -457,7 +533,7 @@ pub(crate) async fn run_inner(config_path: &Path, mode: DispatchMode) -> Result<
         let _ = w.emit(&Event::ShutdownWindowExceeded {
             ts: now_rfc3339(),
             aborted,
-            aborted_ticket_ids,
+            offenders,
         });
         return Err(SkeletonError::ShutdownWindowExceeded);
     }
@@ -465,11 +541,24 @@ pub(crate) async fn run_inner(config_path: &Path, mode: DispatchMode) -> Result<
     Ok(())
 }
 
+/// SIGKILL each surviving pid in `offenders`. ESRCH (already-exited race)
+/// is silently ignored — the post-exit window is racy by design.
+/// Entries with no observable pid are skipped (the OS pid was unavailable
+/// at registration time; nothing to kill).
+fn sigkill_offenders(offenders: &[crate::daemon::inflight::Inflight]) {
+    for off in offenders {
+        if let Some(pid) = off.pid {
+            let _ = nix::sys::signal::kill(
+                nix::unistd::Pid::from_raw(pid.get() as i32),
+                nix::sys::signal::Signal::SIGKILL,
+            );
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    //! Startup-bound failure tests. The cycle-bound and happy-path coverage
-    //! lives in the end-to-end smoke test (slice 1-4 e2e), with slice 5
-    //! daemon-shutdown coverage added in Tasks 9-15.
+    //! Startup-bound failure tests.
 
     use super::*;
     use crate::error::{RokiConfigError, SkeletonError};
@@ -486,5 +575,67 @@ mod tests {
             }
             other => panic!("expected SkeletonError::Config(MissingFile), got {other:?}"),
         }
+    }
+
+    #[test]
+    fn sigkill_offenders_tolerates_esrch_and_skips_none_pids() {
+        use crate::daemon::inflight::Inflight;
+        use std::num::NonZeroU32;
+        use uuid::Uuid;
+
+        // A pid that is almost certainly not in use (above PID_MAX on macOS
+        // / Linux defaults). kill(2) returns ESRCH and our helper drops it.
+        let dead = Inflight {
+            ticket_id: "ENG-1".into(),
+            cycle_id: Uuid::nil(),
+            state_id: "phase-1".into(),
+            visit: 1,
+            pid: NonZeroU32::new(0x7FFF_FFFE),
+        };
+        let unobservable = Inflight {
+            ticket_id: "ENG-2".into(),
+            cycle_id: Uuid::nil(),
+            state_id: "phase-1".into(),
+            visit: 1,
+            pid: None,
+        };
+        // Must not panic on either entry.
+        sigkill_offenders(&[dead, unobservable]);
+    }
+
+    #[test]
+    fn shutdown_offender_from_inflight_preserves_optional_pid() {
+        use crate::daemon::inflight::Inflight;
+        use crate::events::ShutdownOffender;
+        use std::num::NonZeroU32;
+        use uuid::Uuid;
+
+        let with_pid = Inflight {
+            ticket_id: "ENG-1".into(),
+            cycle_id: Uuid::from_u128(1),
+            state_id: "phase-1".into(),
+            visit: 3,
+            pid: NonZeroU32::new(4321),
+        };
+        let off: ShutdownOffender = with_pid.into();
+        assert_eq!(off.pid, Some(4321));
+        assert_eq!(off.visit, 3);
+        assert_eq!(off.ticket_id, "ENG-1");
+
+        let no_pid = Inflight {
+            ticket_id: "ENG-2".into(),
+            cycle_id: Uuid::nil(),
+            state_id: "phase-1".into(),
+            visit: 1,
+            pid: None,
+        };
+        let off: ShutdownOffender = no_pid.into();
+        assert!(off.pid.is_none());
+        // Ensure JSON elides the field rather than emitting a sentinel.
+        let s = serde_json::to_string(&off).unwrap();
+        assert!(
+            !s.contains("\"pid\""),
+            "pid field must be elided when None: {s}"
+        );
     }
 }

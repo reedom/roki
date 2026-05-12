@@ -27,6 +27,8 @@ pub struct RealCycleRunner {
     pub workflow: Arc<WorkflowConfig>,
     pub cfg: Arc<RokiConfig>,
     pub escalation: Arc<EscalationQueue>,
+    pub shutdown: crate::daemon::shutdown::ShutdownToken,
+    pub inflight: Arc<crate::daemon::inflight::InflightRegistry>,
 }
 
 #[async_trait::async_trait]
@@ -41,9 +43,15 @@ impl CycleRunner for RealCycleRunner {
         let mut events = match EventWriter::open(&self.cfg.paths.session_root, &admitted.ticket.id)
         {
             Ok(w) => w,
-            Err(_) => {
+            Err(err) => {
+                tracing::error!(
+                    ticket_id = %admitted.ticket.id,
+                    session_root = %self.cfg.paths.session_root.display(),
+                    error = %err,
+                    "failed to open per-ticket event writer at cycle boot"
+                );
                 return CycleResult::Failed {
-                    meta: boot_failure(),
+                    meta: boot_failure(&err),
                     kind: CycleKind::Rule,
                 };
             }
@@ -76,7 +84,13 @@ impl CycleRunner for RealCycleRunner {
         };
 
         let cycle_id = Uuid::new_v4();
-        let runner = build_runner(&self.cfg, admitted, cycle_id);
+        let runner = build_runner(
+            &self.cfg,
+            admitted,
+            cycle_id,
+            self.shutdown.clone(),
+            self.inflight.clone(),
+        );
         let mut ctx = build_cycle_context(&self.cfg, admitted, cycle_id, kind, cycle_trigger, None);
 
         // Best-effort write of cycle.json at cycle start so the slice 9 HTTP
@@ -210,7 +224,13 @@ impl RealCycleRunner {
         };
 
         let handler_cycle_id = Uuid::new_v4();
-        let handler_runner = build_runner(&self.cfg, admitted, handler_cycle_id);
+        let handler_runner = build_runner(
+            &self.cfg,
+            admitted,
+            handler_cycle_id,
+            self.shutdown.clone(),
+            self.inflight.clone(),
+        );
         let mut handler_ctx = build_cycle_context(
             &self.cfg,
             admitted,
@@ -286,7 +306,13 @@ impl RealCycleRunner {
     }
 }
 
-fn build_runner(cfg: &RokiConfig, admitted: &AdmittedTicket, cycle_id: Uuid) -> RealStateRunner {
+fn build_runner(
+    cfg: &RokiConfig,
+    admitted: &AdmittedTicket,
+    cycle_id: Uuid,
+    shutdown: crate::daemon::shutdown::ShutdownToken,
+    inflight: Arc<crate::daemon::inflight::InflightRegistry>,
+) -> RealStateRunner {
     let session_root = cfg.paths.session_root.clone();
     let session_tempdir =
         session_root.join(crate::capture::sanitize_ticket_id(&admitted.ticket.id));
@@ -298,6 +324,8 @@ fn build_runner(cfg: &RokiConfig, admitted: &AdmittedTicket, cycle_id: Uuid) -> 
         session_root,
         session_tempdir,
         cycle_id,
+        shutdown,
+        inflight,
     }
 }
 
@@ -335,8 +363,23 @@ fn build_cycle_context(
         "config".into(),
         serde_json::json!({
             "max_iterations": cfg.engine.max_iterations,
+            "session_root": cfg.paths.session_root.to_string_lossy(),
         }),
     );
+    if let Some(port) = cfg.api.port {
+        let bind = if cfg.api.bind.is_empty() {
+            "127.0.0.1".to_string()
+        } else {
+            cfg.api.bind.clone()
+        };
+        // Land as namespace `api.url` so the scalar flattener emits
+        // ROKI_API_URL (the documented env name) rather than
+        // ROKI_CONFIG_API_URL.
+        globals.insert(
+            "api".into(),
+            serde_json::json!({ "url": format!("http://{bind}:{port}") }),
+        );
+    }
     if let Some(meta) = failure {
         globals.insert(
             "failure".into(),
@@ -383,13 +426,13 @@ pub struct LegacyFailureMeta {
     pub error_text: String,
 }
 
-fn boot_failure() -> LegacyFailureMeta {
+fn boot_failure(err: &std::io::Error) -> LegacyFailureMeta {
     LegacyFailureMeta {
         failed_cycle_id: Uuid::nil(),
         kind: FailureKind::FsPoison,
         state_id: String::new(),
         visit_n: 0,
-        error_text: "runner boot path".into(),
+        error_text: format!("event writer open: {err}"),
     }
 }
 
@@ -405,4 +448,86 @@ fn _silence_unused_path() {
     let _: PathBuf = PathBuf::new();
     let _: &[RuleEntry] = &[];
     let _: Option<&StateMachine> = None;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::linear::ticket::NormalizedTicket;
+
+    fn admitted_ticket() -> AdmittedTicket {
+        AdmittedTicket {
+            ticket: NormalizedTicket::new(
+                "ENG-1".into(),
+                None,
+                "Backlog".into(),
+                vec![],
+                "t".into(),
+                "b".into(),
+            ),
+            ghq: "github.com/x/y".into(),
+        }
+    }
+
+    #[test]
+    fn build_cycle_context_exports_session_root_into_globals_config() {
+        let cfg = RokiConfig::test_default(std::path::Path::new("/tmp/sess-x"));
+        let admitted = admitted_ticket();
+        let cx = build_cycle_context(
+            &cfg,
+            &admitted,
+            Uuid::nil(),
+            CycleKind::Rule,
+            CycleTrigger::Runtime,
+            None,
+        );
+        let cfg_obj = cx
+            .globals
+            .get("config")
+            .and_then(|v| v.as_object())
+            .expect("config namespace present");
+        assert_eq!(
+            cfg_obj.get("session_root").and_then(|v| v.as_str()),
+            Some("/tmp/sess-x")
+        );
+    }
+
+    #[test]
+    fn build_cycle_context_exports_api_url_when_port_set() {
+        let mut cfg = RokiConfig::test_default(std::path::Path::new("/tmp/sess-x"));
+        cfg.api.port = Some(7777);
+        // bind defaults to 127.0.0.1 in test_default; verify the synthesized URL.
+        let admitted = admitted_ticket();
+        let cx = build_cycle_context(
+            &cfg,
+            &admitted,
+            Uuid::nil(),
+            CycleKind::Rule,
+            CycleTrigger::Runtime,
+            None,
+        );
+        let url = cx
+            .globals
+            .get("api")
+            .and_then(|v| v.get("url"))
+            .and_then(|v| v.as_str())
+            .expect("api.url present");
+        assert_eq!(url, "http://127.0.0.1:7777");
+    }
+
+    #[test]
+    fn build_cycle_context_omits_api_url_when_port_unset() {
+        let cfg = RokiConfig::test_default(std::path::Path::new("/tmp/sess-x"));
+        assert!(cfg.api.port.is_none());
+        let admitted = admitted_ticket();
+        let cx = build_cycle_context(
+            &cfg,
+            &admitted,
+            Uuid::nil(),
+            CycleKind::Rule,
+            CycleTrigger::Runtime,
+            None,
+        );
+        assert!(cx.globals.get("api").is_none());
+    }
 }

@@ -7,7 +7,9 @@
 pub mod cache;
 pub mod cold_start;
 pub mod cycle_metadata;
+pub mod deps;
 pub mod dispatcher;
+pub mod inflight;
 pub mod orphan;
 pub mod real_runner;
 pub mod shutdown;

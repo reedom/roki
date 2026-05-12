@@ -32,7 +32,6 @@ The single `roki` binary exposes one daemon subcommand, three observability subc
 | Flag | Argument | Overrides | Purpose |
 |---|---|---|---|
 | `--config <path>` | path | (none) | Path to `roki.toml`. Documented default applies when omitted. |
-| `--log-level <level>` | one of `error` / `warn` / `info` / `debug` / `trace` | `[log].level` | Structured log level. |
 
 ## `roki cleanup`
 
@@ -41,53 +40,71 @@ Identical flags to `roki run`. Dispatch mode is `CleanupOnly`: `cleanup:` entrie
 | Flag | Argument | Overrides | Purpose |
 |---|---|---|---|
 | `--config <path>` | path | (none) | Path to `roki.toml`. Documented default applies when omitted. |
-| `--log-level <level>` | one of `error` / `warn` / `info` / `debug` / `trace` | `[log].level` | Structured log level. |
 
 ## `roki log`
 
-Per-ticket subprocess capture reader. Defaults read `ROKI_TICKET_ID` / `ROKI_CYCLE_ID` / `ROKI_CYCLE_ITER` from the environment.
+Per-ticket subprocess capture reader. Defaults read `ROKI_TICKET_ID` / `ROKI_CYCLE_ID` / `ROKI_CONFIG_SESSION_ROOT` from the environment when invoked inside a state subprocess. External callers pass `--config <PATH>` so `paths.session_root` resolves.
 
-| Flag | Argument | Purpose |
-|---|---|---|
-| `--ticket <id>` | Linear issue id | Override default ticket. Required when invoked without env (and required alongside `--cycle` for cross-ticket reads). |
-| `--cycle <uuid>` | cycle UUID | Cross-cycle access within the same ticket. |
-| `--iter <n>` | int (absolute) or `-N` (relative) | Visit selector (cycle-wide visit ordering). Negative = N visits back from current. |
-| `--state <state_id>` | string | State selector. Operator-defined ids declared in `WORKFLOW.yaml`. |
-| `--stream <stream>` | `stdout` / `stderr` / `directive` / `events` / `terminal` / `exit_code` | Stream selector. |
-| `--tail <N>` | int | Last N lines. |
-| `--bytes <N>` | int | Last N bytes. |
-| `--list-visits` | (boolean) | Enumerate per-visit `(visit_n, state_id, exit_code)` tuples. |
-| `--meta` | (boolean) | Cycle meta (kind, trigger, started_at, ended_at, terminal_id, total visits). |
+```
+roki log [OPTIONS]
+roki log --list-visits [OPTIONS]
+roki log --meta [OPTIONS]
+```
+
+| Flag | Type | Default | Notes |
+|---|---|---|---|
+| `--ticket <id>` | string | `$ROKI_TICKET_ID` | Required when env unset. |
+| `--cycle <uuid>` | string | `$ROKI_CYCLE_ID` | Required when env unset. |
+| `--state <state_id>` | string | required for stream reads | Operator-declared state id from `WORKFLOW.yaml`. |
+| `--iter <n>` | i32 | latest completed visit | Absolute `>0` or relative `-N` (N visits back from latest). |
+| `--stream <kind>` | enum | required for stream reads | `stdout` / `stderr` / `events` / `terminal` / `directive` / `exit_code`. |
+| `--tail <n>` | usize | unset | Last N lines (line-oriented streams). Conflicts with `--bytes`. |
+| `--bytes <n>` | usize | unset | Last N bytes. Conflicts with `--tail`. |
+| `--list-visits` | flag | — | Emit per-visit JSON Lines `{visit_n, state_id, exit_code}`. |
+| `--meta` | flag | — | Emit `cycle.json` content verbatim. |
+| `--follow` | flag | — | Continue tailing `stdout` / `stderr` after EOF; polls every 200 ms (hidden `--follow-poll-ms` for tests). |
+| `--config <PATH>` | path | (none) | Required when `$ROKI_CONFIG_SESSION_ROOT` is unset. |
 
 ## `roki events`
 
-Structured event stream reader. Default mode connects to the daemon's HTTP API; `--offline --file <path>` reads a JSON Lines file directly.
+Structured event stream reader. Default mode connects to the daemon's HTTP API; `--offline --file <path>` reads a JSON Lines file directly. HTTP API URL resolves in this order: `--api <URL>` flag, `$ROKI_API_URL` env, `[api]` section of `--config <roki.toml>`.
 
-| Flag | Argument | Purpose |
+```
+roki events [--tail] [--since <S>] [--kind <K>] [--ticket <T>] [--cycle <U>]
+            [--format json|human] [--api <URL>] [--config <PATH>]
+roki events --offline --file <PATH> [filters...]
+```
+
+| Flag | Default | Notes |
 |---|---|---|
-| `--tail` | (boolean) | Live tail (HTTP polling). |
-| `--since <timestamp>` | RFC 3339 | Range start. |
-| `--kind <event_kind>` | event name | Filter by canonical event kind ([log-events.md](log-events.md)). |
-| `--ticket <id>` | Linear issue id | Filter by ticket. |
-| `--cycle <uuid>` | cycle UUID | Filter by cycle. |
-| `--format <format>` | `json` (default) / `human` | Output format. |
-| `--offline` | (boolean) | Read from file instead of HTTP API. Requires `--file`. |
-| `--file <path>` | path | JSON Lines event file (with `--offline`). |
+| `--tail` | unset | Continuous polling loop until SIGINT. |
+| `--since <S>` | unset | `<u64>` → server-side cursor. RFC3339 timestamp → client-side filter after server `since=0`. |
+| `--kind <K>` | unset | Filter on `event` (one value; AND with the rest). |
+| `--ticket <T>` | unset | Forwarded to `/api/events?ticket=`. |
+| `--cycle <U>` | unset | Forwarded to `/api/events?cycle=`. |
+| `--format` | `json` | `human` = one-line text reformatter. |
+| `--api <URL>` | `$ROKI_API_URL` else `--config`-derived else error | HTTP base URL. |
+| `--config <PATH>` | (none) | Used to synthesize `--api` from `[api]` when env unset. |
+| `--offline --file <P>` | — | Read JSONL file directly. Ignores `--api` / `--config`. |
+| `--cadence-ms <N>` | 1000 | `--tail` polling cadence. Hidden flag (testability). |
 
 Filters compose with AND.
 
 ## `roki repo`
 
-Per-ticket repo path resolver. Defaults read `ROKI_TICKET_ID` / `ROKI_REPO` from the environment.
+Per-ticket repo path resolver. Defaults read `ROKI_TICKET_ID` / `ROKI_REPO_GHQ` from the environment. Default returns the worktree path when one exists, else the ghq base path. Pre-run callers receive the ghq base — treat it as **read-only** unless `--worktree` confirmed worktree materialization ([fr:09-log-access-cli §`roki repo`](../fr/09-log-access-cli.md)).
 
-| Flag | Argument | Purpose |
+```
+roki repo [<ghq>] [--ticket <id>] [--worktree] [--auto-clone] [--config <PATH>]
+```
+
+| Arg / Flag | Default | Notes |
 |---|---|---|
-| (positional) | repo identifier (`github.com/foo/bar`) | Explicit repo. Optional. |
-| `--ticket <id>` | Linear issue id | Override default ticket. |
-| `--auto-clone` | (boolean) | Run `ghq get` if the ghq base path does not exist. The daemon never auto-clones implicitly. |
-| `--worktree` | (boolean) | Require worktree. Exits 1 if not yet created. |
-
-Default returns the worktree path when one exists, else the ghq base path. Pre-run callers receive the ghq base — treat it as **read-only** unless `--worktree` confirmed worktree materialization ([fr:09-log-access-cli §`roki repo`](../fr/09-log-access-cli.md)).
+| `<ghq>` positional | `$ROKI_REPO_GHQ` | E.g. `github.com/foo/bar`. |
+| `--ticket <id>` | `$ROKI_TICKET_ID` | Needed only when worktree resolution is attempted. |
+| `--worktree` | flag | Require worktree (exit 1 if absent). |
+| `--auto-clone` | flag | Run `ghq get <ghq>` before resolving the ghq base. |
+| `--config <PATH>` | (none) | Currently optional (the ghq + worktree lookup is config-free). |
 
 ## `roki workflow validate`
 

@@ -224,6 +224,30 @@ path = "tests/e2e/api_bind_failure_smoke.rs"
 name = "cycles_last_state_id_smoke"
 path = "tests/e2e/cycles_last_state_id_smoke.rs"
 
+[[test]]
+name = "cli_log_smoke"
+path = "tests/e2e/cli_log_smoke.rs"
+
+[[test]]
+name = "cli_log_follow"
+path = "tests/e2e/cli_log_follow.rs"
+
+[[test]]
+name = "cli_events_online_smoke"
+path = "tests/e2e/cli_events_online_smoke.rs"
+
+[[test]]
+name = "cli_events_offline_smoke"
+path = "tests/e2e/cli_events_offline_smoke.rs"
+
+[[test]]
+name = "cli_repo_smoke"
+path = "tests/e2e/cli_repo_smoke.rs"
+
+[[test]]
+name = "daemon_dependency_missing_smoke"
+path = "tests/e2e/daemon_dependency_missing_smoke.rs"
+
 [features]
 # Test-only seam: gates the `ROKI_LINEAR_GRAPHQL_URL` env-var override inside
 # `linear::client` so the release binary always targets the hardcoded endpoint.
@@ -248,6 +272,7 @@ time = { version = "0.3", features = ["formatting", "parsing"] }
 tokio = { version = "1", features = ["full"] }
 toml = "0.8"
 tracing = "0.1"
+which = "6"
 tracing-subscriber = { version = "0.3", features = ["fmt"] }
 uuid = { version = "1", features = ["v4"] }
 vte = "0.13"

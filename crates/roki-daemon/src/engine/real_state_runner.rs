@@ -11,6 +11,7 @@
 
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
+use std::sync::Arc;
 use std::time::Instant;
 
 use async_trait::async_trait;
@@ -21,6 +22,8 @@ use tokio::process::Command;
 use uuid::Uuid;
 
 use crate::capture;
+use crate::daemon::inflight::{Inflight, InflightRegistry};
+use crate::daemon::shutdown::ShutdownToken;
 use crate::engine::cwd;
 use crate::engine::sentinel::{self, DirectivePayload, SentinelError};
 use crate::engine::stall::{StallOutcome, Watchdog};
@@ -53,6 +56,11 @@ pub struct RealStateRunner {
     pub session_tempdir: PathBuf,
     /// Stable cycle UUID; appears in capture paths as `cycle-<uuid>/`.
     pub cycle_id: Uuid,
+    /// Fires on SIGINT / SIGTERM; signals SIGTERM should be sent to the
+    /// live child.
+    pub shutdown: ShutdownToken,
+    /// Registry of live subprocesses for the shutdown drain offender list.
+    pub inflight: Arc<InflightRegistry>,
 }
 
 #[async_trait]
@@ -185,7 +193,8 @@ impl StateRunner for RealStateRunner {
         cmd.args(rest)
             .current_dir(&cwd_path)
             .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
+            .stderr(Stdio::piped())
+            .kill_on_drop(true);
         if stdin_rendered.is_some() {
             cmd.stdin(Stdio::piped());
         } else {
@@ -212,10 +221,27 @@ impl StateRunner for RealStateRunner {
             }
         };
 
+        let pid = child.id().and_then(std::num::NonZeroU32::new);
+        self.inflight
+            .register(Inflight {
+                ticket_id: self.ticket_id.clone(),
+                cycle_id: self.cycle_id,
+                state_id: state.id.clone(),
+                visit: visit_n,
+                pid,
+            })
+            .await;
+
         // 12. Write stdin once if needed.
         if let Some(body) = stdin_rendered.as_ref() {
             if let Some(mut stdin) = child.stdin.take() {
                 if let Err(err) = stdin.write_all(body.as_bytes()).await {
+                    // Reap the child explicitly so it cannot escape past the
+                    // shutdown drain. kill_on_drop is a backstop, but waiting
+                    // here also avoids zombie accumulation in long-lived runs.
+                    let _ = child.start_kill();
+                    let _ = child.wait().await;
+                    self.inflight.clear(&self.ticket_id).await;
                     return StateOutcome::Failure {
                         kind: FailureKind::ProcessCrash,
                         error_text: format!("stdin write: {err}"),
@@ -232,6 +258,8 @@ impl StateRunner for RealStateRunner {
 
         let visit_dir_for_terminal = visit_dir.clone();
         let state_id_for_terminal = state.id.clone();
+        let visit_dir_for_stderr = visit_dir.clone();
+        let state_id_for_stderr = state.id.clone();
         let stdout_task = {
             let wd = watchdog.clone();
             tokio::spawn(async move {
@@ -246,11 +274,34 @@ impl StateRunner for RealStateRunner {
             })
         };
         let stderr_task = tokio::spawn(async move {
-            drain_stderr(stderr_pipe, stderr_file).await;
+            drain_stderr(
+                stderr_pipe,
+                stderr_file,
+                state_id_for_stderr,
+                visit_dir_for_stderr,
+            )
+            .await;
         });
 
-        // 14. Watchdog runs to completion (Healthy or StalledThenTerminated).
-        let stall_outcome = watchdog.run(&mut child).await;
+        // Watchdog runs in parallel with a shutdown observer. On shutdown
+        // fire we SIGTERM the live child via `engine::stall::
+        // terminate_child_external`. The watchdog's `Healthy` short-circuit
+        // covers the race where the child exits cleanly before SIGTERM
+        // lands.
+        let stall_outcome = {
+            let shutdown = self.shutdown.clone();
+            tokio::select! {
+                biased;
+                outcome = watchdog.run(&mut child) => outcome,
+                _ = shutdown.wait() => {
+                    crate::engine::stall::terminate_child_external(&mut child).await;
+                    // Treat as "Healthy" for the wait-and-reap path below;
+                    // the resulting exit_status is a signal kill, which
+                    // step 17 already classifies as `ProcessCrash`.
+                    StallOutcome::Healthy
+                }
+            }
+        };
         let terminal_payload = stdout_task.await.unwrap_or(None);
         let _ = stderr_task.await;
 
@@ -258,12 +309,14 @@ impl StateRunner for RealStateRunner {
         let exit_status = match child.wait().await {
             Ok(s) => s,
             Err(err) => {
+                self.inflight.clear(&self.ticket_id).await;
                 return StateOutcome::Failure {
                     kind: FailureKind::ProcessCrash,
                     error_text: format!("wait: {err}"),
                 };
             }
         };
+        self.inflight.clear(&self.ticket_id).await;
         let duration_seconds = started.elapsed().as_secs();
 
         // 16. Stall trumps everything else.
@@ -590,24 +643,80 @@ async fn tee_stdout(
     use std::io::Write as _;
     let mut splitter = LineSplitter::new(pipe);
     let mut terminal_payload: Option<Value> = None;
-    while let Ok(Some(line)) = splitter.next_line().await {
-        watchdog.tick_stdout();
-        let _ = writeln!(file, "{line}");
-        if terminal_payload.is_none() {
-            if let Some(value) = scan_run_terminal_line(&line) {
-                let _ = capture::write_state_terminal_json(&visit_dir, &state_id, &value);
-                terminal_payload = Some(value);
+    loop {
+        match splitter.next_line().await {
+            Ok(Some(line)) => {
+                watchdog.tick_stdout();
+                if let Err(err) = writeln!(file, "{line}") {
+                    tracing::error!(
+                        state_id = %state_id,
+                        visit_dir = %visit_dir.display(),
+                        error = %err,
+                        "stdout capture write failed; line dropped"
+                    );
+                }
+                if terminal_payload.is_none()
+                    && let Some(value) = scan_run_terminal_line(&line)
+                {
+                    if let Err(err) =
+                        capture::write_state_terminal_json(&visit_dir, &state_id, &value)
+                    {
+                        tracing::error!(
+                            state_id = %state_id,
+                            visit_dir = %visit_dir.display(),
+                            error = %err,
+                            "terminal.json write failed; payload retained in memory"
+                        );
+                    }
+                    terminal_payload = Some(value);
+                }
+            }
+            Ok(None) => break,
+            Err(err) => {
+                tracing::error!(
+                    state_id = %state_id,
+                    visit_dir = %visit_dir.display(),
+                    error = %err,
+                    "stdout pipe read failed; subsequent lines lost"
+                );
+                break;
             }
         }
     }
     terminal_payload
 }
 
-async fn drain_stderr(pipe: tokio::process::ChildStderr, mut file: std::fs::File) {
+async fn drain_stderr(
+    pipe: tokio::process::ChildStderr,
+    mut file: std::fs::File,
+    state_id: String,
+    visit_dir: PathBuf,
+) {
     use std::io::Write as _;
     let mut splitter = LineSplitter::new(pipe);
-    while let Ok(Some(line)) = splitter.next_line().await {
-        let _ = writeln!(file, "{line}");
+    loop {
+        match splitter.next_line().await {
+            Ok(Some(line)) => {
+                if let Err(err) = writeln!(file, "{line}") {
+                    tracing::error!(
+                        state_id = %state_id,
+                        visit_dir = %visit_dir.display(),
+                        error = %err,
+                        "stderr capture write failed; line dropped"
+                    );
+                }
+            }
+            Ok(None) => break,
+            Err(err) => {
+                tracing::error!(
+                    state_id = %state_id,
+                    visit_dir = %visit_dir.display(),
+                    error = %err,
+                    "stderr pipe read failed; subsequent lines lost"
+                );
+                break;
+            }
+        }
     }
 }
 
@@ -629,6 +738,8 @@ mod tests {
             session_root: tmp.to_path_buf(),
             session_tempdir: tmp.join(ticket),
             cycle_id: Uuid::nil(),
+            shutdown: crate::daemon::shutdown::ShutdownToken::new(),
+            inflight: std::sync::Arc::new(crate::daemon::inflight::InflightRegistry::new()),
         }
     }
 
@@ -645,6 +756,10 @@ mod tests {
         ctx.globals.insert(
             "cycle".into(),
             serde_json::json!({ "id": "00000000-0000-0000-0000-000000000000", "kind": "rule", "trigger": "runtime", "iter": 0 }),
+        );
+        ctx.globals.insert(
+            "config".into(),
+            serde_json::json!({ "session_root": "/tmp/sess-x" }),
         );
         ctx
     }
@@ -915,6 +1030,65 @@ mod tests {
         assert_eq!(result.iterations, 2);
     }
 
+    #[tokio::test]
+    async fn shutdown_terminates_running_state_subprocess() {
+        let tmp = TempDir::new().unwrap();
+        let ghq_base = tmp.path().join("ghq");
+        std::fs::create_dir_all(&ghq_base).unwrap();
+
+        let shutdown = crate::daemon::shutdown::ShutdownToken::new();
+        let inflight = std::sync::Arc::new(crate::daemon::inflight::InflightRegistry::new());
+
+        let runner = RealStateRunner {
+            default_cli: "echo".into(),
+            default_stall_seconds: 60,
+            ticket_id: "ENG-1".into(),
+            ghq: "github.com/acme/x".into(),
+            session_root: tmp.path().to_path_buf(),
+            session_tempdir: tmp.path().join("ENG-1"),
+            cycle_id: Uuid::nil(),
+            shutdown: shutdown.clone(),
+            inflight: inflight.clone(),
+        };
+
+        let state = run_state_with_cmd("sleep 30");
+        let mut ctx = empty_ctx();
+        ctx.bump_visit("s");
+
+        let shutdown_fire = shutdown.clone();
+        let fire = tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(200)).await;
+            shutdown_fire.fire();
+        });
+
+        let start = std::time::Instant::now();
+        let outcome = temp_env::async_with_vars(
+            [
+                ("ROKI_GHQ_BASE_OVERRIDE", Some(ghq_base.to_str().unwrap())),
+                ("ROKI_WT_ROOT_OVERRIDE", Some(tmp.path().to_str().unwrap())),
+            ],
+            async { runner.run_state(&state, &ctx).await },
+        )
+        .await;
+        fire.await.unwrap();
+
+        assert!(
+            start.elapsed() < Duration::from_secs(15),
+            "shutdown did not terminate the child quickly: {:?}",
+            start.elapsed()
+        );
+        match outcome {
+            StateOutcome::Failure { kind, .. } => {
+                assert!(
+                    matches!(kind, FailureKind::ProcessCrash),
+                    "expected ProcessCrash, got {kind:?}"
+                );
+            }
+            other => panic!("expected Failure(ProcessCrash), got {other:?}"),
+        }
+        assert!(inflight.snapshot().await.is_empty(), "registry not cleared");
+    }
+
     #[test]
     fn split_frontmatter_returns_body_when_no_delimiter() {
         let raw = "no frontmatter here";
@@ -957,6 +1131,29 @@ mod tests {
         assert!(names.contains(&"ROKI_TICKET_ID"));
         assert!(names.contains(&"ROKI_CYCLE_KIND"));
         assert!(names.contains(&"ROKI_CYCLE_ITER"));
+        assert!(names.contains(&"ROKI_CONFIG_SESSION_ROOT"));
+        // ROKI_API_URL is only set when the test fixture configures [api].port.
+        // The default fixture leaves the API server disabled, so assert absence
+        // to lock the gating behavior.
+        assert!(!names.contains(&"ROKI_API_URL"));
+    }
+
+    #[test]
+    fn build_env_emits_roki_api_url_when_api_namespace_present() {
+        let state = run_state_with_cmd("true");
+        let mut ctx = empty_ctx();
+        ctx.globals.insert(
+            "api".into(),
+            serde_json::json!({ "url": "http://127.0.0.1:7777" }),
+        );
+        ctx.bump_visit("s");
+        let path = std::path::PathBuf::from("/tmp/dir/s.1.json");
+        let env = build_env(&state, &ctx, 1, &path);
+        let pair = env
+            .iter()
+            .find(|(k, _)| k == "ROKI_API_URL")
+            .expect("ROKI_API_URL present");
+        assert_eq!(pair.1, "http://127.0.0.1:7777");
     }
 
     #[test]

@@ -32,7 +32,7 @@ pub fn clean_json(value: &mut Value) {
     }
 }
 
-fn strip_ansi(input: &str) -> String {
+pub fn strip_ansi(input: &str) -> String {
     struct Stripper {
         out: String,
     }

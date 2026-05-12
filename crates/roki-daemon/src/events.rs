@@ -19,6 +19,31 @@ pub enum FailureMarker {
     None,
 }
 
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct ShutdownOffender {
+    pub ticket_id: String,
+    pub cycle_id: String,
+    pub state_id: String,
+    pub visit: u32,
+    /// Absent when the OS pid was not observable at registration; consumers
+    /// must treat a missing field as "live subprocess that escaped pid
+    /// capture" rather than a real pid of 0.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pid: Option<u32>,
+}
+
+impl From<crate::daemon::inflight::Inflight> for ShutdownOffender {
+    fn from(i: crate::daemon::inflight::Inflight) -> Self {
+        ShutdownOffender {
+            ticket_id: i.ticket_id,
+            cycle_id: i.cycle_id.to_string(),
+            state_id: i.state_id,
+            visit: i.visit,
+            pid: i.pid.map(|p| p.get()),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum WorktreeDeleteReason {
@@ -169,7 +194,12 @@ pub enum Event {
     ShutdownWindowExceeded {
         ts: String,
         aborted: usize,
-        aborted_ticket_ids: Vec<String>,
+        offenders: Vec<ShutdownOffender>,
+    },
+    DaemonDependencyMissing {
+        ts: String,
+        binary: String,
+        remediation: String,
     },
     WebhookSkipped {
         ts: String,
@@ -266,6 +296,7 @@ impl Event {
             Event::ApiDisabled { .. } => "api_disabled",
             Event::PollingTick { .. } => "polling_tick",
             Event::RefreshNudgeAcknowledged { .. } => "refresh_nudge_acknowledged",
+            Event::DaemonDependencyMissing { .. } => "daemon_dependency_missing",
         }
     }
 
@@ -311,6 +342,7 @@ impl Event {
             Event::ApiDisabled { .. } => (None, None),
             Event::PollingTick { .. } => (None, None),
             Event::RefreshNudgeAcknowledged { .. } => (None, None),
+            Event::DaemonDependencyMissing { .. } => (None, None),
         }
     }
 }
@@ -543,16 +575,38 @@ mod tests {
     }
 
     #[test]
-    fn shutdown_window_exceeded_carries_aborted_ids() {
+    fn shutdown_window_exceeded_carries_offenders() {
         let ev = Event::ShutdownWindowExceeded {
             ts: "2026-05-08T00:00:00Z".into(),
-            aborted: 2,
-            aborted_ticket_ids: vec!["ENG-1".into(), "ENG-2".into()],
+            aborted: 1,
+            offenders: vec![ShutdownOffender {
+                ticket_id: "ENG-1".into(),
+                cycle_id: "00000000-0000-0000-0000-000000000001".into(),
+                state_id: "phase-1".into(),
+                visit: 1,
+                pid: Some(9999),
+            }],
         };
-        let v: Value = serde_json::to_value(&ev).unwrap();
-        assert_eq!(v["event"], "shutdown_window_exceeded");
-        assert_eq!(v["aborted"], 2);
-        assert_eq!(v["aborted_ticket_ids"][1], "ENG-2");
+        let s = serde_json::to_string(&ev).unwrap();
+        assert!(s.contains("\"event\":\"shutdown_window_exceeded\""));
+        assert!(s.contains("\"ticket_id\":\"ENG-1\""));
+        assert!(s.contains("\"state_id\":\"phase-1\""));
+        assert!(s.contains("\"visit\":1"));
+        assert!(s.contains("\"pid\":9999"));
+        assert!(s.contains("\"cycle_id\":\"00000000-0000-0000-0000-000000000001\""));
+    }
+
+    #[test]
+    fn daemon_dependency_missing_serializes() {
+        let ev = Event::DaemonDependencyMissing {
+            ts: "2026-05-12T00:00:00Z".into(),
+            binary: "wt".into(),
+            remediation: "install wt and put it on PATH".into(),
+        };
+        let s = serde_json::to_string(&ev).unwrap();
+        assert!(s.contains("\"event\":\"daemon_dependency_missing\""));
+        assert!(s.contains("\"binary\":\"wt\""));
+        assert!(s.contains("\"remediation\":\"install wt and put it on PATH\""));
     }
 
     #[test]
