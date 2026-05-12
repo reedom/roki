@@ -384,6 +384,11 @@ fn sanitize_ticket(id: &str) -> String {
 pub struct EventWriter {
     file: BufWriter<File>,
     path: PathBuf,
+    /// Ticket id the writer was opened with. `_daemon` for the
+    /// daemon-scoped writer; the Linear issue id for per-ticket writers.
+    /// Used by the SQLite dual-write fallback when an emitted variant does
+    /// not carry its own `ticket_id` field (e.g. lifecycle events).
+    writer_ticket_id: String,
 }
 
 impl EventWriter {
@@ -396,6 +401,7 @@ impl EventWriter {
         Ok(Self {
             file: BufWriter::new(file),
             path,
+            writer_ticket_id: ticket_id.to_string(),
         })
     }
 
@@ -412,6 +418,15 @@ impl EventWriter {
         // and pay only the OnceLock load.
         if let Some(ring) = crate::observability::global_ring() {
             EventTap { ring }.record(event);
+        }
+        // Phase-1 store dual-write: best-effort, errors logged not propagated.
+        // The JSONL file remains authoritative until the cycle FSM migrates.
+        if let Some(store) = crate::store_handle::global_store() {
+            crate::store_handle::append_event_best_effort(
+                &store,
+                &self.writer_ticket_id,
+                event,
+            );
         }
         Ok(())
     }

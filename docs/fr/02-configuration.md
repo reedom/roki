@@ -69,6 +69,7 @@ max_iterations = 10
 [paths]
 workflow = "./WORKFLOW.yaml"
 session_root = "~/.cache/roki/sessions"
+# store_path defaults to "<session_root>/roki.db" when omitted.
 
 [log]
 destination = "stdout"      # "stdout" | "file" | "both"

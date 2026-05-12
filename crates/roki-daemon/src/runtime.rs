@@ -98,6 +98,18 @@ pub(crate) async fn run_inner(config_path: &Path, mode: DispatchMode) -> Result<
     // boot sequence shows up in `/api/events`.
     crate::observability::set_global_ring(ring.clone());
 
+    // Open the SQLite control-plane store (phase-1: events dual-write only).
+    // Failure here is fatal: the store path is on the same filesystem as the
+    // jsonl log, so a failure here implies the jsonl write would fail too —
+    // surfacing it before the first DaemonStarted event is the honest path.
+    let store = roki_store::SqliteStore::open(&cfg.paths.store_path).map_err(|e| {
+        SkeletonError::Capture(crate::error::CaptureError::OpenFile {
+            path: cfg.paths.store_path.clone(),
+            source: std::io::Error::other(e.to_string()),
+        })
+    })?;
+    crate::store_handle::set_global_store(Arc::new(store));
+
     // 4. Open the daemon-scoped event log.
     let daemon_events_writer =
         EventWriter::open(&cfg.paths.session_root, "_daemon").map_err(|e| {
