@@ -33,7 +33,7 @@ Operators must diagnose daemon behavior, admission decisions, cycle outcomes, an
   - `destination = "stdout"` (default) → daemon writes to stdout; operator pipes through systemd / launchd / external log-rotation tooling.
   - `destination = "file"` → daemon appends to `[log].file_path`. The daemon does not rotate; rotation is operator-managed (logrotate, journald, etc.).
   - `destination = "both"` → both stdout and the file.
-- **Level**: configurable via `[log].level` and the `--log-level` CLI override.
+- **Level**: configurable via `[log].level`.
 - **Per-cycle / per-state / per-ticket / per-repo fields**: automatically attached based on tracing spans. Cycle id (`cycle.id`), cycle iteration (`cycle.iter`, total state-visits across the cycle), state id (`state.id`), per-state visit number (`state.visits`), ticket id, repo, and trigger (`runtime` / `cold_start`) are present where relevant.
 - **Secret redaction**: Linear API token, webhook secret, and any operator-declared secrets in `roki.toml` are redacted before emit. Secrets in capture files (Tier 2) are not redacted because the daemon does not parse their contents — operators that want redacted captures route their cli line's output through their own redactor.
 - **Read access**: `roki events` ([09-log-access-cli](09-log-access-cli.md)) reads from the HTTP API ring buffer (live tail / range filter) and, with `--offline --file <path>`, from a JSON Lines file directly.
@@ -53,21 +53,21 @@ Operators must diagnose daemon behavior, admission decisions, cycle outcomes, an
 
 ### Event catalog (MVP)
 
-Canonical event names emitted on the structured pipeline. `roki events --kind <name>` filters on these. The full field schema lives in [`docs/reference/log-events.md`](../reference/log-events.md).
+Canonical event names emitted on the structured pipeline. `roki events --kind <name>` filters on these. The full field schema lives in [`docs/reference/log-events.md`](../reference/log-events.md). Rows tagged "(planned)" are part of the target spec but not yet emitted; the shipped subset is what `roki events` returns today.
 
 | Event | When |
 |---|---|
-| `webhook_received` | Webhook arrives |
+| `webhook_received` (planned) | Webhook arrives |
 | `webhook_skipped` | Admission failed or the diff produced no rule match |
-| `cycle_started` | Cycle begins (`cycle.kind` ∈ `rule` / `cleanup` / `failure`) |
-| `state_started` | State subprocess spawned. Carries `state_id`, `visit_n` |
-| `state_completed` | State clean exit; carries `state_id`, `visit_n`, head/tail stderr summary, edge taken |
-| `state_failed` | State failure. Carries `state_id`, `visit_n`, `failure.kind` per [06-failure-handling §Daemon-detected failure kinds](06-failure-handling.md) |
-| `failure_unhandled` | A cycle failure with no `on_failure:` match (`marker = none`). Carries `(ticket_id, cycle_id, cycle_kind, failure.kind, state_id, visit_n, error_text, marker)`. Daemon stays alive; the ticket task drops the cycle and waits for the next admission ([06-failure-handling §Failure-handler cycle](06-failure-handling.md)). Recursive failure-cycle failures and cleanup-time fs errors enter the escalation queue instead — see `escalation_added`. |
-| `cycle_completed` | Cycle ends at a terminal. Carries `terminal_id`, `outcome`, `iterations` (total state-visits) |
-| `cycle_aborted` | Cycle aborted (failure or admission lost mid-cycle) |
-| `escalation_added` | Escalation queue entry added. Daemon-stuck failure: failure-handler cycle that itself failed, cleanup-time fs error, or daemon-internal error with no cycle association. Carries `(ticket_id?, cycle_id?, failure.kind, state_id?, visit_n?, error_text)`. Cycle-less entries omit ticket / cycle / state context ([06-failure-handling §Escalation queue](06-failure-handling.md)) |
-| `worktree_created` / `worktree_deleted` | Worktree lifecycle |
+| `cycle_started` (planned) | Cycle begins (`cycle.kind` ∈ `rule` / `cleanup` / `failure`) |
+| `state_started` (planned) | State subprocess spawned. Carries `state_id`, `visit_n` |
+| `state_completed` (planned) | State clean exit; carries `state_id`, `visit_n`, head/tail stderr summary, edge taken |
+| `state_failed` (planned) | State failure. Carries `state_id`, `visit_n`, `failure.kind` per [06-failure-handling §Daemon-detected failure kinds](06-failure-handling.md) |
+| `failure_unhandled` | A cycle failure with no `on_failure:` match (`marker = none`). Carries `cycle_id`, `cycle_kind`, `failure: { kind, state_id?, visit_n, exit_code?, error_text }`, `marker`. Daemon stays alive; the ticket task drops the cycle and waits for the next admission ([06-failure-handling §Failure-handler cycle](06-failure-handling.md)). Recursive failure-cycle failures and cleanup-time fs errors enter the escalation queue instead — see `escalation_added`. |
+| `cycle_completed` | Cycle ends at a terminal. Carries `cycle_id`, `cycle_kind`, `iters` (total state-visits), `terminal_id?`, `outcome?` |
+| `cycle_aborted` (planned) | Cycle aborted (failure or admission lost mid-cycle) |
+| `escalation_added` | Escalation queue entry added. Daemon-stuck failure: failure-handler cycle that itself failed, cleanup-time fs error, or daemon-internal error with no cycle association. Carries `ticket_id?`, `cycle_id?`, `failure: { kind, state_id?, visit_n, exit_code?, error_text }`. Cycle-less entries omit ticket / cycle / state context ([06-failure-handling §Escalation queue](06-failure-handling.md)) |
+| `worktree_created` (planned) / `worktree_delete_requested` | Worktree lifecycle. Delete-requested carries `ticket_id`, `cycle_id?`, `reason` ∈ `cleanup_terminal` / `cleanup_shorthand`. |
 | `cold_start_began` / `cold_start_completed` | Daemon startup reconciliation |
 
 #### Slice 9 additions
@@ -95,7 +95,7 @@ For every state visit, the daemon emits one `state_completed` (or `state_failed`
 - **Filter-friendly event names**: `roki events --kind <event_kind>` filters by canonical event names (`webhook_received`, `cycle_started`, `state_started`, etc.).
 - **Per-issue forensics**: `roki log --ticket <id> --cycle <uuid> ...` plus the structured event stream covers every observable aspect of a past cycle.
 - **Stderr never silently dropped**: per-visit capture preserves all of it; structured event emits a head/tail summary plus a path to the capture file.
-- **Configurable destination + level**: `roki.toml [log]` covers the daemon-wide settings; `--log-level` overrides level on the CLI.
+- **Configurable destination + level**: `roki.toml [log]` covers the daemon-wide settings.
 
 ## Boundaries
 
