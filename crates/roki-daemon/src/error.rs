@@ -130,12 +130,6 @@ pub enum WorkflowError {
         index: usize,
         value: String,
     },
-    #[error("[[on_failure]][{index}] when.phase = {value:?} not in {{pre, run, post}}; in {path}")]
-    OnFailureUnknownPhase {
-        path: std::path::PathBuf,
-        index: usize,
-        value: String,
-    },
     #[error("[[on_failure]][{index}] when.kind.in is empty; in {path}")]
     OnFailureEmptyKindIn {
         path: std::path::PathBuf,
