@@ -140,6 +140,11 @@ impl Default for EngineSection {
 pub struct PathsSection {
     pub workflow: PathBuf,
     pub session_root: PathBuf,
+    /// SQLite control-plane database. Defaults to
+    /// `<session_root>/roki.db` when not specified. Safe to live under
+    /// `session_root` because cleanup/orphan reconcile delete only
+    /// per-ticket subdirectories, never the root itself.
+    pub store_path: PathBuf,
 }
 
 /// `[log]` section. No fields are required at the skeleton level;
@@ -246,6 +251,7 @@ impl RokiConfig {
             paths: PathsSection {
                 workflow: session_root.join("WORKFLOW.yaml"),
                 session_root: session_root.to_path_buf(),
+                store_path: session_root.join("roki.db"),
             },
             log: LogSection::default(),
             escalation: EscalationSection::default(),
@@ -325,6 +331,7 @@ struct RawEngine {
 struct RawPaths {
     workflow: Option<PathBuf>,
     session_root: Option<PathBuf>,
+    store_path: Option<PathBuf>,
 }
 
 #[derive(Default, Deserialize)]
@@ -375,9 +382,14 @@ impl RawRokiConfig {
             stall_seconds: stall,
         };
 
+        let session_root = required_field(path, "paths.session_root", raw_paths.session_root)?;
+        let store_path = raw_paths
+            .store_path
+            .unwrap_or_else(|| session_root.join("roki.db"));
         let paths_section = PathsSection {
             workflow: required_field(path, "paths.workflow", raw_paths.workflow)?,
-            session_root: required_field(path, "paths.session_root", raw_paths.session_root)?,
+            session_root,
+            store_path,
         };
 
         let engine = parse_engine(path, raw_engine)?;

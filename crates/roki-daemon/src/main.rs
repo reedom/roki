@@ -14,6 +14,7 @@ mod linear;
 pub mod observability;
 mod rule;
 mod runtime;
+pub mod store_handle;
 mod workflow;
 
 #[tokio::main]
