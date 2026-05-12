@@ -48,7 +48,7 @@ On SIGINT / SIGTERM the daemon:
 
 1. Stops accepting webhooks and stops launching new cycles.
 2. Sends SIGTERM to every in-flight state subprocess. The shutdown grace window from `roki.toml [engine].shutdown_window_seconds` applies uniformly to every state regardless of cli line, since every state is command-shape ([04-state-execution §Subprocess shape](04-state-execution.md)).
-3. Waits up to that window for each subprocess to exit. Subprocesses still alive at the end of the window are SIGKILLed and the daemon emits `shutdown_window_exceeded` ([ref:log-events](../reference/log-events.md)) naming each offending subprocess (`offenders[].{ticket_id, cycle_id, state_id, visit, pid}`).
+3. Waits up to that window for each subprocess to exit. Subprocesses still alive at the end of the window are SIGKILLed and the daemon emits `shutdown_window_exceeded` ([ref:log-events](../reference/log-events.md)) naming each offending subprocess (`offenders[].{ticket_id, cycle_id, state_id, visit, pid?}` — `pid` is omitted when the OS pid was not observable at registration).
 4. Drops the in-memory diff cache (nothing is persisted).
 5. Exits with code 0. Worktrees and session tempdirs are **not** deleted at shutdown — the next cold start reconciles them.
 

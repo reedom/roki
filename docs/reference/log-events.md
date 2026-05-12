@@ -32,29 +32,31 @@ Attached to every event via tracing spans (when in scope).
 | `state_id` | string | per-state event |
 | `visit_n` | int (1-indexed) | per-state event — visit count for this state |
 
-`cycle.trigger = runtime` covers webhook delivery, polling fallback, and refresh nudge driven cycles; sub-source detail surfaces via separate event kinds (`webhook_received`, `polling_started`, `refresh_received`).
+`cycle.trigger = runtime` covers webhook delivery, polling fallback, and refresh nudge driven cycles; sub-source detail surfaces via separate event kinds (`webhook_received`, `polling_started`, `refresh_received` — planned).
 
 ## Cycle engine events
 
+Events tagged "(planned)" are part of the target spec but not yet emitted; only the shipped subset is queryable via `roki events --kind <name>` today.
+
 | Event | When | Carries |
 |---|---|---|
-| `cycle_started` | Cycle begins | `cycle.kind`, `cycle.trigger`, matched entry index |
-| `state_started` | State subprocess spawned | `state_id`, `visit_n`, cli line (Liquid-rendered, secrets-redacted), env var keys, working directory |
-| `state_completed` | State clean exit | `state_id`, `visit_n`, exit code, duration, sentinel directive (when present), head/tail summary of stderr |
-| `state_failed` | State failure | `state_id`, `visit_n`, `failure.kind` per [fr:01 §Failure handling](../fr/01-engine-model.md), `error_text`, head/tail summary of stderr |
-| `failure_unhandled` | A cycle failure with no `on_failure:` match (`marker = none`) | `(ticket.id, cycle.id, cycle.kind, failure.kind, state_id, visit_n, error_text, marker)`. Daemon stays alive; the ticket task drops the cycle and waits for the next admission. Recursive failure-cycle failures and cleanup-time fs errors enter the escalation queue instead — see `escalation_added` ([fr:06 §Failure-handler cycle](../fr/06-failure-handling.md)) |
-| `cycle_completed` | Cycle ends at a terminal | `cycle.kind`, `terminal_id`, `outcome` (terminal-declared or sentinel-overridden), iter count (total state visits), duration |
-| `cycle_aborted` | Cycle aborted (failure or admission lost mid-cycle) | `cycle.kind`, `failure.kind` (if applicable), iter count |
-| `escalation_added` | Escalation queue entry added | Daemon-stuck failure: failure-handler cycle that itself failed, cleanup-time fs error, or daemon-internal error with no cycle association. Carries `(ticket_id?, cycle_id?, failure.kind, state_id?, visit_n?, error_text, marker)`. `marker` ∈ `recursion_bound` / `cleanup_fs` / `daemon_internal`. Cycle-less entries omit ticket / cycle / state context ([fr:06 §Escalation queue](../fr/06-failure-handling.md)) |
+| `cycle_started` (planned) | Cycle begins | `cycle.kind`, `cycle.trigger`, matched entry index |
+| `state_started` (planned) | State subprocess spawned | `state_id`, `visit_n`, cli line (Liquid-rendered, secrets-redacted), env var keys, working directory |
+| `state_completed` (planned) | State clean exit | `state_id`, `visit_n`, exit code, duration, sentinel directive (when present), head/tail summary of stderr |
+| `state_failed` (planned) | State failure | `state_id`, `visit_n`, `failure.kind` per [fr:01 §Failure handling](../fr/01-engine-model.md), `error_text`, head/tail summary of stderr |
+| `failure_unhandled` | A cycle failure with no `on_failure:` match (`marker = none`) | `cycle_id`, `cycle_kind`, `failure: { kind, state_id?, visit_n, exit_code?, error_text }`, `marker`. Daemon stays alive; the ticket task drops the cycle and waits for the next admission. Recursive failure-cycle failures and cleanup-time fs errors enter the escalation queue instead — see `escalation_added` ([fr:06 §Failure-handler cycle](../fr/06-failure-handling.md)) |
+| `cycle_completed` | Cycle ends at a terminal | `cycle_id`, `cycle_kind`, `iters` (total state visits), `terminal_id?`, `outcome?` (terminal-declared or sentinel-overridden) |
+| `cycle_aborted` (planned) | Cycle aborted (failure or admission lost mid-cycle) | `cycle.kind`, `failure.kind` (if applicable), iter count |
+| `escalation_added` | Escalation queue entry added | Daemon-stuck failure: failure-handler cycle that itself failed, cleanup-time fs error, or daemon-internal error with no cycle association. Carries `ticket_id?`, `cycle_id?`, `failure: { kind, state_id?, visit_n, exit_code?, error_text }`. Cycle-less entries omit ticket / cycle / state context ([fr:06 §Escalation queue](../fr/06-failure-handling.md)) |
 
 ## Worktree / session lifecycle
 
 | Event | When | Carries |
 |---|---|---|
-| `worktree_created` | Worktree materialized lazily on first state subprocess launch in the cycle | `repo`, branch name, worktree path |
-| `worktree_deleted` | Worktree removed (cleanup-cycle completion / orphan reconcile). Admission-revoke does not delete worktrees | `repo`, branch name, `reason` ∈ `cleanup` / `orphan` |
-| `session_tempdir_created` | Session tempdir created at admission | `ticket.id`, path |
-| `session_tempdir_deleted` | Session tempdir removed | `ticket.id`, path, `reason` ∈ `cleanup` / `orphan` |
+| `worktree_created` (planned) | Worktree materialized lazily on first state subprocess launch in the cycle | `repo`, branch name, worktree path |
+| `worktree_delete_requested` | Worktree removal requested (cleanup-cycle completion / cleanup-shorthand). Admission-revoke does not delete worktrees | `ticket_id`, `cycle_id?`, `reason` ∈ `cleanup_terminal` / `cleanup_shorthand` |
+| `session_tempdir_created` (planned) | Session tempdir created at admission | `ticket.id`, path |
+| `session_tempdir_deleted` | Session tempdir removed | `ticket_id`, `path`, `reason` ∈ `cleanup` / `orphan` |
 
 ## Cold start
 
@@ -69,11 +71,11 @@ Attached to every event via tracing spans (when in scope).
 
 | Event | When | Carries |
 |---|---|---|
-| `webhook_received` | Linear webhook arrives | Verified flag, payload kind |
+| `webhook_received` (planned) | Linear webhook arrives | Verified flag, payload kind |
 | `webhook_skipped` | Admission failed or no diff | `reason` ∈ `signature_invalid` / `assignee_mismatch` / `repo_unresolvable` / `no_diff`; optional `source` ∈ `webhook` (default; omitted) / `cold_start` |
-| `polling_started` | Outage-driven polling cycle started | `reason` ∈ `webhook_outage` (only outage-driven; nudge-driven uses `refresh_received`) |
-| `polling_completed` | Polling pass finished | Tickets fetched, diffs detected |
-| `refresh_received` | `POST /api/refresh` arrived | Client address, coalescing decision (`fired` / `coalesced` / `dropped_during_backoff`) |
+| `polling_started` (planned) | Outage-driven polling cycle started | `reason` ∈ `webhook_outage` (only outage-driven; nudge-driven uses `refresh_received`) |
+| `polling_completed` (planned) | Polling pass finished | Tickets fetched, diffs detected |
+| `refresh_received` (planned) | `POST /api/refresh` arrived | Client address, coalescing decision (`fired` / `coalesced` / `dropped_during_backoff`) |
 | `linear_backoff_applied` | HTTP 429 received from Linear | Backoff window seconds |
 
 ## HTTP API
@@ -125,6 +127,6 @@ Every state subprocess writes byte-for-byte stdout / stderr to `<session_root>/<
 
 ## Related reference
 
-- [cli.md](cli.md): flags that change logging behavior (`--log-level`)
+- [cli.md](cli.md): flags that change logging behavior
 - [config.md](config.md): `[log]` block — destination / level / ring size
 - [artifacts.md](artifacts.md): per-visit capture artifacts that are not part of the structured log
