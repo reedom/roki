@@ -1,13 +1,8 @@
-#![allow(dead_code)]
-
-//! Live-subprocess registry consulted at drain time.
-//!
-//! `RealStateRunner::run_state` registers right after `Command::spawn` and
-//! deregisters right after `child.wait()` reaps. The shutdown drain reads
-//! the registry at the cumulative shutdown deadline to populate
-//! `Event::ShutdownWindowExceeded.offenders`.
+//! Live-subprocess registry consulted at drain time to identify processes
+//! that did not honour SIGTERM within the shutdown window.
 
 use std::collections::HashMap;
+use std::num::NonZeroU32;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
@@ -19,7 +14,10 @@ pub struct Inflight {
     pub cycle_id: Uuid,
     pub state_id: String,
     pub visit: u32,
-    pub pid: u32,
+    /// `None` when the OS pid was not observable at registration (post-exit
+    /// race in `Child::id()`); the registry still tracks the entry so the
+    /// drain can report it, but the SIGKILL path skips unobservable pids.
+    pub pid: Option<NonZeroU32>,
 }
 
 #[derive(Default, Clone)]
@@ -58,7 +56,7 @@ mod tests {
             cycle_id: Uuid::nil(),
             state_id: "phase-1".into(),
             visit: 1,
-            pid,
+            pid: NonZeroU32::new(pid),
         }
     }
 
@@ -68,7 +66,7 @@ mod tests {
         reg.register(sample("ENG-1", 1234)).await;
         let snap = reg.snapshot().await;
         assert_eq!(snap.len(), 1);
-        assert_eq!(snap[0].pid, 1234);
+        assert_eq!(snap[0].pid, NonZeroU32::new(1234));
     }
 
     #[tokio::test]
@@ -86,6 +84,6 @@ mod tests {
         reg.register(sample("ENG-1", 2)).await;
         let snap = reg.snapshot().await;
         assert_eq!(snap.len(), 1);
-        assert_eq!(snap[0].pid, 2);
+        assert_eq!(snap[0].pid, NonZeroU32::new(2));
     }
 }

@@ -164,6 +164,108 @@ mod tests {
         assert_eq!(std::path::PathBuf::from(out), ghq_base);
     }
 
+    #[cfg(unix)]
+    fn make_stub(dir: &std::path::Path, name: &str, exit: i32) {
+        use std::io::Write as _;
+        use std::os::unix::fs::PermissionsExt as _;
+        let path = dir.join(name);
+        let mut f = std::fs::File::create(&path).unwrap();
+        if exit == 0 {
+            writeln!(f, "#!/bin/sh\nexit 0").unwrap();
+        } else {
+            writeln!(f, "#!/bin/sh\necho 'fake ghq failure' >&2\nexit {exit}").unwrap();
+        }
+        let mut perm = std::fs::metadata(&path).unwrap().permissions();
+        perm.set_mode(0o755);
+        std::fs::set_permissions(&path, perm).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn auto_clone_invokes_ghq_get_then_resolves_path() {
+        let tmp = tempfile::tempdir().unwrap();
+        let stub_bin = tmp.path().join("stub-bin");
+        std::fs::create_dir_all(&stub_bin).unwrap();
+        make_stub(&stub_bin, "ghq", 0);
+        let wt_root = tmp.path().join("wts");
+        std::fs::create_dir_all(&wt_root).unwrap();
+        let ghq_base = tmp.path().join("ghq-base");
+        std::fs::create_dir_all(&ghq_base).unwrap();
+        // Prepend the stub dir so `ghq` resolves to the script.
+        let existing_path = std::env::var("PATH").unwrap_or_default();
+        let new_path = format!("{}:{existing_path}", stub_bin.display());
+        let out = temp_env::async_with_vars(
+            [
+                ("PATH", Some(new_path.as_str())),
+                ("ROKI_WT_ROOT_OVERRIDE", Some(wt_root.to_str().unwrap())),
+                ("ROKI_GHQ_BASE_OVERRIDE", Some(ghq_base.to_str().unwrap())),
+            ],
+            run_test(RepoArgs {
+                ghq: Some("github.com/x/y".into()),
+                ticket: Some("OPS-10".into()),
+                worktree: false,
+                auto_clone: true,
+                config: None,
+            }),
+        )
+        .await
+        .unwrap();
+        // No worktree present; resolution falls back to ghq base.
+        assert_eq!(std::path::PathBuf::from(out), ghq_base);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn auto_clone_propagates_ghq_get_failure() {
+        let tmp = tempfile::tempdir().unwrap();
+        let stub_bin = tmp.path().join("stub-bin");
+        std::fs::create_dir_all(&stub_bin).unwrap();
+        make_stub(&stub_bin, "ghq", 1);
+        let existing_path = std::env::var("PATH").unwrap_or_default();
+        let new_path = format!("{}:{existing_path}", stub_bin.display());
+        let err = temp_env::async_with_vars(
+            [("PATH", Some(new_path.as_str()))],
+            run_test(RepoArgs {
+                ghq: Some("github.com/x/y".into()),
+                ticket: Some("OPS-10".into()),
+                worktree: false,
+                auto_clone: true,
+                config: None,
+            }),
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(err, RepoError::GhqGet(_)));
+    }
+
+    #[tokio::test]
+    async fn env_var_fallback_for_ghq_and_ticket() {
+        let tmp = tempfile::tempdir().unwrap();
+        let wt_root = tmp.path().join("wts");
+        std::fs::create_dir_all(&wt_root).unwrap();
+        let ghq_base = tmp.path().join("ghq-base");
+        std::fs::create_dir_all(&ghq_base).unwrap();
+        let out = temp_env::async_with_vars(
+            [
+                ("ROKI_WT_ROOT_OVERRIDE", Some(wt_root.to_str().unwrap())),
+                ("ROKI_GHQ_BASE_OVERRIDE", Some(ghq_base.to_str().unwrap())),
+                ("ROKI_REPO_GHQ", Some("github.com/x/y")),
+                ("ROKI_TICKET_ID", Some("OPS-10")),
+            ],
+            run_test(RepoArgs {
+                ghq: None,
+                ticket: None,
+                worktree: false,
+                auto_clone: false,
+                config: None,
+            }),
+        )
+        .await
+        .unwrap();
+        // Resolution succeeds using env-supplied ghq + ticket.
+        assert_eq!(std::path::PathBuf::from(out), ghq_base);
+    }
+
     #[tokio::test]
     async fn worktree_flag_strict_failure_when_absent() {
         let tmp = tempfile::tempdir().unwrap();

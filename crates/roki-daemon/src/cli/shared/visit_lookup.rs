@@ -1,8 +1,4 @@
 //! Resolve `visit-NNN` directory paths within a cycle directory.
-//!
-//! Supports absolute (`Some(3)`), negative (`Some(-1)` = latest,
-//! `Some(-2)` = second-to-last), and `None` (= latest) addressing
-//! against the on-disk layout under `session_root/<ticket>/<cycle>/`.
 
 use std::path::{Path, PathBuf};
 
@@ -78,7 +74,7 @@ pub fn visit_dir(cycle_dir: &Path, n: u32) -> PathBuf {
 /// Same as `resolve_iter`, but when `iter == None` and `state_id` is
 /// provided, prefer the highest visit whose `<state_id>.exit_code` is
 /// present on disk (the visit has finished). Falls back to the absolute
-/// latest when no completed visit matches. Per spec §4.2 step 3.
+/// latest when no completed visit matches.
 pub fn resolve_iter_for_state(
     cycle_dir: &Path,
     iter: Option<i32>,

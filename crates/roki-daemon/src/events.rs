@@ -25,7 +25,23 @@ pub struct ShutdownOffender {
     pub cycle_id: String,
     pub state_id: String,
     pub visit: u32,
-    pub pid: u32,
+    /// Absent when the OS pid was not observable at registration; consumers
+    /// must treat a missing field as "live subprocess that escaped pid
+    /// capture" rather than a real pid of 0.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pid: Option<u32>,
+}
+
+impl From<crate::daemon::inflight::Inflight> for ShutdownOffender {
+    fn from(i: crate::daemon::inflight::Inflight) -> Self {
+        ShutdownOffender {
+            ticket_id: i.ticket_id,
+            cycle_id: i.cycle_id.to_string(),
+            state_id: i.state_id,
+            visit: i.visit,
+            pid: i.pid.map(|p| p.get()),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -568,7 +584,7 @@ mod tests {
                 cycle_id: "00000000-0000-0000-0000-000000000001".into(),
                 state_id: "phase-1".into(),
                 visit: 1,
-                pid: 9999,
+                pid: Some(9999),
             }],
         };
         let s = serde_json::to_string(&ev).unwrap();

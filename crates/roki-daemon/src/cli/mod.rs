@@ -1,9 +1,4 @@
 //! CLI parser for the roki binary.
-//!
-//! Top-level `roki` command exposes `run`, `cleanup`, `workflow`, and the
-//! slice-11 subcommands (`log`, `events`, `repo`). [`run`] parses argv,
-//! dispatches the matched subcommand, and returns an [`ExitCode`]
-//! propagated by `main`.
 
 #![allow(dead_code)]
 
@@ -50,18 +45,13 @@ pub enum CliCommand {
     },
     /// Resolve a ticket's worktree path (or ghq base fallback).
     Repo(repo::RepoArgs),
-    /// Read per-ticket subprocess captures (fr:09 §`roki log`).
+    /// Read per-ticket subprocess captures.
     Log(log::LogArgs),
     /// Read the structured event stream (live HTTP or offline file).
     Events(events::EventsArgs),
 }
 
-/// Parse argv from the process and dispatch the matched subcommand.
-///
-/// `clap::Parser::parse` exits the process with a non-zero status on a
-/// parse error (e.g. missing `--config`), so the caller never observes
-/// that failure path here. Successful parses are forwarded to the
-/// matching runtime entry point.
+/// Parse argv and dispatch the matched subcommand.
 pub async fn run() -> ExitCode {
     let cli = Cli::parse();
     match cli.command {

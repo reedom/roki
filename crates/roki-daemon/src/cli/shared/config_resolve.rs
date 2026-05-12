@@ -1,16 +1,13 @@
 //! Resolve `session_root`, API URL, and ticket/cycle identifiers from
-//! `--config`, environment variables, and CLI flags.
-//!
-//! Environment variables (`ROKI_CONFIG_SESSION_ROOT`, `ROKI_API_URL`,
-//! `ROKI_TICKET_ID`, `ROKI_CYCLE_ID`) take precedence over `--config`
-//! when set, so a parent daemon process can inject context without
-//! requiring child subcommands to re-parse `roki.toml`.
+//! environment variables (preferred — lets a parent daemon inject context)
+//! and `--config` (fallback).
 
 use std::path::{Path, PathBuf};
 
 use thiserror::Error;
 
 use crate::config::roki::RokiConfig;
+use crate::error::RokiConfigError;
 
 #[derive(Debug, Error)]
 pub enum ResolveError {
@@ -18,8 +15,14 @@ pub enum ResolveError {
     NoSessionRoot,
     #[error("cannot resolve API URL (set --api, ROKI_API_URL, or --config with [api])")]
     NoApiUrl,
-    #[error("config error: {0}")]
-    Config(String),
+    #[error("ticket missing (pass --ticket or set ROKI_TICKET_ID)")]
+    MissingTicket,
+    #[error("cycle missing (pass --cycle or set ROKI_CYCLE_ID)")]
+    MissingCycle,
+    #[error("cross-ticket read refused")]
+    CrossTicketRefused,
+    #[error("config load failed: {0}")]
+    LoadConfig(#[from] RokiConfigError),
 }
 
 /// Resolve `session_root` from `ROKI_CONFIG_SESSION_ROOT` (preferred,
@@ -33,7 +36,7 @@ pub fn resolve_session_root(config_path: Option<&Path>) -> Result<PathBuf, Resol
         return Ok(PathBuf::from(s));
     }
     let path = config_path.ok_or(ResolveError::NoSessionRoot)?;
-    let cfg = RokiConfig::load(path).map_err(|e| ResolveError::Config(format!("{e}")))?;
+    let cfg = RokiConfig::load(path)?;
     Ok(cfg.paths.session_root)
 }
 
@@ -52,7 +55,7 @@ pub fn resolve_api_url(
         return Ok(s);
     }
     let path = config_path.ok_or(ResolveError::NoApiUrl)?;
-    let cfg = RokiConfig::load(path).map_err(|e| ResolveError::Config(format!("{e}")))?;
+    let cfg = RokiConfig::load(path)?;
     let port = cfg.api.port.ok_or(ResolveError::NoApiUrl)?;
     // `cfg.api.bind` is a non-`Option` String; fall back only when
     // the config supplied an empty value.
@@ -77,7 +80,7 @@ pub fn resolve_ticket_and_cycle(
                 .ok()
                 .filter(|s| !s.is_empty())
         })
-        .ok_or_else(|| ResolveError::Config("ticket missing".into()))?;
+        .ok_or(ResolveError::MissingTicket)?;
     let cycle = cycle_flag
         .map(|s| s.to_string())
         .or_else(|| {
@@ -85,7 +88,7 @@ pub fn resolve_ticket_and_cycle(
                 .ok()
                 .filter(|s| !s.is_empty())
         })
-        .ok_or_else(|| ResolveError::Config("cycle missing".into()))?;
+        .ok_or(ResolveError::MissingCycle)?;
     Ok((ticket, cycle))
 }
 
@@ -98,7 +101,7 @@ pub fn enforce_same_ticket(flag: Option<&str>) -> Result<(), ResolveError> {
         && !env_val.is_empty()
         && flag_val != env_val
     {
-        return Err(ResolveError::Config("cross-ticket read refused".into()));
+        return Err(ResolveError::CrossTicketRefused);
     }
     Ok(())
 }

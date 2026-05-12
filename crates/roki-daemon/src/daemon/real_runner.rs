@@ -43,9 +43,15 @@ impl CycleRunner for RealCycleRunner {
         let mut events = match EventWriter::open(&self.cfg.paths.session_root, &admitted.ticket.id)
         {
             Ok(w) => w,
-            Err(_) => {
+            Err(err) => {
+                tracing::error!(
+                    ticket_id = %admitted.ticket.id,
+                    session_root = %self.cfg.paths.session_root.display(),
+                    error = %err,
+                    "failed to open per-ticket event writer at cycle boot"
+                );
                 return CycleResult::Failed {
-                    meta: boot_failure(),
+                    meta: boot_failure(&err),
                     kind: CycleKind::Rule,
                 };
             }
@@ -420,13 +426,13 @@ pub struct LegacyFailureMeta {
     pub error_text: String,
 }
 
-fn boot_failure() -> LegacyFailureMeta {
+fn boot_failure(err: &std::io::Error) -> LegacyFailureMeta {
     LegacyFailureMeta {
         failed_cycle_id: Uuid::nil(),
         kind: FailureKind::FsPoison,
         state_id: String::new(),
         visit_n: 0,
-        error_text: "runner boot path".into(),
+        error_text: format!("event writer open: {err}"),
     }
 }
 

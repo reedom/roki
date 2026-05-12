@@ -1,8 +1,4 @@
 //! `roki events` — read the structured event stream (online HTTP or offline file).
-//!
-//! Slice 11 lands this command in two tasks: this file implements the
-//! offline JSON-Lines reader path (Task 8). The online HTTP client lands
-//! in Task 9 and replaces the stub in `run_online_dispatch`.
 
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -72,24 +68,22 @@ pub enum EventsError {
 }
 
 pub async fn run(args: EventsArgs) -> ExitCode {
-    let format = args.format;
     if args.offline {
         if args.tail {
             eprintln!("{}", EventsError::OfflineTail);
             return ExitCode::from(2);
         }
-        return run_offline_dispatch(args, format).await;
+        return run_offline_dispatch(args).await;
     }
-    run_online_dispatch(args, format).await
+    run_online_dispatch(args).await
 }
 
-async fn run_offline_dispatch(args: EventsArgs, format: Format) -> ExitCode {
+async fn run_offline_dispatch(args: EventsArgs) -> ExitCode {
     match run_offline_capture(args).await {
         Ok(text) => {
             use std::io::Write;
             let _ = std::io::stdout().write_all(text.as_bytes());
             let _ = std::io::stdout().write_all(b"\n");
-            let _ = format;
             ExitCode::SUCCESS
         }
         Err(err) => {
@@ -99,7 +93,7 @@ async fn run_offline_dispatch(args: EventsArgs, format: Format) -> ExitCode {
     }
 }
 
-async fn run_online_dispatch(args: EventsArgs, _format: Format) -> ExitCode {
+async fn run_online_dispatch(args: EventsArgs) -> ExitCode {
     let base = match resolve_api_url(args.api.as_deref(), args.config.as_deref()) {
         Ok(u) => u,
         Err(e) => {
@@ -160,6 +154,11 @@ async fn run_online(
     // Surface ring gaps to stderr at most once per contiguous run so tail
     // mode doesn't spam when the server keeps returning gap=true.
     let mut gap_reported = false;
+    // Exponential backoff in --tail mode. Resets on every successful page.
+    // Capped so a persistent 5xx loops at most every 30 s.
+    let base_cadence_ms = args.cadence_ms.max(50);
+    let mut backoff_ms: u64 = base_cadence_ms;
+    const BACKOFF_MAX_MS: u64 = 30_000;
     loop {
         let mut req = client.get(&url).query(&[("since", since.to_string())]);
         if let Some(k) = &args.kind {
@@ -172,15 +171,20 @@ async fn run_online(
             req = req.query(&[("cycle", c.as_str())]);
         }
         let page: EventsPage = match fetch_page(req).await {
-            Ok(p) => p,
-            Err(err) if args.tail => {
-                // Transient errors in --tail mode are reported and retried.
-                // Non-tail callers still get the failure as exit 1.
-                eprintln!("# roki events: transient http error: {err}; retrying");
-                tokio::time::sleep(std::time::Duration::from_millis(args.cadence_ms)).await;
+            Ok(p) => {
+                backoff_ms = base_cadence_ms;
+                p
+            }
+            Err(FetchError::Terminal { status, msg }) => {
+                return Err(EventsError::Http(format!("HTTP {status}: {msg}")));
+            }
+            Err(FetchError::Transient(msg)) if args.tail => {
+                eprintln!("# roki events: transient http error: {msg}; retrying in {backoff_ms}ms");
+                tokio::time::sleep(std::time::Duration::from_millis(backoff_ms)).await;
+                backoff_ms = backoff_ms.saturating_mul(2).min(BACKOFF_MAX_MS);
                 continue;
             }
-            Err(err) => return Err(err),
+            Err(FetchError::Transient(msg)) => return Err(EventsError::Http(msg)),
         };
         if page.gap {
             if !gap_reported {
@@ -223,15 +227,35 @@ async fn run_online(
     Ok(())
 }
 
-async fn fetch_page(req: reqwest::RequestBuilder) -> Result<EventsPage, EventsError> {
-    req.send()
+enum FetchError {
+    /// 4xx (except 408/429) — retrying will not change the outcome.
+    Terminal { status: u16, msg: String },
+    /// 5xx, 408, 429, or transport-level failures — safe to retry.
+    Transient(String),
+}
+
+async fn fetch_page(req: reqwest::RequestBuilder) -> Result<EventsPage, FetchError> {
+    let res = req
+        .send()
         .await
-        .map_err(|e| EventsError::Http(format!("{e}")))?
-        .error_for_status()
-        .map_err(|e| EventsError::Http(format!("{e}")))?
-        .json::<EventsPage>()
+        .map_err(|e| FetchError::Transient(format!("{e}")))?;
+    let status = res.status();
+    if status.is_client_error() {
+        let code = status.as_u16();
+        if code == 408 || code == 429 {
+            return Err(FetchError::Transient(format!("HTTP {code}")));
+        }
+        return Err(FetchError::Terminal {
+            status: code,
+            msg: status.to_string(),
+        });
+    }
+    if !status.is_success() {
+        return Err(FetchError::Transient(format!("HTTP {}", status.as_u16())));
+    }
+    res.json::<EventsPage>()
         .await
-        .map_err(|e| EventsError::Http(format!("{e}")))
+        .map_err(|e| FetchError::Transient(format!("{e}")))
 }
 
 fn gap_marker_line(format: Format, since: u64) -> String {

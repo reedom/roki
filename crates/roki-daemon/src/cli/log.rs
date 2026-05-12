@@ -7,7 +7,9 @@ use clap::{Args, ValueEnum};
 use thiserror::Error;
 
 use crate::cli::shared::{
-    config_resolve::{enforce_same_ticket, resolve_session_root, resolve_ticket_and_cycle},
+    config_resolve::{
+        ResolveError, enforce_same_ticket, resolve_session_root, resolve_ticket_and_cycle,
+    },
     tail::{tail_bytes, tail_lines},
     visit_lookup::{list_visits, resolve_iter_for_state, visit_dir},
 };
@@ -87,6 +89,21 @@ pub enum LogError {
     /// Mapped to exit code 2.
     #[error("roki log: {0}")]
     Usage(String),
+}
+
+/// Map a `ResolveError` to the matching `LogError` so the dispatcher's
+/// exit-code table keeps working — `CrossTicketRefused` and the
+/// "missing" variants are usage errors (exit 2), the rest are runtime.
+fn resolve_to_log_err(err: ResolveError) -> LogError {
+    match err {
+        ResolveError::CrossTicketRefused => LogError::CrossTicket,
+        ResolveError::NoSessionRoot => LogError::NoSessionRoot,
+        ResolveError::NoApiUrl => LogError::Resolve(err.to_string()),
+        ResolveError::MissingTicket | ResolveError::MissingCycle => {
+            LogError::Usage(err.to_string())
+        }
+        ResolveError::LoadConfig(e) => LogError::Other(format!("config: {e}")),
+    }
 }
 
 pub async fn run(args: LogArgs) -> ExitCode {
@@ -178,11 +195,10 @@ impl FollowSink for CapturingFollowSink {
 /// every CLI input down to the capture file path and the state id (used
 /// to build the exit-code sentinel).
 fn resolve_follow_target(args: &LogArgs) -> Result<(std::path::PathBuf, String, u64), LogError> {
-    enforce_same_ticket(args.ticket.as_deref()).map_err(|_| LogError::CrossTicket)?;
-    let session_root =
-        resolve_session_root(args.config.as_deref()).map_err(|_| LogError::NoSessionRoot)?;
+    enforce_same_ticket(args.ticket.as_deref()).map_err(resolve_to_log_err)?;
+    let session_root = resolve_session_root(args.config.as_deref()).map_err(resolve_to_log_err)?;
     let (ticket, cycle) = resolve_ticket_and_cycle(args.ticket.as_deref(), args.cycle.as_deref())
-        .map_err(|e| LogError::Resolve(format!("{e}")))?;
+        .map_err(resolve_to_log_err)?;
     let cycle_dir = session_root.join(&ticket).join(format!("cycle-{cycle}"));
     let stream = args
         .stream
@@ -265,11 +281,10 @@ async fn follow_file_for_test(args: LogArgs) -> Result<Vec<u8>, LogError> {
 }
 
 async fn run_capture_inner(args: LogArgs) -> Result<Vec<u8>, LogError> {
-    enforce_same_ticket(args.ticket.as_deref()).map_err(|_| LogError::CrossTicket)?;
-    let session_root =
-        resolve_session_root(args.config.as_deref()).map_err(|_| LogError::NoSessionRoot)?;
+    enforce_same_ticket(args.ticket.as_deref()).map_err(resolve_to_log_err)?;
+    let session_root = resolve_session_root(args.config.as_deref()).map_err(resolve_to_log_err)?;
     let (ticket, cycle) = resolve_ticket_and_cycle(args.ticket.as_deref(), args.cycle.as_deref())
-        .map_err(|e| LogError::Resolve(format!("{e}")))?;
+        .map_err(resolve_to_log_err)?;
     let cycle_dir = session_root.join(&ticket).join(format!("cycle-{cycle}"));
 
     if args.list_visits {
@@ -439,8 +454,6 @@ mod tests {
         })
         .await
         .unwrap();
-        // -1 is the latest = visit-002 by convention in this plan; the spec
-        // §4.2 step 3 defines "Relative -N → take dirs.len() - N (1-indexed)".
         assert_eq!(out, "v2 stdout\n");
     }
 

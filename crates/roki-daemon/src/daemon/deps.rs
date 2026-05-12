@@ -1,6 +1,4 @@
-#![allow(dead_code)]
-
-//! Startup PATH probe for `wt` and `ghq` (fr:12 §Capabilities).
+//! Startup PATH probe for required external CLIs.
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MissingDependency {

@@ -1,9 +1,4 @@
 //! Tail-suffix readers for byte- and line-oriented file slicing.
-//!
-//! `tail_bytes` seeks directly to `len - n` and reads only the suffix.
-//! `tail_lines` walks the file backward in fixed-size chunks so a
-//! multi-MB capture never has to be slurped to retrieve its last few
-//! lines.
 
 use std::io::{Read, Seek, SeekFrom};
 use std::path::Path;
@@ -28,11 +23,6 @@ pub fn tail_bytes(path: &Path, n: u64) -> std::io::Result<Vec<u8>> {
 /// Return the last `n` newline-delimited lines of `path` (including
 /// their terminators). A missing trailing newline on the last line is
 /// preserved verbatim.
-///
-/// Implementation note: walks the file backward in [`TAIL_CHUNK_BYTES`]
-/// windows, counting newlines as it grows the working buffer. Allocates
-/// O(window) memory until enough newlines are seen or BOF is reached,
-/// so a 200 MB capture file with `n = 50` lines stays bounded.
 pub fn tail_lines(path: &Path, n: usize) -> std::io::Result<Vec<u8>> {
     if n == 0 {
         return Ok(Vec::new());
