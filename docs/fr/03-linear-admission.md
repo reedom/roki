@@ -89,6 +89,7 @@ Operators (TUI, external scripts, observability components) can request an out-o
 - **Polling fallback**: implements the cap + 429 backoff contract above, sharing rate-limit accounting with webhook-driven calls.
 - **Refresh nudge**: an out-of-cycle poll request that respects the cap and backoff state.
 - **Single-flight**: the diff cache ensures at most one cycle per ticket at a time. Concurrent observations of the same ticket at the same instant are serialized through the cache; the cycle dispatch step runs only once.
+- **Admission audit log**: every admit/evict transition is mirrored best-effort into the SQLite control-plane store ([`[paths].store_path`](02-configuration.md)). On daemon restart the store's last-admitted set seeds the in-memory diff cache before the cold-start Linear enumerate runs ([07-recovery](07-recovery.md)).
 
 ## Boundaries
 
