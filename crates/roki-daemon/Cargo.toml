@@ -253,6 +253,11 @@ name = "store_cold_start_hint_smoke"
 path = "tests/e2e/store_cold_start_hint_smoke.rs"
 required-features = ["test-support"]
 
+[[test]]
+name = "store_crashed_cycle_recovered_smoke"
+path = "tests/e2e/store_crashed_cycle_recovered_smoke.rs"
+required-features = ["test-support"]
+
 [features]
 # Test-only seam: gates the `ROKI_LINEAR_GRAPHQL_URL` env-var override inside
 # `linear::client` so the release binary always targets the hardcoded endpoint.
