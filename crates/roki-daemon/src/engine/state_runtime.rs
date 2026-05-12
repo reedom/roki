@@ -81,6 +81,12 @@ pub struct CycleContext {
     pub iter: u32,
     /// `roki.toml [engine].max_iterations`.
     pub max_iterations: u32,
+    /// Canonical hyphenated cycle UUID owned by the runner. Phase-3+:
+    /// passed in so `cycle_state::run_cycle` can mirror state transitions
+    /// to the SQLite store keyed on this id. Empty when no store mirror
+    /// is desired (legacy tests, mock runners) — store writes short-circuit
+    /// on the empty string.
+    pub cycle_id: String,
 }
 
 impl CycleContext {

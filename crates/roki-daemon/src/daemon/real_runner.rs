@@ -22,6 +22,7 @@ use crate::engine::state_runtime::CycleContext;
 use crate::escalation::EscalationQueue;
 use crate::events::{Event, EventWriter, FailureMarker, FailureMetaSer, now_rfc3339};
 use crate::workflow::canonical::{RuleEntry, StateMachine};
+use roki_store::models::{CycleKind as StoreCycleKind, CycleOutcome, NewCycle};
 
 pub struct RealCycleRunner {
     pub workflow: Arc<WorkflowConfig>,
@@ -60,7 +61,13 @@ impl CycleRunner for RealCycleRunner {
         let (rule_entry, kind) = match target {
             DispatchTarget::CleanupShorthand => {
                 let cycle_id = Uuid::new_v4();
-                if crate::engine::cleanup::delete_immediate(
+                open_cycle_best_effort(
+                    cycle_id,
+                    &admitted.ticket.id,
+                    CycleKind::Cleanup,
+                    "cleanup-shorthand",
+                );
+                let cleanup_result = crate::engine::cleanup::delete_immediate(
                     &admitted.ticket.id,
                     &admitted.ghq,
                     &self.cfg.paths.session_root,
@@ -68,13 +75,14 @@ impl CycleRunner for RealCycleRunner {
                     &mut events,
                     &self.escalation,
                 )
-                .await
-                .is_err()
-                {
+                .await;
+                if cleanup_result.is_err() {
+                    close_cycle_best_effort(cycle_id, CycleOutcome::Failure);
                     return CycleResult::CleanupFsError {
                         ticket_id: admitted.ticket.id.clone(),
                     };
                 }
+                close_cycle_best_effort(cycle_id, CycleOutcome::Success);
                 return CycleResult::ShorthandDeleted;
             }
             DispatchTarget::Cycle { kind, rule } => (rule, kind),
@@ -84,6 +92,7 @@ impl CycleRunner for RealCycleRunner {
         };
 
         let cycle_id = Uuid::new_v4();
+        open_cycle_best_effort(cycle_id, &admitted.ticket.id, kind, "rule");
         let runner = build_runner(
             &self.cfg,
             admitted,
@@ -120,6 +129,10 @@ impl CycleRunner for RealCycleRunner {
                     terminal_id: Some(result.terminal_id.clone()),
                     outcome: Some(result.outcome.clone()),
                 });
+                close_cycle_best_effort(
+                    cycle_id,
+                    outcome_for_terminal(&result.outcome),
+                );
                 let _ = crate::daemon::cycle_metadata::write_cycle_end(
                     &self.cfg.paths.session_root,
                     &admitted.ticket.id,
@@ -147,6 +160,7 @@ impl CycleRunner for RealCycleRunner {
                 }
             }
             Err(meta) => {
+                close_cycle_best_effort(cycle_id, CycleOutcome::Failure);
                 let _ = crate::daemon::cycle_metadata::write_cycle_end(
                     &self.cfg.paths.session_root,
                     &admitted.ticket.id,
@@ -224,6 +238,12 @@ impl RealCycleRunner {
         };
 
         let handler_cycle_id = Uuid::new_v4();
+        open_cycle_best_effort(
+            handler_cycle_id,
+            &admitted.ticket.id,
+            CycleKind::Failure,
+            "failure-handler",
+        );
         let handler_runner = build_runner(
             &self.cfg,
             admitted,
@@ -268,6 +288,10 @@ impl RealCycleRunner {
                     terminal_id: Some(result.terminal_id.clone()),
                     outcome: Some(result.outcome.clone()),
                 });
+                close_cycle_best_effort(
+                    handler_cycle_id,
+                    outcome_for_terminal(&result.outcome),
+                );
                 let _ = crate::daemon::cycle_metadata::write_cycle_end(
                     &self.cfg.paths.session_root,
                     &admitted.ticket.id,
@@ -281,6 +305,7 @@ impl RealCycleRunner {
                 HandlerDecision::Succeeded
             }
             Err(handler_meta) => {
+                close_cycle_best_effort(handler_cycle_id, CycleOutcome::Failure);
                 let _ = crate::daemon::cycle_metadata::write_cycle_end(
                     &self.cfg.paths.session_root,
                     &admitted.ticket.id,
@@ -397,7 +422,56 @@ fn build_cycle_context(
         task_captures: std::collections::BTreeMap::new(),
         iter: 0,
         max_iterations: cfg.engine.max_iterations,
+        cycle_id: cycle_id.to_string(),
     }
+}
+
+/// Map the daemon-side `CycleKind` enum to the store-side equivalent.
+fn store_cycle_kind(kind: CycleKind) -> StoreCycleKind {
+    match kind {
+        CycleKind::Rule => StoreCycleKind::Rule,
+        CycleKind::Cleanup => StoreCycleKind::Cleanup,
+        CycleKind::Failure => StoreCycleKind::Failure,
+    }
+}
+
+/// Map a terminal outcome string (the workflow author's free-form label) onto
+/// the store's bounded `CycleOutcome` enum. The two outcomes that are not
+/// catch-alls are `no_action` (rule-cycle saw "nothing to do") and `cancelled`
+/// (shutdown interruption); anything else is treated as `success` at the
+/// "did the cycle reach a terminal" level. `Failure` is set on the error path
+/// directly and never flows through this function.
+fn outcome_for_terminal(outcome: &str) -> CycleOutcome {
+    match outcome {
+        "no_action" => CycleOutcome::NoAction,
+        "cancelled" => CycleOutcome::Cancelled,
+        _ => CycleOutcome::Success,
+    }
+}
+
+/// Open a new row in the `cycles` table for this spawn. Best-effort: errors
+/// are warn-logged in `with_store` and never propagated. The daemon owns the
+/// UUID, so the routing-key UUID on emitted events lines up with the row id.
+fn open_cycle_best_effort(cycle_id: Uuid, ticket_id: &str, kind: CycleKind, entry_name: &str) {
+    let new_cycle = NewCycle {
+        id: cycle_id.to_string(),
+        ticket_id: ticket_id.to_string(),
+        kind: store_cycle_kind(kind),
+        entry_name: entry_name.to_string(),
+        started_at: crate::store_handle::now_unix_millis(),
+    };
+    crate::store_handle::with_store("open_cycle", |store| {
+        store.open_cycle(new_cycle.clone()).map(|_| ())
+    });
+}
+
+/// Stamp `outcome` + `ended_at` on the cycle row. Best-effort.
+fn close_cycle_best_effort(cycle_id: Uuid, outcome: CycleOutcome) {
+    let cid = cycle_id.to_string();
+    let ended_at = crate::store_handle::now_unix_millis();
+    crate::store_handle::with_store("close_cycle", move |store| {
+        store.close_cycle(&cid, outcome, ended_at)
+    });
 }
 
 /// Bridge `FailureMetadata` (slice-8 cycle driver) to a legacy-shaped tuple

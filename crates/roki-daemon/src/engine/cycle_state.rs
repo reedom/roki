@@ -69,6 +69,25 @@ where
         };
 
         let visit_n = ctx.bump_visit(&current_id);
+
+        // Phase-3 store mirror: record the FSM tick so external observers
+        // (TUI, /api/tickets/{id}/cycles) can see where the cycle is in
+        // real time. Best-effort: errors are warn-logged inside
+        // `with_store`, never propagated into FSM control flow.
+        if !ctx.cycle_id.is_empty() {
+            let cid = ctx.cycle_id.clone();
+            let sid = current_id.clone();
+            let iter = ctx.iter;
+            crate::store_handle::with_store("set_current_state", |store| {
+                store.set_current_state(&cid, &sid, iter)
+            });
+            let cid = ctx.cycle_id.clone();
+            let sid = current_id.clone();
+            crate::store_handle::with_store("bump_visit", |store| {
+                store.bump_visit(&cid, &sid).map(|_| ())
+            });
+        }
+
         if visit_n > state.max_visits {
             return Err(FailureMetadata {
                 kind: FailureKind::RecursionBound,
