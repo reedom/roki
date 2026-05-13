@@ -9,10 +9,10 @@
 //! `roki.toml` loader.
 //!
 //! Reads the canonical sections (`[linear]`, `[linear.webhook]`,
-//! `[default.ai]`, `[engine]`, `[paths]`, `[log]`, `[escalation]`) per
-//! [`ref:config`](../../../docs/reference/config.md). Slice 8 dropped
-//! `[default.ai.session]` (no more long-lived AI session shape) and
-//! collapsed `[default.ai.command]` into `[default.ai]`.
+//! `[default]`, `[engine]`, `[paths]`, `[log]`, `[escalation]`) per
+//! [`ref:config`](../../../docs/reference/config.md). `[default]` carries
+//! the default subprocess command line; roki is a workflow engine and the
+//! command is opaque (no AI-specific shape).
 //!
 //! `[linear].token` is held in process memory; the hand-rolled `Debug`
 //! impl on `LinearSection` masks it as `***` so tracing emissions of the
@@ -33,7 +33,7 @@ use crate::error::RokiConfigError;
 pub struct RokiConfig {
     pub linear: LinearSection,
     pub linear_webhook: LinearWebhookSection,
-    pub default_ai: DefaultAiSection,
+    pub default: DefaultSection,
     pub engine: EngineSection,
     pub paths: PathsSection,
     pub log: LogSection,
@@ -105,10 +105,11 @@ pub struct LinearWebhookSection {
     pub secret: Option<String>,
 }
 
-/// `[default.ai]` section. Slice 8 collapsed `[default.ai.command]` into
-/// this section and dropped `[default.ai.session]` entirely.
+/// `[default]` section. Default command line for state subprocesses;
+/// the daemon does not parse the cli — it is forwarded verbatim to
+/// the per-state runner.
 #[derive(Clone, Debug)]
-pub struct DefaultAiSection {
+pub struct DefaultSection {
     pub cli: String,
     /// Stdout-silence threshold in seconds; defaults to `300`.
     pub stall_seconds: u32,
@@ -176,7 +177,7 @@ impl fmt::Debug for RokiConfig {
         f.debug_struct("RokiConfig")
             .field("linear", &self.linear)
             .field("linear_webhook", &self.linear_webhook)
-            .field("default_ai", &self.default_ai)
+            .field("default", &self.default)
             .field("engine", &self.engine)
             .field("paths", &self.paths)
             .field("log", &self.log)
@@ -243,7 +244,7 @@ impl RokiConfig {
                 port: 0,
                 secret: None,
             },
-            default_ai: DefaultAiSection {
+            default: DefaultSection {
                 cli: "echo".to_string(),
                 stall_seconds: 300,
             },
@@ -267,7 +268,7 @@ impl RokiConfig {
 struct RawRokiConfig {
     linear: Option<RawLinear>,
     #[serde(rename = "default")]
-    default_block: Option<RawDefaultBlock>,
+    default_section: Option<RawDefault>,
     engine: Option<RawEngine>,
     paths: Option<RawPaths>,
     log: Option<RawLog>,
@@ -278,9 +279,26 @@ struct RawRokiConfig {
 #[derive(Default, Deserialize)]
 #[serde(default)]
 struct RawLinear {
-    token: Option<String>,
+    token: Option<RawSecret>,
     webhook: Option<RawLinearWebhook>,
     polling: Option<RawLinearPolling>,
+}
+
+/// A string that can be supplied inline or sourced from an env var / file.
+/// Used for fields that typically carry secrets (`linear.token`,
+/// `linear.webhook.secret`).
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum RawSecret {
+    Literal(String),
+    Tagged(RawSecretSource),
+}
+
+#[derive(Default, Deserialize)]
+#[serde(default)]
+struct RawSecretSource {
+    env: Option<String>,
+    file: Option<PathBuf>,
 }
 
 #[derive(Default, Deserialize)]
@@ -303,18 +321,12 @@ struct RawApi {
 struct RawLinearWebhook {
     bind: Option<String>,
     port: Option<u16>,
-    secret: Option<String>,
+    secret: Option<RawSecret>,
 }
 
 #[derive(Default, Deserialize)]
 #[serde(default)]
-struct RawDefaultBlock {
-    ai: Option<RawDefaultAi>,
-}
-
-#[derive(Default, Deserialize)]
-#[serde(default)]
-struct RawDefaultAi {
+struct RawDefault {
     cli: Option<String>,
     stall_seconds: Option<i64>,
 }
@@ -353,32 +365,35 @@ impl RawRokiConfig {
     fn validate(self, path: &Path) -> Result<RokiConfig, RokiConfigError> {
         let raw_linear = self.linear.unwrap_or_default();
         let raw_webhook = raw_linear.webhook.unwrap_or_default();
-        let raw_default = self.default_block.unwrap_or_default();
-        let raw_default_ai = raw_default.ai.unwrap_or_default();
+        let raw_default = self.default_section.unwrap_or_default();
         let raw_engine = self.engine.unwrap_or_default();
         let raw_paths = self.paths.unwrap_or_default();
         let raw_log = self.log.unwrap_or_default();
 
         let polling = parse_linear_polling(path, raw_linear.polling.unwrap_or_default())?;
         let linear = LinearSection {
-            token: required_string(path, "linear.token", raw_linear.token)?,
+            token: required_secret(path, "linear.token", raw_linear.token)?,
             polling,
         };
 
+        let webhook_secret = match raw_webhook.secret {
+            Some(raw) => Some(resolve_secret(path, "linear.webhook.secret", raw)?),
+            None => None,
+        };
         let linear_webhook = LinearWebhookSection {
             bind: required_string(path, "linear.webhook.bind", raw_webhook.bind)?,
             port: required_field(path, "linear.webhook.port", raw_webhook.port)?,
-            secret: raw_webhook.secret,
+            secret: webhook_secret,
         };
 
         let stall = parse_stall_seconds(
             path,
-            "default.ai.stall_seconds",
-            raw_default_ai.stall_seconds,
+            "default.stall_seconds",
+            raw_default.stall_seconds,
             300,
         )?;
-        let default_ai = DefaultAiSection {
-            cli: required_string(path, "default.ai.cli", raw_default_ai.cli)?,
+        let default = DefaultSection {
+            cli: required_string(path, "default.cli", raw_default.cli)?,
             stall_seconds: stall,
         };
 
@@ -409,7 +424,7 @@ impl RawRokiConfig {
         Ok(RokiConfig {
             linear,
             linear_webhook,
-            default_ai,
+            default,
             engine,
             paths: paths_section,
             log,
@@ -572,6 +587,68 @@ fn required_string(
     }
 }
 
+/// Resolve a required secret-bearing field, accepting either an inline
+/// literal or `{ env = "VAR" }` / `{ file = "/path" }` notation. Empty
+/// resolved value is treated as missing.
+fn required_secret(
+    path: &Path,
+    key: &'static str,
+    value: Option<RawSecret>,
+) -> Result<String, RokiConfigError> {
+    let raw = value.ok_or_else(|| RokiConfigError::MissingField {
+        path: path.to_path_buf(),
+        key: key.to_string(),
+    })?;
+    let resolved = resolve_secret(path, key, raw)?;
+    if resolved.is_empty() {
+        return Err(RokiConfigError::MissingField {
+            path: path.to_path_buf(),
+            key: key.to_string(),
+        });
+    }
+    Ok(resolved)
+}
+
+/// Resolve a `RawSecret`. File contents are trimmed of trailing
+/// whitespace so a trailing newline from `echo "tok" > /path` does not
+/// poison the value. Specifying both `env` and `file`, or neither, is
+/// rejected.
+fn resolve_secret(
+    path: &Path,
+    key: &'static str,
+    raw: RawSecret,
+) -> Result<String, RokiConfigError> {
+    match raw {
+        RawSecret::Literal(s) => Ok(s),
+        RawSecret::Tagged(src) => match (src.env, src.file) {
+            (Some(_), Some(_)) => Err(RokiConfigError::SourceResolve {
+                path: path.to_path_buf(),
+                key: key.to_string(),
+                detail: "specify exactly one of `env` or `file`".to_string(),
+            }),
+            (None, None) => Err(RokiConfigError::SourceResolve {
+                path: path.to_path_buf(),
+                key: key.to_string(),
+                detail: "must specify `env` or `file`".to_string(),
+            }),
+            (Some(var), None) => {
+                std::env::var(&var).map_err(|_| RokiConfigError::SourceResolve {
+                    path: path.to_path_buf(),
+                    key: key.to_string(),
+                    detail: format!("env var `{var}` is not set"),
+                })
+            }
+            (None, Some(file)) => std::fs::read_to_string(&file)
+                .map(|s| s.trim_end().to_string())
+                .map_err(|e| RokiConfigError::SourceResolve {
+                    path: path.to_path_buf(),
+                    key: key.to_string(),
+                    detail: format!("file `{}` unreadable: {e}", file.display()),
+                }),
+        },
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -599,7 +676,7 @@ token = "x"
 [linear.webhook]
 bind = "127.0.0.1"
 port = 1
-[default.ai]
+[default]
 cli = "echo"
 [engine]
 [paths]
@@ -623,7 +700,7 @@ token = "x"
 [linear.webhook]
 bind = "127.0.0.1"
 port = 1
-[default.ai]
+[default]
 cli = "echo"
 [engine]
 [paths]
@@ -647,7 +724,7 @@ cadence_seconds = 30
 [linear.webhook]
 bind = "127.0.0.1"
 port = 1
-[default.ai]
+[default]
 cli = "echo"
 [engine]
 [paths]
@@ -678,7 +755,7 @@ bind = "127.0.0.1"
 port = 8080
 secret = "wh_secret"
 
-[default.ai]
+[default]
 cli = "claude --print"
 
 [engine]
@@ -704,7 +781,7 @@ destination = "stdout"
         assert_eq!(cfg.linear_webhook.bind, "127.0.0.1");
         assert_eq!(cfg.linear_webhook.port, 8080);
         assert_eq!(cfg.linear_webhook.secret.as_deref(), Some("wh_secret"));
-        assert_eq!(cfg.default_ai.cli, "claude --print");
+        assert_eq!(cfg.default.cli, "claude --print");
         assert_eq!(
             cfg.paths.workflow,
             std::path::PathBuf::from("/etc/roki/WORKFLOW.yaml")
@@ -726,7 +803,7 @@ destination = "stdout"
 bind = "127.0.0.1"
 port = 8080
 
-[default.ai]
+[default]
 cli = "claude --print"
 
 [paths]
@@ -758,7 +835,7 @@ token = "tok"
 [linear.webhook]
 port = 8080
 
-[default.ai]
+[default]
 cli = "claude --print"
 
 [paths]
@@ -847,7 +924,7 @@ token = "x"
 bind = "127.0.0.1"
 port = 8000
 
-[default.ai]
+[default]
 cli = "echo"
 
 [engine]
@@ -875,7 +952,7 @@ token = "t"
 bind = "127.0.0.1"
 port = 7000
 
-[default.ai]
+[default]
 cli = "claude --print"
 
 [engine]
@@ -888,7 +965,7 @@ session_root = "./.roki/sessions"
         let path = dir.path().join("roki.toml");
         std::fs::write(&path, toml).unwrap();
         let cfg = RokiConfig::load(&path).unwrap();
-        assert_eq!(cfg.default_ai.stall_seconds, 300);
+        assert_eq!(cfg.default.stall_seconds, 300);
     }
 
     #[test]
@@ -901,7 +978,7 @@ token = "t"
 bind = "127.0.0.1"
 port = 7000
 
-[default.ai]
+[default]
 cli = "claude --print"
 stall_seconds = 0
 
@@ -917,7 +994,7 @@ session_root = "./.roki/sessions"
         let err = RokiConfig::load(&path).unwrap_err();
         match err {
             RokiConfigError::TypeMismatch { key, .. } => {
-                assert_eq!(key, "default.ai.stall_seconds");
+                assert_eq!(key, "default.stall_seconds");
             }
             other => panic!("expected TypeMismatch, got {other:?}"),
         }
@@ -934,7 +1011,7 @@ token = "x"
 bind = "127.0.0.1"
 port = 8000
 
-[default.ai]
+[default]
 cli = "echo"
 
 [engine]
@@ -965,7 +1042,7 @@ token = "x"
 bind = "127.0.0.1"
 port = 8000
 
-[default.ai]
+[default]
 cli = "echo"
 
 [engine]
@@ -994,7 +1071,7 @@ token = "x"
 bind = "127.0.0.1"
 port = 8000
 
-[default.ai]
+[default]
 cli = "echo"
 
 [engine]
@@ -1025,7 +1102,7 @@ token = "x"
 bind = "127.0.0.1"
 port = 8000
 
-[default.ai]
+[default]
 cli = "echo"
 
 [engine]
@@ -1087,6 +1164,115 @@ session_root = "/tmp/sess"
                 assert_eq!(key, "escalation.queue_size");
             }
             other => panic!("expected TypeMismatch, got {other:?}"),
+        }
+    }
+
+    fn secret_toml(token_line: &str, secret_line: &str) -> String {
+        format!(
+            r#"
+[linear]
+{token_line}
+
+[linear.webhook]
+bind = "127.0.0.1"
+port = 8080
+{secret_line}
+
+[default]
+cli = "echo"
+
+[paths]
+workflow = "/tmp/w.yaml"
+session_root = "/tmp/sess"
+
+[log]
+"#
+        )
+    }
+
+    #[test]
+    fn secret_from_env_missing_var_errors() {
+        // Variable name unique enough that no real environment sets it.
+        // No mutation of the process env (forbidden by workspace
+        // `unsafe_code = "forbid"`); the `env` branch is exercised only
+        // on the missing-var failure path.
+        let body = secret_toml(
+            "token = { env = \"ROKI_TEST_DEFINITELY_UNSET_VAR_xq91\" }",
+            "# no secret",
+        );
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_toml(&dir, &body);
+        let err = RokiConfig::load(&path).expect_err("missing env var must error");
+        match err {
+            RokiConfigError::SourceResolve { key, detail, .. } => {
+                assert_eq!(key, "linear.token");
+                assert!(detail.contains("ROKI_TEST_DEFINITELY_UNSET_VAR_xq91"));
+            }
+            other => panic!("expected SourceResolve, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn secret_from_file_resolves_and_trims_trailing_whitespace() {
+        let dir = tempfile::tempdir().unwrap();
+        let secret_path = dir.path().join("token");
+        std::fs::write(&secret_path, "tok_from_file\n").unwrap();
+        let body = secret_toml(
+            &format!("token = {{ file = \"{}\" }}", secret_path.display()),
+            "# no secret",
+        );
+        let path = write_toml(&dir, &body);
+        let cfg = RokiConfig::load(&path).expect("file source resolves");
+        assert_eq!(cfg.linear.token, "tok_from_file");
+    }
+
+    #[test]
+    fn secret_from_file_missing_errors() {
+        let dir = tempfile::tempdir().unwrap();
+        let body = secret_toml(
+            "token = { file = \"/nonexistent/roki-secret\" }",
+            "# no secret",
+        );
+        let path = write_toml(&dir, &body);
+        let err = RokiConfig::load(&path).expect_err("missing file must error");
+        match err {
+            RokiConfigError::SourceResolve { key, detail, .. } => {
+                assert_eq!(key, "linear.token");
+                assert!(detail.contains("/nonexistent/roki-secret"));
+            }
+            other => panic!("expected SourceResolve, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn secret_both_env_and_file_rejected() {
+        let body = secret_toml(
+            "token = { env = \"X\", file = \"/y\" }",
+            "# no secret",
+        );
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_toml(&dir, &body);
+        let err = RokiConfig::load(&path).expect_err("ambiguous rejected");
+        match err {
+            RokiConfigError::SourceResolve { key, detail, .. } => {
+                assert_eq!(key, "linear.token");
+                assert!(detail.contains("exactly one"));
+            }
+            other => panic!("expected SourceResolve, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn secret_empty_table_rejected() {
+        let body = secret_toml("token = {}", "# no secret");
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_toml(&dir, &body);
+        let err = RokiConfig::load(&path).expect_err("empty table rejected");
+        match err {
+            RokiConfigError::SourceResolve { key, .. } => {
+                assert_eq!(key, "linear.token");
+            }
+            other => panic!("expected SourceResolve, got {other:?}"),
         }
     }
 }

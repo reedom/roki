@@ -131,7 +131,7 @@ token = "x"
 [linear.webhook]
 bind = "127.0.0.1"
 port = 1
-[default.ai]
+[default]
 cli = "echo"
 [engine]
 [paths]

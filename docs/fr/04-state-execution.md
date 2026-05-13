@@ -33,7 +33,7 @@ Permission strategy is not interpreted by the daemon: whatever the operator's cl
 Every state launch is a fresh subprocess. cli source order:
 
 1. State `run: "<inline cmd>"` — the inline string is the cli line itself.
-2. State `uses: "<path>"` — body is loaded from `workflow/*.md`. cli comes from the file's frontmatter `cli:` if set, else `roki.toml [default.ai].cli`.
+2. State `uses: "<path>"` — body is loaded from `workflow/*.md`. cli comes from the file's frontmatter `cli:` if set, else `roki.toml [default].cli`.
 
 Stdin protocol:
 
@@ -116,11 +116,11 @@ The daemon never registers, proxies, or wraps any agent-side tool. Every state s
 - **Operator safety posture**: operators choose the cli line per state. A constrained allowlist or a permissive `--dangerously-skip-permissions` are equally accepted by the daemon.
 
 ```toml
-[default.ai]
+[default]
 cli = "claude -p --output-format stream-json --max-turns 100 --settings ~/.config/roki/claude.settings.json"
 ```
 
-Operators that want a fail-closed mode omit `[default.ai]` and require each state's `uses:` frontmatter `cli:` (or inline `run:`) to set the cli line explicitly.
+Operators that want a fail-closed mode omit `[default]` and require each state's `uses:` frontmatter `cli:` (or inline `run:`) to set the cli line explicitly.
 
 ### Termination handling
 
@@ -144,7 +144,7 @@ The cycle engine routes all `Failure` outcomes through `on_failure:` first-match
 
 Each subprocess has a stall window:
 
-- Default: `roki.toml [default.ai].stall_seconds`.
+- Default: `roki.toml [default].stall_seconds`.
 - Per-file override: `workflow/*.md` frontmatter `stall_seconds: <int>`.
 - Per-state override: `state.timeout` in WORKFLOW.yaml.
 

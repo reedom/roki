@@ -1,5 +1,5 @@
 ---
-# cli / stall_seconds inherit from roki.toml [default.ai] unless overridden here.
+# cli / stall_seconds inherit from roki.toml [default] unless overridden here.
 ---
 
 You are the **verdict** state for Linear ticket `{{ ticket.id }}` on cycle iter `{{ cycle.iter }}`.

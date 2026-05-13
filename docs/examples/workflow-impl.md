@@ -1,6 +1,6 @@
 ---
-# cli omitted → falls back to roki.toml [default.ai].cli
-# stall_seconds omitted → falls back to roki.toml [default.ai].stall_seconds
+# cli omitted → falls back to roki.toml [default].cli
+# stall_seconds omitted → falls back to roki.toml [default].stall_seconds
 ---
 
 You are the **impl** state for Linear ticket `{{ ticket.id }}` (cycle visit `{{ state.visits }}`, total cycle iter `{{ cycle.iter }}`).

@@ -1,6 +1,12 @@
 # Minimal roki.toml — smallest configuration that boots
 # Annotated reference for every key: docs/examples/roki.annotated.toml
 # Schema canonical: docs/reference/config.md
+#
+# `linear.token` and `linear.webhook.secret` accept three forms:
+#   "literal"                    — inline (not recommended)
+#   { env  = "VAR_NAME" }        — read from an environment variable
+#   { file = "/path/to/secret" } — read from a file (trailing whitespace trimmed)
+# Every other string field is a plain TOML scalar.
 
 [linear]
 token = { env = "LINEAR_API_TOKEN" }
@@ -10,7 +16,7 @@ secret = { env = "LINEAR_WEBHOOK_SECRET" }
 bind = "0.0.0.0"
 port = 9090
 
-[default.ai]
+[default]
 cli = "claude -p --output-format stream-json --max-turns 100"
 
 [paths]

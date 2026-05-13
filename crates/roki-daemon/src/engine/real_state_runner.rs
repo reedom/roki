@@ -37,9 +37,8 @@ use super::state_runtime::{CycleContext, StateOutcome, StateRunner, TaskCaptures
 /// Per-cycle state runner. Constructed by `daemon::real_runner` at cycle
 /// start; consumed by `engine::cycle_state::run_cycle` for every state visit.
 pub struct RealStateRunner {
-    /// `[default.ai].cli` from `roki.toml`. Argv source for `uses:` states
-    /// that don't carry a `cli:` frontmatter override (Slice 8 collapses
-    /// `[default.ai.command]` and `[default.ai.session]` into `[default.ai]`).
+    /// `[default].cli` from `roki.toml`. Argv source for `uses:` states
+    /// that don't carry a `cli:` frontmatter override.
     pub default_cli: String,
     /// Stall window applied when neither the cli line nor a state-level
     /// `timeout:` overrides it.

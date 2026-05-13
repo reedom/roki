@@ -28,17 +28,17 @@ Per workspace, specified with `--config <path>` ([cli.md](cli.md)). Not hot-relo
 
 | Block / Key | Required | Type | Default | Validation | Used by |
 |---|---|---|---|---|---|
-| `[linear].token` | yes | string | — | Refuses startup if missing or unresolvable | [fr:03](../fr/03-linear-admission.md) |
+| `[linear].token` | yes | secret-source | — | Refuses startup if missing or unresolvable. Accepts literal, `{ env = "VAR" }`, or `{ file = "PATH" }` (see §Secret source-value notation) | [fr:03](../fr/03-linear-admission.md) |
 | `[linear].polling.cadence_seconds` | no | int | `300` | min `60`; refuses startup below | [fr:03 §Polling fallback](../fr/03-linear-admission.md) |
-| `[linear.webhook].secret` | yes | string | — | Refuses startup if missing | [fr:03 §Webhook intake](../fr/03-linear-admission.md) |
+| `[linear.webhook].secret` | yes | secret-source | — | Refuses startup if present but unresolvable. Same source-value notation as `[linear].token` | [fr:03 §Webhook intake](../fr/03-linear-admission.md) |
 | `[linear.webhook].bind` | yes | bind addr | — | Refuses startup on bind failure. Internet-facing — Linear cloud must reach it | [fr:03 §Webhook intake](../fr/03-linear-admission.md) |
 | `[linear.webhook].port` | yes | port | — | Refuses startup on bind failure | [fr:03 §Webhook intake](../fr/03-linear-admission.md) |
 | `[api].port` | no | port | — (unset → API disabled) | When unset, the observability HTTP server does not start. When set, refuses startup on bind failure | [fr:10 §Server gating and bind](../fr/10-http-api.md) |
 | `[api].bind` | no | bind addr | `127.0.0.1` | Non-loopback emits a warn log noting the absence of authentication | [fr:10 §Server gating and bind](../fr/10-http-api.md) |
 | `[api].ticket_events_window` | no | int | `50` | `1..=500` | [fr:10 §GET /api/tickets/{id}](../fr/10-http-api.md) |
 | `[api].cycle_list_window` | no | int | `50` | `1..=500` | [fr:10 §GET /api/tickets/{id}/cycles](../fr/10-http-api.md) |
-| `[default.ai].cli` | no | string (cli line) | — (no default) | Operator-authored; daemon does not parse the cli line. Liquid-rendered at state launch. Not validated at startup; first failure surfaces as `process_crash` on first state that uses it | [fr:04 §Subprocess shape](../fr/04-state-execution.md) |
-| `[default.ai].stall_seconds` | no | int | `300` | min `1` | [fr:04 §Stall detection](../fr/04-state-execution.md) |
+| `[default].cli` | no | string (cli line) | — (no default) | Operator-authored; daemon does not parse the cli line. Liquid-rendered at state launch. Not validated at startup; first failure surfaces as `process_crash` on first state that uses it | [fr:04 §Subprocess shape](../fr/04-state-execution.md) |
+| `[default].stall_seconds` | no | int | `300` | min `1` | [fr:04 §Stall detection](../fr/04-state-execution.md) |
 | `[engine].max_iterations` | no | int | `10` | min `1` | [fr:01 §Recursion bound](../fr/01-engine-model.md) |
 | `[engine].shutdown_window_seconds` | no | int | `30` | min `1`, max `600` | [fr:12 §Normal shutdown](../fr/12-daemon-lifecycle.md) |
 | `[paths].workflow` | yes | path | `./WORKFLOW.yaml` | Refuses startup if file missing / unreadable | [fr:02](../fr/02-configuration.md) |
@@ -51,6 +51,18 @@ Per workspace, specified with `--config <path>` ([cli.md](cli.md)). Not hot-relo
 | `[escalation].queue_size` | no | int | `64` | `1..=1024` | [fr:06 §Escalation queue](../fr/06-failure-handling.md) |
 
 Validation failure refuses startup and emits the offending key path in the structured log. The default-value column lists canonical defaults; a future schema-version bump is the only path to changing them.
+
+### Secret source-value notation
+
+`[linear].token` and `[linear.webhook].secret` accept three forms:
+
+| Form | Example | Behavior |
+|---|---|---|
+| Literal string | `token = "lin_api_xxx"` | Value used verbatim. |
+| Env reference | `token = { env = "LINEAR_API_TOKEN" }` | Resolved via `std::env::var` at startup. Unset variable refuses startup. |
+| File reference | `token = { file = "/etc/roki/linear-token" }` | File contents read at startup, with trailing whitespace trimmed (so `echo "$tok" > /path` round-trips). Missing or unreadable file refuses startup. |
+
+Specifying both `env` and `file`, or an empty table (`{}`), refuses startup with a `SourceResolve` error naming the key. The notation is **only** accepted on these two fields; every other string-valued config key is a plain TOML scalar.
 
 ## `WORKFLOW.yaml` schema
 
@@ -242,8 +254,8 @@ Each file referenced from a state's `uses:` field has YAML frontmatter and a Liq
 
 | Key | Required | Type | Default | Meaning |
 |---|---|---|---|---|
-| `cli` | no | string (cli line) | falls back to `[default.ai].cli` | Per-file override of the cli line |
-| `stall_seconds` | no | int | falls back to `[default.ai].stall_seconds` | Per-file stall window override |
+| `cli` | no | string (cli line) | falls back to `[default].cli` | Per-file override of the cli line |
+| `stall_seconds` | no | int | falls back to `[default].stall_seconds` | Per-file stall window override |
 
 Body is a Liquid template, rendered against the variables in [fr:01 §Inter-state data flow](../fr/01-engine-model.md). The rendered text is delivered via stdin per [fr:04 §Input channels](../fr/04-state-execution.md).
 
@@ -263,8 +275,9 @@ The following pre-pivot keys are removed and **explicitly refused** by the loade
 | `[linear].webhook_secret` | `roki.toml` | Moved into `[linear.webhook].secret` alongside the webhook receiver's bind/port |
 | `[linear].admit_states` | `roki.toml` | Status filter now derived from the union of `when.status` values across `rules:` and `cleanup:` entries; explicit allowlist no longer needed |
 | `[[repos]]` | `roki.toml` | Repo allowlist moved into `WORKFLOW.yaml admission.repos` |
-| `[default.ai.session]` (entire block) | `roki.toml` | Session-shape subprocesses removed; every state is command-shape. Use `[default.ai]` |
-| `[default.ai.command]` (entire block) | `roki.toml` | Renamed to `[default.ai]` (single block; no shape distinction) |
+| `[default.ai.session]` (entire block) | `roki.toml` | Session-shape subprocesses removed; every state is command-shape. Use `[default]` |
+| `[default.ai.command]` (entire block) | `roki.toml` | Renamed to `[default]` (single block; no shape distinction) |
+| `[default.ai]` | `roki.toml` | Renamed to `[default]`; roki is a linear-workflow engine, the cli is opaque to the daemon and no longer AI-specific |
 | `[permissions].strategy` | `roki.toml` | Permission strategy is now pass-through: whatever the operator's cli line declares (`--dangerously-skip-permissions`, `--settings`, etc.) is what the subprocess sees |
 | `[judge].*` | `roki.toml` | Pre-admission judge removed; admission is purely mechanical (assignee + repo allowlist) |
 | `extension.orchestrator.*` | `WORKFLOW.md` | Orchestrator session removed |

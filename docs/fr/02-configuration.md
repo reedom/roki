@@ -29,7 +29,7 @@ refs:
 
 Operators specify the path with `--config <path>` ([12-daemon-lifecycle](12-daemon-lifecycle.md)). The file groups into:
 
-- **Linear access**: API token, polling cadence. The assignee identifier lives in WORKFLOW.yaml `[admission]`, not here.
+- **Linear access**: API token, polling cadence. The assignee identifier lives in WORKFLOW.yaml `[admission]`, not here. Token and webhook secret accept `{ env = "VAR" }` and `{ file = "/path" }` notation in addition to inline literal strings; see [`ref:config §Secret source-value notation`](../reference/config.md).
 - **Linear webhook receiver** (`[linear.webhook]`, required): bind address, port, and HMAC secret for the **internet-facing** webhook ingress. Required because Linear strongly recommends webhook ingestion over polling.
 - **Observability HTTP API** (`[api]`, optional): bind address and port for the **read-only** observability surface consumed by `roki-tui` and `roki events`. Default loopback. If `[api].port` is unset the server does not start.
 - **AI default CLI**: the cli line and stall window the daemon uses when a state declares `uses:` with no per-file `cli:` override (or runs an inline `run:` that defers to the default).
@@ -37,7 +37,7 @@ Operators specify the path with `--config <path>` ([12-daemon-lifecycle](12-daem
 - **Paths**: where to load WORKFLOW.yaml from, where to put session tempdirs.
 - **Log destination**: the structured event log goes to stdout, a file, or both, with operator-set rotation policy.
 
-Any invalid value or resolution failure (`[admission].assignee` cannot be resolved against the Linear API token holder, WORKFLOW.yaml path missing, token missing, `[linear.webhook]` missing, etc.) **refuses startup** and emits the offending field in the structured log. `[api]` is optional and its absence is logged at info severity but does not refuse startup. `[default.ai].cli` is **not** validated at startup (the daemon does not parse the cli string); its first failure surfaces as `process_crash` on the first state that uses it.
+Any invalid value or resolution failure (`[admission].assignee` cannot be resolved against the Linear API token holder, WORKFLOW.yaml path missing, token missing, `[linear.webhook]` missing, etc.) **refuses startup** and emits the offending field in the structured log. `[api]` is optional and its absence is logged at info severity but does not refuse startup. `[default].cli` is **not** validated at startup (the daemon does not parse the cli string); its first failure surfaces as `process_crash` on the first state that uses it.
 
 `roki.toml` itself is not hot-reloaded; changing it requires a daemon restart. The exact name, default, and validation rule for each key live in the "roki.toml schema" table in [`docs/reference/config.md`](../reference/config.md).
 
@@ -45,11 +45,11 @@ A canonical layout:
 
 ```toml
 [linear]
-token = "lin_api_..."
-polling.cadence_seconds = 300   # default 300, validation min 60. Polling runs only as a fallback when webhook ingress is unavailable.
+token = { env = "LINEAR_API_TOKEN" }   # or `{ file = "/path" }` or inline literal
+polling.cadence_seconds = 300          # default 300, validation min 60. Polling runs only as a fallback when webhook ingress is unavailable.
 
 [linear.webhook]
-secret = "..."
+secret = { env = "LINEAR_WEBHOOK_SECRET" }
 bind = "0.0.0.0"   # internet-facing ingress; Linear cloud must reach it
 port = 9090
 
@@ -59,7 +59,7 @@ port = 9090
 bind = "127.0.0.1"   # loopback default; non-loopback emits a warn log at startup
 port = 8080
 
-[default.ai]
+[default]
 cli = "claude -p --output-format stream-json --max-turns 100"
 stall_seconds = 300
 
@@ -177,7 +177,7 @@ Each rule entry declares a state machine via either the `tasks:` sugar form (lin
 Every state declares exactly one of `run:` / `uses:` (mutually exclusive):
 
 - `run.cmd: <inline cmd>` — inline shell command form. Liquid-rendered, then spawned via `sh -c` (POSIX) / `cmd /C` (Windows).
-- `uses: <path>` — file form. Path resolution per [`ref:config §Path resolution`](../reference/config.md). The file's frontmatter (`cli`, `stall_seconds`) overrides `roki.toml [default.ai].cli` / `stall_seconds` per file. Body is a Liquid template.
+- `uses: <path>` — file form. Path resolution per [`ref:config §Path resolution`](../reference/config.md). The file's frontmatter (`cli`, `stall_seconds`) overrides `roki.toml [default].cli` / `stall_seconds` per file. Body is a Liquid template.
 
 Every state is command-shape: each visit spawns a fresh subprocess. There is no long-lived AI session shared across states or visits. Operators relying on Claude / Codex conversational continuity drive it inside a single state's process (e.g. one stream-json invocation that holds the conversation).
 
@@ -187,8 +187,8 @@ Each file referenced from a state's `uses:` field has YAML frontmatter and a Liq
 
 ```yaml
 ---
-cli: ""                # optional override; falls back to roki.toml [default.ai].cli
-stall_seconds: 600     # optional override of [default.ai].stall_seconds
+cli: ""                # optional override; falls back to roki.toml [default].cli
+stall_seconds: 600     # optional override of [default].stall_seconds
 ---
 {Liquid body}
 ```
@@ -215,7 +215,7 @@ stall_seconds: 600     # optional override of [default.ai].stall_seconds
 - **Per-repo workflow split (optional)**: operators with multiple repos can keep a top-level WORKFLOW.yaml plus per-repo files via `[[admission.repos]] workflow: ...`.
 - **Defaulted-key logging**: when an unspecified key falls back to its default, the startup log records which key did so.
 - **Hot-reload safe**: invalid values do not crash the daemon (the previous policy is retained).
-- **Engine-agnostic CLI line**: `[default.ai].cli` accepts any cli that speaks the operator's chosen protocol (exit-code + sentinel-file directive). Operators can switch between claude, codex, or any equivalent without touching the daemon.
+- **Engine-agnostic CLI line**: `[default].cli` accepts any cli that speaks the operator's chosen protocol (exit-code + sentinel-file directive). Operators can switch between claude, codex, or any equivalent without touching the daemon.
 
 ## Boundaries
 

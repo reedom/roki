@@ -157,7 +157,7 @@ The single exception is admission-filter failure mid-cycle (assignee revoked, re
 
 ### Stall detection
 
-Each subprocess has a stall window. Default lives in `roki.toml [default.ai].stall_seconds`. Per-file override in `workflow/*.md` frontmatter. Per-state override via `state.timeout`.
+Each subprocess has a stall window. Default lives in `roki.toml [default].stall_seconds`. Per-file override in `workflow/*.md` frontmatter. Per-state override via `state.timeout`.
 
 Canonical defaults and validation rules live in [`docs/reference/config.md`](../reference/config.md).
 

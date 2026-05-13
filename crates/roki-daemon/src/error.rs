@@ -45,6 +45,13 @@ pub enum RokiConfigError {
         key: String,
         expected: &'static str,
     },
+
+    #[error("roki.toml at {path} key '{key}' source resolution failed: {detail}")]
+    SourceResolve {
+        path: PathBuf,
+        key: String,
+        detail: String,
+    },
 }
 
 /// Errors raised while loading `WORKFLOW.yaml` or `workflow/*.md` frontmatter.

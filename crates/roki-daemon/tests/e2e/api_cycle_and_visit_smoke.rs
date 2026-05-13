@@ -73,7 +73,7 @@ token = "linear-test-token"
 bind = "127.0.0.1"
 port = {webhook_port}
 
-[default.ai]
+[default]
 cli = "echo"
 
 [engine]

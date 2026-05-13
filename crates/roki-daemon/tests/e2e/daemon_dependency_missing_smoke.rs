@@ -45,7 +45,7 @@ token = "linear-test-token"
 bind = "127.0.0.1"
 port = 12345
 
-[default.ai]
+[default]
 cli = "echo"
 
 [engine]

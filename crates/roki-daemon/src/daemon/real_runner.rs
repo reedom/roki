@@ -342,8 +342,8 @@ fn build_runner(
     let session_tempdir =
         session_root.join(crate::capture::sanitize_ticket_id(&admitted.ticket.id));
     RealStateRunner {
-        default_cli: cfg.default_ai.cli.clone(),
-        default_stall_seconds: cfg.default_ai.stall_seconds,
+        default_cli: cfg.default.cli.clone(),
+        default_stall_seconds: cfg.default.stall_seconds,
         ticket_id: admitted.ticket.id.clone(),
         ghq: admitted.ghq.clone(),
         session_root,

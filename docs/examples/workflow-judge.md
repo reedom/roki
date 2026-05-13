@@ -1,6 +1,6 @@
 ---
-# cli omitted → falls back to roki.toml [default.ai].cli
-# stall_seconds omitted → falls back to roki.toml [default.ai].stall_seconds
+# cli omitted → falls back to roki.toml [default].cli
+# stall_seconds omitted → falls back to roki.toml [default].stall_seconds
 ---
 
 You are the **judge** state for Linear ticket `{{ ticket.id }}` on cycle visit `{{ state.visits }}` (total iter `{{ cycle.iter }}` of `{{ config.max_iterations }}`).

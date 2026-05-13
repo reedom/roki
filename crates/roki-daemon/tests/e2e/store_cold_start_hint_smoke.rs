@@ -92,7 +92,7 @@ port = {port}
 bind = "127.0.0.1"
 port = {api_port}
 
-[default.ai]
+[default]
 cli = "echo"
 
 [engine]

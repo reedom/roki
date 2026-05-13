@@ -2,10 +2,11 @@
 # Schema canonical: docs/reference/config.md
 # Minimal working: docs/examples/roki.minimal.toml
 #
-# Source-value notation:
-#   { env  = "VAR_NAME" }            — read from an environment variable
-#   { file = "/path/to/secret" }     — read from a file (newline trimmed)
+# Source-value notation (accepted only for `linear.token` and
+# `linear.webhook.secret`; every other string field is a plain TOML scalar):
 #   "literal-value"                  — written inline (not recommended for secrets)
+#   { env  = "VAR_NAME" }            — read from an environment variable
+#   { file = "/path/to/secret" }     — read from a file (trailing whitespace trimmed)
 #
 # roki.toml is NOT hot-reloaded; changes require a daemon restart.
 # WORKFLOW.yaml + workflow/*.md are restart-only in slice 8 (hot reload deferred).
@@ -14,9 +15,10 @@
 # [linear] — Linear access (required)
 # ============================================================
 [linear]
-# Where to fetch the API token from. Refuses startup if it cannot be resolved
+# Linear API token. Refuses startup if missing or empty.
 token = { env = "LINEAR_API_TOKEN" }
 # Alternative: token = { file = "/etc/roki/linear-token" }
+# Alternative: token = "lin_api_literal_value"
 
 # Polling fallback cadence (seconds). Default 300, validation min 60.
 # Polling is activated by webhook outage detection or by POST /api/refresh
@@ -44,13 +46,13 @@ bind = "127.0.0.1"   # default 127.0.0.1; non-loopback emits a warn log noting a
 port = 8080          # omit to disable the API
 
 # ============================================================
-# [default.ai] — Default cli for state subprocesses (optional)
+# [default] — Default cli for state subprocesses (optional)
 # ============================================================
 # Used when a state's `uses:` file frontmatter declares no `cli:` override (or
 # omits the key). Every state visit spawns a fresh subprocess; there is no
 # session-shape. The daemon does not parse the cli line — its first failure
 # surfaces as `process_crash` on the first state that uses it.
-[default.ai]
+[default]
 cli = "claude -p --output-format stream-json --max-turns 100"
 stall_seconds = 300   # default 300
 

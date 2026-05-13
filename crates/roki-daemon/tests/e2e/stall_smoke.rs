@@ -75,7 +75,7 @@ token = "linear-test-token"
 bind = "127.0.0.1"
 port = {port}
 
-[default.ai]
+[default]
 cli = "true"
 stall_seconds = 1
 
